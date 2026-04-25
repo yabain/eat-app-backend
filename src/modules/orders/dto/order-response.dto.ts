@@ -1,0 +1,112 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { OrderStatus } from '../../../common/enums/order-status.enum';
+import { PaymentStatus } from '../../../common/enums/payment-status.enum';
+import { PaginationMetaDto } from '../../../common/dto/response.dto';
+
+export class OrderItemResponseDto {
+  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
+  menuItemId: string;
+
+  @ApiProperty({ example: 'Poulet DG' })
+  name: string;
+
+  @ApiProperty({ example: 3500 })
+  unitPrice: number;
+
+  @ApiProperty({ example: 200 })
+  packagingCost: number;
+
+  @ApiProperty({ example: 2 })
+  quantity: number;
+
+  @ApiProperty({ example: 7000 })
+  subtotal: number;
+}
+
+export class DeliveryAddressResponseDto {
+  @ApiProperty({ example: 'Douala' })
+  city: string;
+
+  @ApiProperty({ example: 'Akwa' })
+  district: string;
+
+  @ApiProperty({ example: 'Immeuble blanc, 2e étage' })
+  details: string;
+}
+
+export class PricingSnapshotResponseDto {
+  @ApiProperty({ example: 5000 })
+  itemsSubtotal: number;
+
+  @ApiProperty({ example: 400 })
+  packagingTotal: number;
+
+  @ApiProperty({ example: 1500 })
+  deliveryFee: number;
+
+  @ApiProperty({ example: 500 })
+  platformFee: number;
+
+  @ApiProperty({ example: 500 })
+  promoDiscount: number;
+
+  @ApiProperty({ example: 6900 })
+  grandTotal: number;
+}
+
+export class OrderPreviewResponseDto {
+  @ApiProperty({ type: PricingSnapshotResponseDto })
+  pricingSnapshot: PricingSnapshotResponseDto;
+}
+
+export class OrderResponseDto {
+  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
+  _id: string;
+
+  @ApiProperty({ example: 'ORD-1713640000000-ABCDE' })
+  orderNumber: string;
+
+  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
+  userId: string;
+
+  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
+  restaurantId: string;
+
+  @ApiProperty({ type: [OrderItemResponseDto] })
+  items: OrderItemResponseDto[];
+
+  @ApiProperty({ type: DeliveryAddressResponseDto })
+  deliveryAddress: DeliveryAddressResponseDto;
+
+  @ApiProperty({ type: PricingSnapshotResponseDto })
+  pricingSnapshot: PricingSnapshotResponseDto;
+
+  @ApiPropertyOptional({ example: 'WELCOME500' })
+  promoCode?: string;
+
+  @ApiProperty({ enum: PaymentStatus, example: PaymentStatus.PENDING })
+  paymentStatus: PaymentStatus;
+
+  @ApiProperty({ enum: OrderStatus, example: OrderStatus.PENDING_PAYMENT })
+  orderStatus: OrderStatus;
+
+  @ApiPropertyOptional({ example: 'Appeler à l’arrivée' })
+  notes?: string;
+
+  @ApiPropertyOptional({ example: '665d58e63d7bfeb8f7f6172e', nullable: true })
+  assignedDriverId?: string | null;
+
+  @ApiPropertyOptional({ example: '2026-04-25T12:00:00.000Z' })
+  createdAt?: string;
+
+  @ApiPropertyOptional({ example: '2026-04-25T12:00:00.000Z' })
+  updatedAt?: string;
+}
+
+export class PaginatedOrdersResponseDto {
+  @ApiProperty({ type: [OrderResponseDto] })
+  data: OrderResponseDto[];
+
+  @ApiProperty({ type: PaginationMetaDto })
+  meta: PaginationMetaDto;
+}

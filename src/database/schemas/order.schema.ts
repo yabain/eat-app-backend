@@ -1,0 +1,45 @@
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { HydratedDocument, Types } from 'mongoose';
+import { OrderStatus } from '../../common/enums/order-status.enum';
+import { PaymentStatus } from '../../common/enums/payment-status.enum';
+export type OrderDocument = HydratedDocument<Order>;
+
+class OrderItem {
+  @Prop({ type: Types.ObjectId, ref: 'MenuItem', required: true }) menuItemId: Types.ObjectId;
+  @Prop({ required: true }) name: string;
+  @Prop({ required: true }) unitPrice: number;
+  @Prop({ required: true }) packagingCost: number;
+  @Prop({ required: true }) quantity: number;
+  @Prop({ required: true }) subtotal: number;
+}
+class DeliveryAddress {
+  @Prop({ required: true }) city: string;
+  @Prop({ required: true }) district: string;
+  @Prop({ required: true }) details: string;
+}
+class PricingSnapshot {
+  @Prop({ required: true }) itemsSubtotal: number;
+  @Prop({ required: true }) packagingTotal: number;
+  @Prop({ required: true }) deliveryFee: number;
+  @Prop({ required: true }) platformFee: number;
+  @Prop({ required: true }) promoDiscount: number;
+  @Prop({ required: true }) grandTotal: number;
+}
+
+@Schema({ timestamps: true })
+export class Order {
+  @Prop({ required: true, unique: true }) orderNumber: string;
+  @Prop({ type: Types.ObjectId, ref: 'User', required: true }) userId: Types.ObjectId;
+  @Prop({ type: Types.ObjectId, ref: 'Restaurant', required: true }) restaurantId: Types.ObjectId;
+  @Prop({ type: [Object], default: [] }) items: OrderItem[];
+  @Prop({ type: Object, required: true }) deliveryAddress: DeliveryAddress;
+  @Prop({ type: Object, required: true }) pricingSnapshot: PricingSnapshot;
+  @Prop() promoCode?: string;
+  @Prop({ enum: Object.values(PaymentStatus), default: PaymentStatus.PENDING })
+  paymentStatus: string;
+  @Prop({ enum: Object.values(OrderStatus), default: OrderStatus.PENDING_PAYMENT })
+  orderStatus: string;
+  @Prop() notes?: string;
+  @Prop({ type: Types.ObjectId, ref: 'User', default: null }) assignedDriverId?: Types.ObjectId;
+}
+export const OrderSchema = SchemaFactory.createForClass(Order);
