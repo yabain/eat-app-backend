@@ -19,8 +19,6 @@ import { OrderPreviewResponseDto, OrderResponseDto, PaginatedOrdersResponseDto }
 @Controller('orders')
 export class OrdersController {
   constructor(private readonly service: OrdersService) {}
-  @Roles(UserRole.CLIENT)
-  @UseGuards(RolesGuard)
   @Post('preview')
   @ApiOperation({ summary: 'Prévisualiser le prix de la commande' })
   @ApiBody({ type: PreviewOrderDto })

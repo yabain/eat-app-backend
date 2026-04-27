@@ -55,6 +55,12 @@ export class PromoCodesService {
     if (!item) throw new NotFoundException('Promo code not found');
     return item;
   }
+
+  async findByCode(code: string) {
+    const item = await this.model.findOne({ code: code.toUpperCase() });
+    if (!item) throw new NotFoundException('Promo code not found');
+    return item;
+  }
   async validateCode(code: string, orderAmount: number, restaurantId?: string) {
     const promo = await this.model.findOne({ code: code.toUpperCase(), isActive: true });
     if (!promo) throw new NotFoundException('Promo code not found');

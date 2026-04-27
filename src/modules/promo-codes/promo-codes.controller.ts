@@ -18,7 +18,7 @@ import {
 @ApiTags('promo-codes')
 @Controller('promo-codes')
 export class PromoCodesController {
-  constructor(private readonly service: PromoCodesService) {}
+  constructor(private readonly service: PromoCodesService) { }
   @UseGuards(JwtAuthGuard)
   @Post('validate')
   @ApiBearerAuth('bearer')
@@ -28,6 +28,7 @@ export class PromoCodesController {
   validate(@Body() body: ValidatePromoCodeDto) {
     return this.service.validateCode(body.code, body.orderAmount, body.restaurantId);
   }
+
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Get()
@@ -52,6 +53,23 @@ export class PromoCodesController {
   ) {
     return this.service.findAll(query.page, query.limit, { q, code, isActive, isExpired });
   }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('by-code/:code')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Récupérer un code promo par son code' })
+  @ApiParam({ name: 'code', example: 'WELCOME500' })
+  @ApiOkResponse({ description: 'Code promo trouvé', type: PromoCodeResponseDto })
+  findByCode(@Param('code') code: string) { return this.service.findByCode(code); }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('lookup')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Récupérer un code promo par query param' })
+  @ApiQuery({ name: 'code', required: true, type: String, example: 'WELCOME500' })
+  @ApiOkResponse({ description: 'Code promo trouvé', type: PromoCodeResponseDto })
+  findByCodeQuery(@Query('code') code: string) { return this.service.findByCode(code); }
+
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Get(':id')
@@ -60,6 +78,7 @@ export class PromoCodesController {
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiOkResponse({ description: 'Code promo trouvé', type: PromoCodeResponseDto })
   findOne(@Param('id') id: string) { return this.service.findOne(id); }
+
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Post()
@@ -68,6 +87,7 @@ export class PromoCodesController {
   @ApiBody({ type: CreatePromoCodeDto })
   @ApiCreatedResponse({ description: 'Code promo créé', type: PromoCodeResponseDto })
   create(@Body() dto: CreatePromoCodeDto) { return this.service.create(dto); }
+
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Patch(':id')
@@ -77,6 +97,7 @@ export class PromoCodesController {
   @ApiBody({ type: UpdatePromoCodeDto })
   @ApiOkResponse({ description: 'Code promo mis à jour', type: PromoCodeResponseDto })
   update(@Param('id') id: string, @Body() dto: UpdatePromoCodeDto) { return this.service.update(id, dto); }
+
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Patch(':id/activate')
@@ -85,6 +106,7 @@ export class PromoCodesController {
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiOkResponse({ description: 'Code promo activé', type: PromoCodeResponseDto })
   activate(@Param('id') id: string) { return this.service.activate(id); }
+
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Patch(':id/deactivate')
@@ -93,6 +115,7 @@ export class PromoCodesController {
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiOkResponse({ description: 'Code promo désactivé', type: PromoCodeResponseDto })
   deactivate(@Param('id') id: string) { return this.service.deactivate(id); }
+  
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Delete(':id')

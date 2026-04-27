@@ -35,9 +35,13 @@ export class CartsService {
     );
   }
 
+  private populateCart(id: any) {
+    return this.cartModel.findById(id).populate('items.menuItemId').populate('restaurantId');
+  }
+
   async getMyCart(userId: string) {
     const cart = await this.findOrCreateCart(userId);
-    return this.cartModel.findById(cart._id).populate('items.menuItemId');
+    return this.populateCart(cart._id);
   }
 
   async addItem(userId: string, dto: AddCartItemDto) {
@@ -60,38 +64,55 @@ export class CartsService {
       cart.items.push({ menuItemId: new Types.ObjectId(dto.menuItemId), quantity: dto.quantity } as any);
     }
     cart.restaurantId = menuItem.restaurantId;
-    await cart.save();
-    return this.cartModel.findById(cart._id).populate('items.menuItemId');
+    await Promise.all([
+      cart.save(),
+      this.menuModel.findByIdAndUpdate(dto.menuItemId, { $inc: { stock: -dto.quantity } }),
+    ]);
+    return this.populateCart(cart._id);
   }
 
   async updateItem(userId: string, menuItemId: string, dto: UpdateCartItemDto) {
-    const menuItem = await this.findMenuItemOrFail(menuItemId);
-    if (dto.quantity > menuItem.stock) {
-      throw new BadRequestException('Requested quantity exceeds available stock');
-    }
     const cart = await this.findOrCreateCart(userId);
     const item = cart.items.find((i) => String(i.menuItemId) === menuItemId);
     if (!item) throw new NotFoundException('Item not found in cart');
-    item.quantity = dto.quantity;
-    await cart.save();
-    return this.cartModel.findById(cart._id).populate('items.menuItemId');
+
+    const delta = item.quantity - dto.quantity;
+    const menuItem = await this.findMenuItemOrFail(menuItemId);
+    if (menuItem.stock + delta < 0) {
+      throw new BadRequestException('Requested quantity exceeds available stock');
+    }
+
+    const updated = await this.cartModel.findOneAndUpdate(
+      { _id: cart._id, 'items.menuItemId': new Types.ObjectId(menuItemId) },
+      { $set: { 'items.$.quantity': dto.quantity } },
+      { new: true },
+    );
+    await this.menuModel.findByIdAndUpdate(menuItemId, { $inc: { stock: delta } });
+    return this.populateCart(updated._id);
   }
 
   async removeItem(userId: string, menuItemId: string) {
     const cart = await this.findOrCreateCart(userId);
-    const nextItems = cart.items.filter((i) => String(i.menuItemId) !== menuItemId);
-    if (nextItems.length === cart.items.length) throw new NotFoundException('Item not found in cart');
-    cart.items = nextItems as any;
+    const item = cart.items.find((i) => String(i.menuItemId) === menuItemId);
+    if (!item) throw new NotFoundException('Item not found in cart');
+
+    cart.items = cart.items.filter((i) => String(i.menuItemId) !== menuItemId) as any;
     if (cart.items.length === 0) cart.restaurantId = null;
-    await cart.save();
-    return this.cartModel.findById(cart._id).populate('items.menuItemId');
+    await Promise.all([
+      cart.save(),
+      this.menuModel.findByIdAndUpdate(menuItemId, { $inc: { stock: item.quantity } }),
+    ]);
+    return this.populateCart(cart._id);
   }
 
   async clear(userId: string) {
     const cart = await this.findOrCreateCart(userId);
+    const stockUpdates = cart.items.map((i) =>
+      this.menuModel.findByIdAndUpdate(String(i.menuItemId), { $inc: { stock: i.quantity } }),
+    );
     cart.items = [];
     cart.restaurantId = null;
-    await cart.save();
+    await Promise.all([cart.save(), ...stockUpdates]);
     return { ok: true };
   }
 }

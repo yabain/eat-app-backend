@@ -96,14 +96,14 @@ export class RestaurantsController {
   @ApiCreatedResponse({ description: 'Restaurant créé', type: RestaurantResponseDto })
   create(@Body() dto: CreateRestaurantDto) { return this.service.create(dto); }
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Patch(':id')
   @ApiBearerAuth('bearer')
-  @ApiOperation({ summary: 'Mettre à jour un restaurant (admin)' })
+  @ApiOperation({ summary: 'Mettre à jour un restaurant (admin ou manager de ce restaurant)' })
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiBody({ type: UpdateRestaurantDto })
   @ApiOkResponse({ description: 'Restaurant mis à jour', type: RestaurantResponseDto })
-  update(@Param('id') id: string, @Body() dto: UpdateRestaurantDto) { return this.service.update(id, dto); }
+  update(@Param('id') id: string, @Body() dto: UpdateRestaurantDto, @Req() req: any) { return this.service.update(id, dto, req.user); }
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Patch(':id/activate')

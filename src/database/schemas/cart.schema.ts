@@ -18,7 +18,7 @@ export class Cart {
   @Prop({ type: Types.ObjectId, ref: 'Restaurant', default: null })
   restaurantId?: Types.ObjectId | null;
 
-  @Prop({ type: [Object], default: [] })
+  @Prop({ type: [{ menuItemId: { type: Types.ObjectId, ref: 'MenuItem', required: true }, quantity: { type: Number, required: true, min: 1 } }], default: [] })
   items: CartItem[];
 }
 

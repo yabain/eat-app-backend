@@ -109,8 +109,14 @@ export class RestaurantsService {
     return restaurant;
   }
 
-  async update(id: string, dto: UpdateRestaurantDto) {
-    await this.validateManager(dto.managerId);
+  async update(id: string, dto: UpdateRestaurantDto, actor?: any) {
+    if (actor?.role === UserRole.MANAGER) {
+      if (actor.restaurantId?.toString() !== id) throw new ForbiddenException('You can only edit your own restaurant');
+      delete dto.managerId;
+      delete dto.status;
+    } else {
+      await this.validateManager(dto.managerId);
+    }
     const item = await this.model.findByIdAndUpdate(id, dto, { new: true });
     if (!item) throw new NotFoundException('Restaurant not found');
     return item;

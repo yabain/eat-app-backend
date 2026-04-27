@@ -1,4 +1,5 @@
 import { IsBoolean, IsMongoId, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 export class CreateMenuItemDto {
   @ApiPropertyOptional({ example: '665d58e63d7bfeb8f7f6172e', description: 'Obligatoire pour un admin. Ignoré pour manager/employé (pris depuis le token).' })
@@ -12,13 +13,18 @@ export class CreateMenuItemDto {
   @ApiPropertyOptional({ example: '/uploads/menus/poulet-dg.jpg' })
   @IsOptional() @IsString() image?: string;
   @ApiProperty({ example: 3500, minimum: 0 })
+  @Transform(({ value }) => Number(value))
   @IsNumber() @Min(0) price: number;
   @ApiPropertyOptional({ example: 200, minimum: 0 })
-  @IsOptional() @IsNumber() @Min(0) packagingCost?: number;
+  @IsOptional() @Transform(({ value }) => value !== undefined ? Number(value) : undefined)
+  @IsNumber() @Min(0) packagingCost?: number;
   @ApiPropertyOptional({ example: 20, minimum: 0 })
-  @IsOptional() @IsNumber() @Min(0) stock?: number;
+  @IsOptional() @Transform(({ value }) => value !== undefined ? Number(value) : undefined)
+  @IsNumber() @Min(0) stock?: number;
   @ApiPropertyOptional({ example: true })
-  @IsOptional() @IsBoolean() isAvailable?: boolean;
+  @IsOptional() @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean() isAvailable?: boolean;
   @ApiPropertyOptional({ example: true })
-  @IsOptional() @IsBoolean() isActive?: boolean;
+  @IsOptional() @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean() isActive?: boolean;
 }

@@ -1,39 +1,22 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-
-export class CartMenuItemSummaryDto {
-  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
-  _id: string;
-
-  @ApiProperty({ example: 'Coca Cola' })
-  name: string;
-
-  @ApiProperty({ example: 500 })
-  price: number;
-
-  @ApiPropertyOptional({ example: '/uploads/menus/coca.png' })
-  image?: string;
-}
+import { MenuItemResponseDto } from '../../menu/dto/menu-item-response.dto';
+import { RestaurantResponseDto } from '../../restaurants/dto/restaurant-response.dto';
 
 export class CartItemResponseDto {
-  @ApiProperty({
-    oneOf: [
-      { type: 'string', example: '665d58e63d7bfeb8f7f6172e' },
-      { $ref: '#/components/schemas/CartMenuItemSummaryDto' },
-    ],
-  })
-  menuItemId: string | CartMenuItemSummaryDto;
+  @ApiProperty({ type: () => MenuItemResponseDto, description: 'Menu item populé' })
+  menuItemId: MenuItemResponseDto;
 
-  @ApiProperty({ example: 2 })
+  @ApiProperty({ example: 2, description: 'Quantité dans le panier' })
   quantity: number;
 }
 
 export class CartResponseDto {
-  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e', description: "ID de l'utilisateur" })
   userId: string;
 
-  @ApiPropertyOptional({ example: '665d58e63d7bfeb8f7f6172e', nullable: true })
-  restaurantId?: string | null;
+  @ApiPropertyOptional({ type: () => RestaurantResponseDto, nullable: true, description: 'Restaurant populé (null si panier vide)' })
+  restaurantId?: RestaurantResponseDto | null;
 
-  @ApiProperty({ type: [CartItemResponseDto] })
+  @ApiProperty({ type: [CartItemResponseDto], description: 'Items du panier' })
   items: CartItemResponseDto[];
 }

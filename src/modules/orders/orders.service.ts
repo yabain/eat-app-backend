@@ -120,9 +120,10 @@ export class OrdersService {
   }
 
   private async calculate(dto: PreviewOrderDto, session?: ClientSession) {
+    const restaurantId = String((dto.restaurantId as any)?._id ?? dto.restaurantId);
     const menuIds = dto.items.map((i) => new Types.ObjectId(i.menuItemId));
     const menuItems = await this.menuModel
-      .find({ _id: { $in: menuIds }, restaurantId: dto.restaurantId, isActive: true })
+      .find({ _id: { $in: menuIds }, restaurantId, isActive: true })
       .session(session || null);
     if (menuItems.length !== dto.items.length) throw new BadRequestException('Some menu items are invalid');
     const zone = await this.zoneModel

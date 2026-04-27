@@ -13,7 +13,7 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
   const swaggerConfig = new DocumentBuilder()
-    .setTitle('yEat API')
+    .setTitle('Eat API')
     .setDescription('API de commande et livraison de repas')
     .setVersion('1.0.0')
     .addBearerAuth(

@@ -84,7 +84,7 @@ export class MenuService {
       if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
       filter.restaurantId = actor.restaurantId;
     }
-    const item = await this.model.findOne(filter);
+    const item = await this.model.findOne(filter).populate('restaurantId').populate('categoryId');
     if (!item) throw new NotFoundException('Menu item not found');
     return item;
   }
