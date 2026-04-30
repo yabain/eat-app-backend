@@ -47,6 +47,11 @@ export class CategoriesService {
     if (!item) throw new NotFoundException('Category not found');
     return item;
   }
+  async updateImage(id: string, image: string) {
+    const item = await this.model.findByIdAndUpdate(id, { image }, { new: true });
+    if (!item) throw new NotFoundException('Category not found');
+    return item;
+  }
   async activate(id: string) {
     const item = await this.model.findByIdAndUpdate(id, { isActive: true }, { new: true });
     if (!item) throw new NotFoundException('Category not found');

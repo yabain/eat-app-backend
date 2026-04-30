@@ -7,7 +7,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
 import { OkResponseDto } from '../../common/dto/response.dto';
-import { PaymentInitiateResponseDto, PaymentStatusResponseDto } from './dto/payment-response.dto';
+import { PaymentInitiateResponseDto, PaymentStatusResponseDto, PaymentSyncResponseDto } from './dto/payment-response.dto';
 
 @ApiTags('payments')
 @Controller('payments')
@@ -26,8 +26,29 @@ export class PaymentsController {
   })
   initiate(@Param('orderId') orderId: string, @Req() req: any) { return this.service.initiate(orderId, req.user); }
 
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT)
+  @Post('sync/:orderRef')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Synchroniser manuellement le statut DigiKuntz d’une commande' })
+  @ApiParam({
+    name: 'orderRef',
+    example: 'ORD-1713640000000-ABCDE',
+    description: 'ID MongoDB de la commande ou numéro de commande',
+  })
+  @ApiOkResponse({
+    description: 'Statut de paiement synchronisé depuis DigiKuntz',
+    type: PaymentSyncResponseDto,
+  })
+  sync(@Param('orderRef') orderRef: string, @Req() req: any) {
+    return this.service.syncOrderPayment(orderRef, req.user);
+  }
+
   @Post('webhook/digikuntz')
-  @ApiOperation({ summary: 'Webhook DigiKuntz' })
+  @ApiOperation({
+    summary: 'Webhook DigiKuntz',
+    description: 'Reçoit les notifications de statut de paiement de DigiKuntz. Statuts traités : `payin_success` (paiement confirmé, stock décrémenté), `payin_error` / `payin_closed` (paiement échoué). `payin_pending` est ignoré.',
+  })
   @ApiBody({ type: DigikuntzWebhookDto })
   @ApiOkResponse({ description: 'Webhook traité', type: OkResponseDto })
   webhook(@Body() body: DigikuntzWebhookDto) { return this.service.webhook(body); }

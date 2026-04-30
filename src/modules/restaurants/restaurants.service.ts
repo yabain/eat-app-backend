@@ -25,6 +25,13 @@ export class RestaurantsService {
     if (manager.role !== UserRole.MANAGER) throw new BadRequestException('Assigned managerId must reference a manager user');
   }
 
+  private populateManager(query: any) {
+    return query.populate({
+      path: 'managerId',
+      select: 'firstName lastName email phone role isActive profileImage restaurantId',
+    });
+  }
+
   async create(dto: CreateRestaurantDto) {
     await this.validateManager(dto.managerId);
     return this.model.create(dto);
@@ -49,12 +56,7 @@ export class RestaurantsService {
       ];
     }
     const [data, total] = await Promise.all([
-      this.model
-        .find(filter)
-        .populate({
-          path: 'managerId',
-          select: 'firstName lastName email phone role isActive profileImage restaurantId',
-        })
+      this.populateManager(this.model.find(filter))
         .sort({ createdAt: -1 })
         .skip(pagination.skip)
         .limit(pagination.limit),
@@ -95,16 +97,16 @@ export class RestaurantsService {
   }
 
   findOne(id: string) {
-    return this.model.findById(id);
+    return this.populateManager(this.model.findById(id));
   }
 
   findBySlug(slug: string) {
-    return this.model.findOne({ slug, status: 'active' });
+    return this.populateManager(this.model.findOne({ slug, status: 'active' }));
   }
 
   async findForStaff(actor: any) {
     if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
-    const restaurant = await this.model.findById(actor.restaurantId);
+    const restaurant = await this.populateManager(this.model.findById(actor.restaurantId));
     if (!restaurant) throw new NotFoundException('Restaurant not found');
     return restaurant;
   }

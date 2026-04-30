@@ -48,17 +48,6 @@ export class OrdersService {
   private async placeOrderWithinSession(userId: string, dto: PreviewOrderDto, session: ClientSession) {
     const result = await this.calculate(dto, session);
 
-    for (const item of result.items) {
-      const stockUpdate = await this.menuModel.findOneAndUpdate(
-        { _id: item.menuItemId, stock: { $gte: item.quantity } },
-        { $inc: { stock: -item.quantity } },
-        { new: true, session },
-      );
-      if (!stockUpdate) {
-        throw new BadRequestException(`Insufficient stock for ${item.name}`);
-      }
-    }
-
     const [order] = await this.orderModel.create(
       [
         {
@@ -119,6 +108,20 @@ export class OrdersService {
     return filter;
   }
 
+  private populateOrderDetail(order: OrderDocument) {
+    return order.populate([
+      { path: 'restaurantId' },
+      {
+        path: 'userId',
+        select: 'firstName lastName email phone profileImage role restaurantId isActive',
+      },
+      {
+        path: 'assignedDriverId',
+        select: 'firstName lastName email phone profileImage role restaurantId isActive',
+      },
+    ]);
+  }
+
   private async calculate(dto: PreviewOrderDto, session?: ClientSession) {
     const restaurantId = String((dto.restaurantId as any)?._id ?? dto.restaurantId);
     const menuIds = dto.items.map((i) => new Types.ObjectId(i.menuItemId));
@@ -148,9 +151,10 @@ export class OrdersService {
     const itemsSubtotal = items.reduce((sum, i) => sum + i.subtotal, 0);
     const packagingTotal = items.reduce((sum, i) => sum + i.packagingCost * i.quantity, 0);
     const deliveryFee = zone.deliveryFee;
-    const feeType = process.env.PLATFORM_FEE_TYPE || 'fixed';
+    const feeType = process.env.PLATFORM_FEE_TYPE || 'fixed'; // if fixed, PLATFORM_FEE_VALUE=value. if percentage, PLATFORM_FEE_VALUE=percentage
     const feeValue = Number(process.env.PLATFORM_FEE_VALUE || 0);
-    const platformFee = feeType === 'percentage' ? Math.round((itemsSubtotal * feeValue) / 100) : feeValue;
+    const val = Number(itemsSubtotal + packagingTotal + deliveryFee)
+    const platformFee = feeType === 'percentage' ? Math.round(val * feeValue / 100) : feeValue;
 
     let promoDiscount = 0;
     let promo: PromoCodeDocument | null = null;
@@ -235,6 +239,10 @@ export class OrdersService {
     const [data, total] = await Promise.all([
       this.orderModel
         .find(filter)
+        .populate({
+          path: 'userId',
+          select: 'firstName lastName email phone profileImage role restaurantId isActive',
+        })
         .sort({ createdAt: -1 })
         .skip(pagination.skip)
         .limit(pagination.limit),
@@ -340,10 +348,14 @@ export class OrdersService {
     const order = await this.orderModel.findById(id);
     if (!order) throw new NotFoundException('Order not found');
 
-    if (actor.role === UserRole.ADMIN) return order;
-    if (actor.role === UserRole.CLIENT && String(order.userId) === actor.sub) return order;
-    if ([UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role) && String(order.restaurantId) === String(actor.restaurantId)) return order;
-    if (actor.role === UserRole.DRIVER && String(order.assignedDriverId) === actor.sub) return order;
+    if (actor.role === UserRole.ADMIN) return this.populateOrderDetail(order);
+    if (actor.role === UserRole.CLIENT && String(order.userId) === actor.sub) return this.populateOrderDetail(order);
+    if ([UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role) && String(order.restaurantId) === String(actor.restaurantId)) {
+      return this.populateOrderDetail(order);
+    }
+    if (actor.role === UserRole.DRIVER && String(order.assignedDriverId) === actor.sub) {
+      return this.populateOrderDetail(order);
+    }
 
     throw new ForbiddenException('You are not allowed to access this order');
   }
@@ -358,8 +370,8 @@ export class OrdersService {
     if (actor.role === UserRole.DRIVER && String(order.assignedDriverId) !== actor.sub) {
       throw new ForbiddenException('You can only update your assigned orders');
     }
-    if (dto.assignedDriverId && ![UserRole.ADMIN, UserRole.MANAGER].includes(actor.role)) {
-      throw new ForbiddenException('Only admin or manager can assign a driver');
+    if (dto.assignedDriverId && ![UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role)) {
+      throw new ForbiddenException('Only admin, manager or employee can assign a driver');
     }
 
     order.orderStatus = dto.orderStatus;

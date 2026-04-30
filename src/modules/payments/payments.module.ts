@@ -7,6 +7,7 @@ import { PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
 import { DigikuntzProvider } from './providers/digikuntz.provider';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { MenuModule } from '../menu/menu.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
       { name: User.name, schema: UserSchema },
     ]),
     NotificationsModule,
+    MenuModule,
   ],
   providers: [PaymentsService, DigikuntzProvider],
   controllers: [PaymentsController],

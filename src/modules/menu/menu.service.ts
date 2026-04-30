@@ -6,11 +6,15 @@ import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.sch
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search.util';
 import { CreateMenuItemDto } from './dto/create-menu-item.dto';
+import { MenuInventoryService } from './menu-inventory.service';
 import { UpdateMenuItemDto } from './dto/update-menu-item.dto';
 
 @Injectable()
 export class MenuService {
-  constructor(@InjectModel(MenuItem.name) private model: Model<MenuItemDocument>) {}
+  constructor(
+    @InjectModel(MenuItem.name) private model: Model<MenuItemDocument>,
+    private readonly inventory: MenuInventoryService,
+  ) {}
 
   async findPublicByRestaurant(
     restaurantId: string,
@@ -90,22 +94,24 @@ export class MenuService {
   }
 
   createForActor(actor: any, dto: CreateMenuItemDto) {
+    const payload = this.inventory.normalizeAvailabilityForStock(dto);
     if (actor.role === UserRole.ADMIN) {
-      if (!dto.restaurantId) throw new BadRequestException('restaurantId is required for admin');
-      return this.model.create(dto);
+      if (!payload.restaurantId) throw new BadRequestException('restaurantId is required for admin');
+      return this.model.create(payload);
     }
     if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
-    return this.model.create({ ...dto, restaurantId: actor.restaurantId });
+    return this.model.create({ ...payload, restaurantId: actor.restaurantId });
   }
 
   async updateForActor(actor: any, id: string, dto: UpdateMenuItemDto) {
+    const payload = this.inventory.normalizeAvailabilityForStock(dto);
     let filter: any = { _id: id };
     if (actor.role !== UserRole.ADMIN) {
       if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
       filter = { _id: id, restaurantId: actor.restaurantId };
-      delete (dto as any).restaurantId;
+      delete (payload as any).restaurantId;
     }
-    const item = await this.model.findOneAndUpdate(filter, dto, { new: true });
+    const item = await this.model.findOneAndUpdate(filter, payload, { new: true });
     if (!item) throw new NotFoundException('Menu item not found');
     return item;
   }

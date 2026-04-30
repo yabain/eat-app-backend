@@ -1,6 +1,32 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaginationMetaDto } from '../../../common/dto/response.dto';
 
+export class RestaurantManagerResponseDto {
+  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
+  _id: string;
+
+  @ApiPropertyOptional({ example: 'Flambel' })
+  firstName?: string;
+
+  @ApiPropertyOptional({ example: 'SANOU' })
+  lastName?: string;
+
+  @ApiPropertyOptional({ example: 'flambel@example.com' })
+  email?: string;
+
+  @ApiPropertyOptional({ example: '+237691224472' })
+  phone?: string;
+
+  @ApiPropertyOptional({ example: '/uploads/profiles/avatar.png' })
+  profileImage?: string;
+
+  @ApiPropertyOptional({ example: 'manager' })
+  role?: string;
+
+  @ApiPropertyOptional({ example: true })
+  isActive?: boolean;
+}
+
 export class RestaurantResponseDto {
   @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
   _id: string;
@@ -50,8 +76,14 @@ export class RestaurantResponseDto {
   @ApiProperty({ enum: ['active', 'inactive'], example: 'active' })
   status: 'active' | 'inactive';
 
-  @ApiPropertyOptional({ example: '665d58e63d7bfeb8f7f6172e', nullable: true })
-  managerId?: string | null;
+  @ApiPropertyOptional({
+    oneOf: [
+      { type: 'string', example: '665d58e63d7bfeb8f7f6172e' },
+      { $ref: '#/components/schemas/RestaurantManagerResponseDto' },
+    ],
+    nullable: true,
+  })
+  managerId?: string | RestaurantManagerResponseDto | null;
 
   @ApiPropertyOptional({ example: '2026-04-25T12:00:00.000Z' })
   createdAt?: string;

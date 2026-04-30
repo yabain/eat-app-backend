@@ -11,6 +11,10 @@ export class Payment {
   @Prop({ default: 'XAF' }) currency: string;
   @Prop({ enum: Object.values(PaymentStatus), default: PaymentStatus.PENDING }) status: string;
   @Prop() providerRef?: string;
+  @Prop() transactionRef?: string;
+  @Prop() paymentLink?: string;
+  @Prop() paymentWithTaxes?: number;
+  @Prop() invoiceTaxes?: number;
   @Prop({ type: Object }) callbackPayload?: Record<string, any>;
   @Prop() initiatedAt?: Date;
   @Prop() completedAt?: Date;

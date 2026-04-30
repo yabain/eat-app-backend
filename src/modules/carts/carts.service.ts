@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Cart, CartDocument } from '../../database/schemas/cart.schema';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
+import { MenuInventoryService } from '../menu/menu-inventory.service';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
 
@@ -11,6 +12,7 @@ export class CartsService {
   constructor(
     @InjectModel(Cart.name) private cartModel: Model<CartDocument>,
     @InjectModel(MenuItem.name) private menuModel: Model<MenuItemDocument>,
+    private readonly inventory: MenuInventoryService,
   ) {}
 
   private async findMenuItemOrFail(menuItemId: string) {
@@ -66,7 +68,7 @@ export class CartsService {
     cart.restaurantId = menuItem.restaurantId;
     await Promise.all([
       cart.save(),
-      this.menuModel.findByIdAndUpdate(dto.menuItemId, { $inc: { stock: -dto.quantity } }),
+      this.inventory.adjustStock(dto.menuItemId, -dto.quantity),
     ]);
     return this.populateCart(cart._id);
   }
@@ -87,7 +89,7 @@ export class CartsService {
       { $set: { 'items.$.quantity': dto.quantity } },
       { new: true },
     );
-    await this.menuModel.findByIdAndUpdate(menuItemId, { $inc: { stock: delta } });
+    await this.inventory.adjustStock(menuItemId, delta);
     return this.populateCart(updated._id);
   }
 
@@ -100,7 +102,7 @@ export class CartsService {
     if (cart.items.length === 0) cart.restaurantId = null;
     await Promise.all([
       cart.save(),
-      this.menuModel.findByIdAndUpdate(menuItemId, { $inc: { stock: item.quantity } }),
+      this.inventory.adjustStock(menuItemId, item.quantity),
     ]);
     return this.populateCart(cart._id);
   }
@@ -108,7 +110,7 @@ export class CartsService {
   async clear(userId: string) {
     const cart = await this.findOrCreateCart(userId);
     const stockUpdates = cart.items.map((i) =>
-      this.menuModel.findByIdAndUpdate(String(i.menuItemId), { $inc: { stock: i.quantity } }),
+      this.inventory.adjustStock(i.menuItemId, i.quantity),
     );
     cart.items = [];
     cart.restaurantId = null;

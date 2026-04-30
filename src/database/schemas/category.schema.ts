@@ -6,6 +6,8 @@ export type CategoryDocument = HydratedDocument<Category>;
 export class Category {
   @Prop({ required: true, unique: true }) name: string;
   @Prop() description?: string;
+  @Prop() image?: string;
   @Prop({ default: true }) isActive: boolean;
+  @Prop({ default: false }) resetStockAtMidnight: boolean;
 }
 export const CategorySchema = SchemaFactory.createForClass(Category);

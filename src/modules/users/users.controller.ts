@@ -1,4 +1,18 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -31,12 +45,27 @@ const profileUploadStorage = diskStorage({
   },
 });
 
+const authenticatedRoles = [
+  UserRole.ADMIN,
+  UserRole.MANAGER,
+  UserRole.EMPLOYEE,
+  UserRole.CLIENT,
+  UserRole.DRIVER,
+];
+
 @UseGuards(JwtAuthGuard, RolesGuard)
 @ApiTags('users')
 @ApiBearerAuth('bearer')
 @Controller('users')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
+
+  private buildProfileImageUrl(file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('Profile image file is required');
+    const relativePath = `/uploads/profiles/${file.filename}`;
+    const appUrl = (process.env.APP_URL || '').replace(/\/+$/, '');
+    return appUrl ? `${appUrl}${relativePath}` : relativePath;
+  }
 
   @Roles(UserRole.ADMIN)
   @Get()
@@ -103,7 +132,7 @@ export class UsersController {
     return this.usersService.updateEmployee(req.user, id, dto);
   }
 
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT, UserRole.DRIVER)
+  @Roles(...authenticatedRoles)
   @Get('me')
   @ApiOperation({ summary: 'Mon profil utilisateur' })
   @ApiOkResponse({ description: 'Profil utilisateur connecté', type: UserResponseDto })
@@ -111,7 +140,16 @@ export class UsersController {
     return this.usersService.findOne(req.user.sub);
   }
 
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT, UserRole.DRIVER)
+  @Roles(...authenticatedRoles)
+  @Patch('me')
+  @ApiOperation({ summary: 'Mettre à jour mon profil utilisateur' })
+  @ApiBody({ type: UpdateUserDto })
+  @ApiOkResponse({ description: 'Profil utilisateur mis à jour', type: UserResponseDto })
+  updateMe(@Req() req: any, @Body() dto: UpdateUserDto) {
+    return this.usersService.updateForActor(req.user, req.user.sub, dto);
+  }
+
+  @Roles(...authenticatedRoles)
   @Get('me/profile-image')
   @ApiOperation({ summary: 'Récupérer mon image de profil' })
   @ApiOkResponse({ description: 'Image de profil actuelle', type: ProfileImageResponseDto })
@@ -119,7 +157,7 @@ export class UsersController {
     return this.usersService.getMyProfileImage(req.user.sub);
   }
 
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT, UserRole.DRIVER)
+  @Roles(...authenticatedRoles)
   @Patch('me/profile-image')
   @ApiOperation({ summary: 'Mettre à jour mon image de profil' })
   @ApiBody({ type: UpdateProfileImageDto })
@@ -128,7 +166,7 @@ export class UsersController {
     return this.usersService.updateMyProfileImage(req.user.sub, dto.profileImage);
   }
 
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT, UserRole.DRIVER)
+  @Roles(...authenticatedRoles)
   @Patch('me/profile-image/upload')
   @UseInterceptors(FileInterceptor('file', {
     storage: profileUploadStorage,
@@ -151,13 +189,11 @@ export class UsersController {
   })
   @ApiOkResponse({ description: 'Image de profil uploadée et enregistrée', type: UserResponseDto })
   uploadMyProfileImage(@Req() req: any, @UploadedFile() file: Express.Multer.File) {
-    const relativePath = `/uploads/profiles/${file.filename}`;
-    const appUrl = (process.env.APP_URL || '').replace(/\/+$/, '');
-    const profileImage = appUrl ? `${appUrl}${relativePath}` : relativePath;
+    const profileImage = this.buildProfileImageUrl(file);
     return this.usersService.updateMyProfileImage(req.user.sub, profileImage);
   }
 
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT, UserRole.DRIVER)
+  @Roles(...authenticatedRoles)
   @Delete('me/profile-image')
   @ApiOperation({ summary: 'Supprimer mon image de profil' })
   @ApiOkResponse({ description: 'Image de profil supprimée', type: UserResponseDto })
@@ -174,14 +210,52 @@ export class UsersController {
     return this.usersService.findOne(id);
   }
 
-  @Roles(UserRole.ADMIN)
+  @Roles(...authenticatedRoles)
   @Patch(':id')
-  @ApiOperation({ summary: 'Mettre à jour un utilisateur (admin)' })
+  @ApiOperation({ summary: 'Mettre à jour un utilisateur (admin) ou son propre profil' })
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiBody({ type: UpdateUserDto })
   @ApiOkResponse({ description: 'Utilisateur mis à jour', type: UserResponseDto })
-  update(@Param('id') id: string, @Body() dto: UpdateUserDto) {
-    return this.usersService.update(id, dto);
+  update(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateUserDto) {
+    return this.usersService.updateForActor(req.user, id, dto);
+  }
+
+  @Roles(...authenticatedRoles)
+  @Patch(':id/profile-image')
+  @ApiOperation({ summary: 'Mettre à jour une image de profil (admin) ou sa propre image' })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiBody({ type: UpdateProfileImageDto })
+  @ApiOkResponse({ description: 'Profil utilisateur mis à jour', type: UserResponseDto })
+  updateProfileImage(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateProfileImageDto) {
+    return this.usersService.updateProfileImageForActor(req.user, id, dto.profileImage);
+  }
+
+  @Roles(...authenticatedRoles)
+  @Patch(':id/profile-image/upload')
+  @UseInterceptors(FileInterceptor('file', {
+    storage: profileUploadStorage,
+    fileFilter: (_req, file, cb) => {
+      if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image uploads are allowed'), false);
+      cb(null, true);
+    },
+    limits: { fileSize: 5 * 1024 * 1024 },
+  }))
+  @ApiOperation({ summary: 'Uploader et enregistrer une image de profil (admin) ou sa propre image' })
+  @ApiConsumes('multipart/form-data')
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' },
+      },
+      required: ['file'],
+    },
+  })
+  @ApiOkResponse({ description: 'Image de profil uploadée et enregistrée', type: UserResponseDto })
+  uploadProfileImage(@Req() req: any, @Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+    const profileImage = this.buildProfileImageUrl(file);
+    return this.usersService.updateProfileImageForActor(req.user, id, profileImage);
   }
 
   @Roles(UserRole.ADMIN)

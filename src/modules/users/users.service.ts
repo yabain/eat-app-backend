@@ -89,6 +89,27 @@ export class UsersService {
     return user;
   }
 
+  async updateForActor(actor: any, id: string, dto: UpdateUserDto) {
+    if (actor.role === UserRole.ADMIN) return this.update(id, dto);
+    if (String(actor.sub) !== String(id)) {
+      throw new ForbiddenException('You can only update your own profile');
+    }
+
+    const payload: any = {
+      firstName: dto.firstName,
+      lastName: dto.lastName,
+      email: dto.email ? dto.email.toLowerCase() : undefined,
+      phone: dto.phone,
+      profileImage: dto.profileImage,
+    };
+    if (dto.password) payload.passwordHash = await this.hashPassword(dto.password);
+    Object.keys(payload).forEach((key) => payload[key] === undefined && delete payload[key]);
+
+    const user = await this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash');
+    if (!user) throw new NotFoundException('User not found');
+    return user;
+  }
+
   remove(id: string) {
     return this.userModel.findByIdAndDelete(id);
   }
@@ -183,6 +204,13 @@ export class UsersService {
     ).select('-passwordHash');
     if (!user) throw new NotFoundException('User not found');
     return user;
+  }
+
+  async updateProfileImageForActor(actor: any, id: string, profileImage: string) {
+    if (actor.role !== UserRole.ADMIN && String(actor.sub) !== String(id)) {
+      throw new ForbiddenException('You can only update your own profile image');
+    }
+    return this.updateMyProfileImage(id, profileImage);
   }
 
   async deleteMyProfileImage(userId: string) {

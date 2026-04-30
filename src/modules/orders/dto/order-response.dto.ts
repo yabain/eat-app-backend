@@ -3,6 +3,67 @@ import { OrderStatus } from '../../../common/enums/order-status.enum';
 import { PaymentStatus } from '../../../common/enums/payment-status.enum';
 import { PaginationMetaDto } from '../../../common/dto/response.dto';
 
+export class OrderUserResponseDto {
+  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
+  _id: string;
+
+  @ApiPropertyOptional({ example: 'Flambel' })
+  firstName?: string;
+
+  @ApiPropertyOptional({ example: 'SANOU' })
+  lastName?: string;
+
+  @ApiPropertyOptional({ example: 'flambel@example.com' })
+  email?: string;
+
+  @ApiPropertyOptional({ example: '+237691224472' })
+  phone?: string;
+
+  @ApiPropertyOptional({ example: '/uploads/profiles/avatar.png' })
+  profileImage?: string;
+
+  @ApiPropertyOptional({ example: 'client' })
+  role?: string;
+}
+
+export class OrderRestaurantResponseDto {
+  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
+  _id: string;
+
+  @ApiProperty({ example: 'Chez Flambel' })
+  name: string;
+
+  @ApiProperty({ example: 'chez-flambel' })
+  slug: string;
+
+  @ApiPropertyOptional({ example: 'Cuisine africaine' })
+  description?: string;
+
+  @ApiPropertyOptional({ example: '+237691224472' })
+  phone?: string;
+
+  @ApiPropertyOptional({ example: '+237691224472' })
+  phone1?: string;
+
+  @ApiPropertyOptional({ example: '+237691224473' })
+  phone2?: string;
+
+  @ApiPropertyOptional({ example: 'restaurant@example.com' })
+  email?: string;
+
+  @ApiPropertyOptional({ example: 'Akwa, Douala' })
+  localisation?: string;
+
+  @ApiPropertyOptional({ example: '/uploads/restaurants/logo.png' })
+  logo?: string;
+
+  @ApiPropertyOptional({ example: '/uploads/restaurants/banner.png' })
+  bannerImage?: string;
+
+  @ApiPropertyOptional({ example: '/uploads/restaurants/cover.png' })
+  coverImage?: string;
+}
+
 export class OrderItemResponseDto {
   @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
   menuItemId: string;
@@ -55,6 +116,9 @@ export class PricingSnapshotResponseDto {
 }
 
 export class OrderPreviewResponseDto {
+  @ApiProperty({ type: [OrderItemResponseDto], description: 'Items avec prix calculés' })
+  items: OrderItemResponseDto[];
+
   @ApiProperty({ type: PricingSnapshotResponseDto })
   pricingSnapshot: PricingSnapshotResponseDto;
 }
@@ -66,11 +130,21 @@ export class OrderResponseDto {
   @ApiProperty({ example: 'ORD-1713640000000-ABCDE' })
   orderNumber: string;
 
-  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
-  userId: string;
+  @ApiProperty({
+    oneOf: [
+      { type: 'string', example: '665d58e63d7bfeb8f7f6172e' },
+      { $ref: '#/components/schemas/OrderUserResponseDto' },
+    ],
+  })
+  userId: string | OrderUserResponseDto;
 
-  @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
-  restaurantId: string;
+  @ApiProperty({
+    oneOf: [
+      { type: 'string', example: '665d58e63d7bfeb8f7f6172e' },
+      { $ref: '#/components/schemas/OrderRestaurantResponseDto' },
+    ],
+  })
+  restaurantId: string | OrderRestaurantResponseDto;
 
   @ApiProperty({ type: [OrderItemResponseDto] })
   items: OrderItemResponseDto[];
@@ -93,8 +167,14 @@ export class OrderResponseDto {
   @ApiPropertyOptional({ example: 'Appeler à l’arrivée' })
   notes?: string;
 
-  @ApiPropertyOptional({ example: '665d58e63d7bfeb8f7f6172e', nullable: true })
-  assignedDriverId?: string | null;
+  @ApiPropertyOptional({
+    oneOf: [
+      { type: 'string', example: '665d58e63d7bfeb8f7f6172e' },
+      { $ref: '#/components/schemas/OrderUserResponseDto' },
+    ],
+    nullable: true,
+  })
+  assignedDriverId?: string | OrderUserResponseDto | null;
 
   @ApiPropertyOptional({ example: '2026-04-25T12:00:00.000Z' })
   createdAt?: string;

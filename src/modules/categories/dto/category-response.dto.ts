@@ -11,8 +11,14 @@ export class CategoryResponseDto {
   @ApiPropertyOptional({ example: 'Boissons fraîches et jus' })
   description?: string;
 
+  @ApiPropertyOptional({ example: '/uploads/categories/boissons.png' })
+  image?: string;
+
   @ApiProperty({ example: true })
   isActive: boolean;
+
+  @ApiProperty({ example: false })
+  resetStockAtMidnight: boolean;
 
   @ApiPropertyOptional({ example: '2026-04-25T12:00:00.000Z' })
   createdAt?: string;
