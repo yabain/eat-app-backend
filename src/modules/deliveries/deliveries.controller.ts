@@ -24,14 +24,23 @@ export class DeliveriesController {
   assign(@Body() dto: AssignDeliveryDto, @Req() req: any) { return this.service.assign(dto, req.user); }
   @Roles(UserRole.DRIVER)
   @Get('my')
-  @ApiOperation({ summary: 'Lister les livraisons du livreur connecté' })
+  @ApiOperation({
+    summary: 'Lister les livraisons du livreur connecté',
+    description:
+      'Retourne les livraisons du livreur connecté, filtrées optionnellement par statut ou commande, triées du plus récent au plus ancien. Les champs orderId et driverId sont peuplés.',
+  })
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiQuery({ name: 'q', required: false, type: String, example: 'assigned' })
-  @ApiQuery({ name: 'status', required: false, type: String, example: 'assigned' })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: ['assigned', 'picked_up', 'out_for_delivery', 'delivered', 'failed'],
+    example: 'assigned',
+  })
   @ApiQuery({ name: 'orderId', required: false, type: String, example: '665d58e63d7bfeb8f7f6172e' })
   @ApiOkResponse({
-    description: 'Liste paginée des livraisons (plus récent au plus ancien)',
+    description: 'Liste paginée des livraisons du livreur connecté, avec orderId et driverId peuplés',
     type: PaginatedDeliveriesResponseDto,
   })
   my(

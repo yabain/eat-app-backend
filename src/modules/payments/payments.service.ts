@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
+import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { DigikuntzProvider } from './providers/digikuntz.provider';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -11,6 +12,8 @@ import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { UserRole } from '../../common/enums/roles.enum';
 import { MenuInventoryService } from '../menu/menu-inventory.service';
+import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
+import { buildContainsRegex } from '../../common/utils/search.util';
 
 @Injectable()
 export class PaymentsService {
@@ -18,17 +21,98 @@ export class PaymentsService {
     @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(BalanceTransaction.name) private balanceModel: Model<BalanceTransactionDocument>,
     private readonly inventory: MenuInventoryService,
     private provider: DigikuntzProvider,
     private notifications: NotificationsService,
   ) {}
 
-  private assertOrderAccess(order: OrderDocument, actor: any) {
+
+  async list(actor: any, page?: number, limit?: number, filters?: { q?: string; status?: string; provider?: string; from?: string; to?: string }) {
+    const pagination = normalizePagination(page, limit);
+    const clauses: any[] = [];
+
+    if ([UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role)) {
+      const restaurantOrders = await this.orderModel.find({ restaurantId: actor.restaurantId }).select('_id');
+      clauses.push({ orderId: { $in: restaurantOrders.map((order) => order._id) } });
+    }
+
+    if (filters?.status) clauses.push({ status: filters.status });
+    if (filters?.provider) clauses.push({ provider: filters.provider });
+
+    if (filters?.from || filters?.to) {
+      const createdAt: any = {};
+      if (filters.from) {
+        const from = new Date(filters.from);
+        if (!Number.isNaN(from.getTime())) createdAt.$gte = from;
+      }
+      if (filters.to) {
+        const to = new Date(filters.to);
+        if (!Number.isNaN(to.getTime())) createdAt.$lte = to;
+      }
+      if (Object.keys(createdAt).length) clauses.push({ createdAt });
+    }
+
+    const qRegex = buildContainsRegex(filters?.q);
+    if (qRegex) {
+      const matchingOrders = await this.orderModel.find({
+        $or: [
+          { orderNumber: qRegex },
+          { orderStatus: qRegex },
+          { paymentStatus: qRegex },
+          { 'deliveryAddress.city': qRegex },
+          { 'deliveryAddress.district': qRegex },
+          { 'deliveryAddress.details': qRegex },
+        ],
+      }).select('_id');
+
+      clauses.push({
+        $or: [
+          { provider: qRegex },
+          { status: qRegex },
+          { currency: qRegex },
+          { providerRef: qRegex },
+          { transactionRef: qRegex },
+          { orderId: { $in: matchingOrders.map((order) => order._id) } },
+        ],
+      });
+    }
+
+    const filter = clauses.length ? { $and: clauses } : {};
+    const [data, total] = await Promise.all([
+      this.paymentModel
+        .find(filter)
+        .populate({
+          path: 'orderId',
+          populate: [
+            { path: 'restaurantId' },
+            { path: 'userId', select: 'firstName lastName email phone profileImage role restaurantId isActive' },
+          ],
+        })
+        .sort({ createdAt: -1 })
+        .skip(pagination.skip)
+        .limit(pagination.limit),
+      this.paymentModel.countDocuments(filter),
+    ]);
+
+    return {
+      data,
+      meta: buildPaginationMeta(pagination.page, pagination.limit, total),
+    };
+  }
+
+  private refId(ref: any): string {
+    if (!ref) return '';
+    if (typeof ref === 'string') return ref;
+    return String(ref._id || ref.id || ref);
+  }
+
+  private assertOrderAccess(order: OrderDocument | any, actor: any) {
     if (actor.role === UserRole.ADMIN) return;
-    if (actor.role === UserRole.CLIENT && String(order.userId) === String(actor.sub)) return;
+    if (actor.role === UserRole.CLIENT && this.refId(order.userId) === String(actor.sub)) return;
     if (
       [UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role)
-      && String(order.restaurantId) === String(actor.restaurantId)
+      && this.refId(order.restaurantId) === this.refId(actor.restaurantId)
     ) return;
     throw new ForbiddenException('You are not allowed to access this order payment');
   }
@@ -51,6 +135,25 @@ export class PaymentsService {
       ? { $or: [{ _id: orderRef }, { orderNumber: orderRef }] }
       : { orderNumber: orderRef };
     return this.orderModel.findOne(filter);
+  }
+
+
+  async findOne(id: string, actor: any) {
+    const payment = await this.paymentModel
+      .findById(id)
+      .populate({
+        path: 'orderId',
+        populate: [
+          { path: 'restaurantId' },
+          { path: 'userId', select: 'firstName lastName email phone profileImage role restaurantId isActive' },
+          { path: 'assignedDriverId', select: 'firstName lastName email phone profileImage role restaurantId isActive' },
+        ],
+      });
+    if (!payment) throw new NotFoundException('Payment not found');
+
+    const order = payment.orderId as any;
+    if (order && typeof order === 'object') this.assertOrderAccess(order, actor);
+    return payment;
   }
 
   async initiate(orderId: string, actor: any) {
@@ -180,6 +283,34 @@ export class PaymentsService {
     }
   }
 
+
+  private restaurantBalanceAmount(order: any): number {
+    const pricing = order.pricingSnapshot || {};
+    const grandTotal = Number(pricing.grandTotal || 0);
+    const platformFee = Number(pricing.platformFee || 0);
+    return Math.max(0, grandTotal - platformFee);
+  }
+
+  private async creditRestaurantBalance(order: any, payment: any) {
+    const amount = this.restaurantBalanceAmount(order);
+    if (!amount || !order.restaurantId || !payment?._id) return;
+    await this.balanceModel.updateOne(
+      { paymentId: payment._id },
+      {
+        $setOnInsert: {
+          restaurantId: order.restaurantId,
+          orderId: order._id,
+          paymentId: payment._id,
+          amount,
+          type: 'credit',
+          reason: 'order_payment',
+          currency: payment.currency || 'XAF',
+        },
+      },
+      { upsert: true },
+    );
+  }
+
   private async applyPayinStatus(payment: any, order: any, status: string, payload: any) {
     const pending = status === 'payin_pending';
     const success = status === 'payin_success';
@@ -207,6 +338,7 @@ export class PaymentsService {
     await order.save();
 
     if (success && !wasAlreadyPaid) {
+      await this.creditRestaurantBalance(order, payment);
       await Promise.all(
         order.items.map((item: any) =>
           this.inventory.adjustStock(item.menuItemId, -item.quantity),

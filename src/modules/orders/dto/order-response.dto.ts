@@ -155,6 +155,12 @@ export class OrderResponseDto {
   @ApiProperty({ type: PricingSnapshotResponseDto })
   pricingSnapshot: PricingSnapshotResponseDto;
 
+  @ApiPropertyOptional({ example: 25, description: 'Durée estimée de livraison en minutes' })
+  deliveryEstimateMinutes?: number;
+
+  @ApiPropertyOptional({ example: '2026-04-25T12:30:00.000Z', description: 'Date de passage en livraison' })
+  outForDeliveryAt?: string;
+
   @ApiPropertyOptional({ example: 'WELCOME500' })
   promoCode?: string;
 

@@ -11,8 +11,14 @@ export class DeliveryZoneResponseDto {
   @ApiProperty({ example: 'Akwa' })
   district: string;
 
+  @ApiPropertyOptional({ example: 'Zone centre-ville, accès rapide' })
+  details?: string;
+
   @ApiProperty({ example: 1500 })
   deliveryFee: number;
+
+  @ApiProperty({ example: 25, description: 'Durée estimée de livraison en minutes' })
+  time: number;
 
   @ApiProperty({ example: true })
   isActive: boolean;

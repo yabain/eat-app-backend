@@ -57,6 +57,7 @@ export class OrdersService {
           items: result.items,
           deliveryAddress: { city: dto.city, district: dto.district, details: dto.details },
           pricingSnapshot: result.pricingSnapshot,
+          deliveryEstimateMinutes: result.deliveryEstimateMinutes,
           promoCode: dto.promoCode?.toUpperCase(),
           paymentStatus: PaymentStatus.PENDING,
           orderStatus: OrderStatus.PENDING_PAYMENT,
@@ -151,6 +152,7 @@ export class OrdersService {
     const itemsSubtotal = items.reduce((sum, i) => sum + i.subtotal, 0);
     const packagingTotal = items.reduce((sum, i) => sum + i.packagingCost * i.quantity, 0);
     const deliveryFee = zone.deliveryFee;
+    const deliveryEstimateMinutes = Number(zone.time || 0);
     const feeType = process.env.PLATFORM_FEE_TYPE || 'fixed'; // if fixed, PLATFORM_FEE_VALUE=value. if percentage, PLATFORM_FEE_VALUE=percentage
     const feeValue = Number(process.env.PLATFORM_FEE_VALUE || 0);
     const val = Number(itemsSubtotal + packagingTotal + deliveryFee)
@@ -179,6 +181,7 @@ export class OrdersService {
         promoDiscount,
         grandTotal: itemsSubtotal + packagingTotal + deliveryFee + platformFee - promoDiscount,
       },
+      deliveryEstimateMinutes,
       promo,
     };
   }
@@ -375,6 +378,7 @@ export class OrdersService {
     }
 
     order.orderStatus = dto.orderStatus;
+    if (dto.orderStatus === OrderStatus.OUT_FOR_DELIVERY && !order.outForDeliveryAt) order.outForDeliveryAt = new Date();
     if (dto.assignedDriverId) order.assignedDriverId = new Types.ObjectId(dto.assignedDriverId);
     await order.save();
 

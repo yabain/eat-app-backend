@@ -93,6 +93,15 @@ export class MenuService {
     return item;
   }
 
+  async findPublicOne(id: string) {
+    const item = await this.model
+      .findOne({ _id: id, isActive: true })
+      .populate('restaurantId')
+      .populate('categoryId');
+    if (!item) throw new NotFoundException('Menu item not found');
+    return item;
+  }
+
   createForActor(actor: any, dto: CreateMenuItemDto) {
     const payload = this.inventory.normalizeAvailabilityForStock(dto);
     if (actor.role === UserRole.ADMIN) {

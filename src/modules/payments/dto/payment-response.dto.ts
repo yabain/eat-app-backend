@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaymentStatus } from '../../../common/enums/payment-status.enum';
+import { PaginationMetaDto } from '../../../common/dto/response.dto';
 
 export class PaymentResponseDto {
   @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
@@ -133,4 +134,13 @@ export class PaymentSyncResponseDto {
     },
   })
   order: Record<string, any>;
+}
+
+
+export class PaginatedPaymentsResponseDto {
+  @ApiProperty({ type: [PaymentResponseDto] })
+  data: PaymentResponseDto[];
+
+  @ApiProperty({ type: PaginationMetaDto })
+  meta: PaginationMetaDto;
 }

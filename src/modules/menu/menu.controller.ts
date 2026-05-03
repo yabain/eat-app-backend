@@ -66,15 +66,12 @@ export class MenuController {
       isActive,
     });
   }
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
   @Get(':id')
-  @ApiBearerAuth('bearer')
-  @ApiOperation({ summary: 'Détail d’un menu item (admin/manager/employé)' })
+  @ApiOperation({ summary: 'Détail public d’un menu item actif' })
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiOkResponse({ description: 'Menu item trouvé', type: MenuItemResponseDto })
-  findOne(@Param('id') id: string, @Req() req: any) {
-    return this.service.findOneForActor(req.user, id);
+  findOne(@Param('id') id: string) {
+    return this.service.findPublicOne(id);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

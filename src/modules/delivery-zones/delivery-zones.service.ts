@@ -24,7 +24,7 @@ export class DeliveryZonesService {
     if (filters?.district) filter.district = new RegExp(`^${escapeRegex(filters.district)}$`, 'i');
     const isActive = parseBooleanQuery(filters?.isActive);
     if (isActive !== undefined) filter.isActive = isActive;
-    if (qRegex) filter.$or = [{ city: qRegex }, { district: qRegex }];
+    if (qRegex) filter.$or = [{ city: qRegex }, { district: qRegex }, { details: qRegex }];
     const [data, total] = await Promise.all([
       this.model
         .find(filter)
@@ -43,7 +43,7 @@ export class DeliveryZonesService {
     const pagination = normalizePagination(page, limit);
     const qRegex = buildContainsRegex(q);
     const filter: any = { isActive: true };
-    if (qRegex) filter.$or = [{ city: qRegex }, { district: qRegex }];
+    if (qRegex) filter.$or = [{ city: qRegex }, { district: qRegex }, { details: qRegex }];
     const [data, total] = await Promise.all([
       this.model
         .find(filter)

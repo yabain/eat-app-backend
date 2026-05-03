@@ -34,6 +34,7 @@ export class Order {
   @Prop({ type: [Object], default: [] }) items: OrderItem[];
   @Prop({ type: Object, required: true }) deliveryAddress: DeliveryAddress;
   @Prop({ type: Object, required: true }) pricingSnapshot: PricingSnapshot;
+  @Prop({ type: Number, default: 0 }) deliveryEstimateMinutes?: number;
   @Prop() promoCode?: string;
   @Prop({ enum: Object.values(PaymentStatus), default: PaymentStatus.PENDING })
   paymentStatus: string;
@@ -41,5 +42,6 @@ export class Order {
   orderStatus: string;
   @Prop() notes?: string;
   @Prop({ type: Types.ObjectId, ref: 'User', default: null }) assignedDriverId?: Types.ObjectId;
+  @Prop() outForDeliveryAt?: Date;
 }
 export const OrderSchema = SchemaFactory.createForClass(Order);
