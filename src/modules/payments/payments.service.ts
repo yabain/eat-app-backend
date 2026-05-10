@@ -298,6 +298,7 @@ export class PaymentsService {
       { paymentId: payment._id },
       {
         $setOnInsert: {
+          ownerType: 'restaurant',
           restaurantId: order.restaurantId,
           orderId: order._id,
           paymentId: payment._id,

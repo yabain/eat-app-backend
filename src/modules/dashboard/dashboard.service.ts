@@ -93,7 +93,9 @@ export class DashboardService {
     const dateFilter = { createdAt: { $gte: start } };
     const orderFilter = { ...restaurantFilter, ...dateFilter };
     const paidOrderFilter = { ...orderFilter, paymentStatus: PaymentStatus.PAID };
-    const balanceRestaurantFilter = restaurantFilter.restaurantId ? { restaurantId: restaurantFilter.restaurantId } : {};
+    const balanceRestaurantFilter = restaurantFilter.restaurantId
+      ? { ownerType: 'restaurant', restaurantId: restaurantFilter.restaurantId }
+      : { ownerType: 'restaurant' };
 
     const [ordersTotal, paidOrders, menuItemsTotal, balanceAgg, revenueAgg, series, topItems, restaurantBalances] = await Promise.all([
       this.orderModel.countDocuments(orderFilter),
@@ -137,6 +139,7 @@ export class DashboardService {
       ]),
       actor.role === UserRole.ADMIN && !restaurantId
         ? this.balanceModel.aggregate([
+            { $match: { ownerType: 'restaurant' } },
             { $group: { _id: '$restaurantId', balance: { $sum: '$amount' } } },
             { $lookup: { from: 'restaurants', localField: '_id', foreignField: '_id', as: 'restaurant' } },
             { $unwind: { path: '$restaurant', preserveNullAndEmptyArrays: true } },

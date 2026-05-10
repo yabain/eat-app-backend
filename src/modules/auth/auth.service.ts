@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, InternalServerErrorException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, InternalServerErrorException, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { JwtService } from '@nestjs/jwt';
@@ -6,6 +6,11 @@ import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import * as nodemailer from 'nodemailer';
+import {
+  accountCreatedTemplate,
+  passwordChangedTemplate,
+  resetPasswordTemplate,
+} from '../../common/email/templates';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -29,6 +34,7 @@ type GoogleTokenInfo = {
 @Injectable()
 export class AuthService {
   private static readonly RESET_PASSWORD_TTL_MS = 60 * 60 * 1000;
+  private readonly logger = new Logger(AuthService.name);
 
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
@@ -47,6 +53,9 @@ export class AuthService {
       role: UserRole.CLIENT,
       authProvider: 'local',
       isProfileComplete: true,
+    });
+    this.sendAccountCreatedEmail(user).catch((error) => {
+      this.logger.warn(`Unable to send account created email to ${user.email}: ${error?.message || error}`);
     });
     return this.buildAuthResponse(user);
   }
@@ -102,6 +111,10 @@ export class AuthService {
     await this.userModel.findByIdAndUpdate(user._id, {
       passwordHash,
       $unset: { passwordResetTokenHash: 1, passwordResetExpiresAt: 1 },
+    });
+
+    this.sendPasswordChangedEmail(user).catch((error) => {
+      this.logger.warn(`Unable to send password changed email to ${user.email}: ${error?.message || error}`);
     });
 
     return { ok: true };
@@ -250,7 +263,7 @@ export class AuthService {
     return `${normalizedBase}${normalizedPath}?token=${encodeURIComponent(token)}`;
   }
 
-  private async sendResetPasswordEmail(email: string, token: string) {
+  private createMailTransporter() {
     const smtpHost = this.configService.get<string>('SMTP_HOST');
     const smtpPort = Number(this.configService.get<string>('SMTP_PORT'));
     const smtpUser = this.configService.get<string>('SMTP_USER');
@@ -260,27 +273,61 @@ export class AuthService {
       throw new InternalServerErrorException('SMTP configuration is incomplete');
     }
 
-    const transporter = nodemailer.createTransport({
-      host: smtpHost,
-      port: smtpPort,
-      secure: smtpPort === 465,
-      auth: { user: smtpUser, pass: smtpPass },
-    });
+    return {
+      from: smtpUser,
+      transporter: nodemailer.createTransport({
+        host: smtpHost,
+        port: smtpPort,
+        secure: smtpPort === 465,
+        auth: { user: smtpUser, pass: smtpPass },
+      }),
+    };
+  }
 
+  private getFrontendUrl() {
+    return this.configService.get<string>('FRONTEND_URL')?.replace(/\/+$/, '');
+  }
+
+  private async sendResetPasswordEmail(email: string, token: string) {
+    const { transporter, from } = this.createMailTransporter();
     const resetLink = this.buildResetPasswordLink(token);
-    const html = `
-      <p>Bonjour,</p>
-      <p>Vous avez demande la reinitialisation de votre mot de passe.</p>
-      <p>Ce lien est valable 1 heure.</p>
-      <p><a href="${resetLink}">Reinitialiser mon mot de passe</a></p>
-      <p>Si vous n'etes pas a l'origine de cette demande, ignorez cet email.</p>
-    `;
+    const template = resetPasswordTemplate({ resetLink, expiresIn: '1 heure' });
 
     await transporter.sendMail({
-      from: smtpUser,
+      from,
       to: email,
-      subject: 'Reinitialisation de mot de passe',
-      html,
+      subject: template.subject,
+      html: template.html,
+    });
+  }
+
+  private async sendAccountCreatedEmail(user: UserDocument) {
+    const { transporter, from } = this.createMailTransporter();
+    const template = accountCreatedTemplate({
+      firstName: user.firstName,
+      loginUrl: this.getFrontendUrl(),
+    });
+
+    await transporter.sendMail({
+      from,
+      to: user.email,
+      subject: template.subject,
+      html: template.html,
+    });
+  }
+
+  private async sendPasswordChangedEmail(user: UserDocument) {
+    const { transporter, from } = this.createMailTransporter();
+    const template = passwordChangedTemplate({
+      firstName: user.firstName,
+      loginUrl: this.getFrontendUrl(),
+    });
+
+    await transporter.sendMail({
+      from,
+      to: user.email,
+      subject: template.subject,
+      html: template.html,
     });
   }
 
