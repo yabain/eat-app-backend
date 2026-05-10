@@ -11,6 +11,7 @@ import {
   passwordChangedTemplate,
   resetPasswordTemplate,
 } from '../../common/email/templates';
+import { deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -202,6 +203,7 @@ export class AuthService {
 
     payload.isProfileComplete = true;
     const updated = await this.userModel.findByIdAndUpdate(user._id, payload, { new: true });
+    if (payload.profileImage !== undefined) await deleteReplacedLocalUpload(user.profileImage, payload.profileImage);
     return this.buildAuthResponse(updated);
   }
 

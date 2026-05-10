@@ -4,6 +4,7 @@ import { Model } from 'mongoose';
 import { Category, CategoryDocument } from '../../database/schemas/category.schema';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search.util';
+import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 
@@ -43,13 +44,25 @@ export class CategoriesService {
     };
   }
   async update(id: string, dto: UpdateCategoryDto) {
+    const existing = await this.model.findById(id);
+    if (!existing) {
+      await deleteLocalUpload(dto.image);
+      throw new NotFoundException('Category not found');
+    }
     const item = await this.model.findByIdAndUpdate(id, dto, { new: true });
     if (!item) throw new NotFoundException('Category not found');
+    if (dto.image !== undefined) await deleteReplacedLocalUpload(existing.image, dto.image);
     return item;
   }
   async updateImage(id: string, image: string) {
+    const existing = await this.model.findById(id);
+    if (!existing) {
+      await deleteLocalUpload(image);
+      throw new NotFoundException('Category not found');
+    }
     const item = await this.model.findByIdAndUpdate(id, { image }, { new: true });
     if (!item) throw new NotFoundException('Category not found');
+    await deleteReplacedLocalUpload(existing.image, image);
     return item;
   }
   async activate(id: string) {
@@ -62,5 +75,9 @@ export class CategoriesService {
     if (!item) throw new NotFoundException('Category not found');
     return item;
   }
-  remove(id: string) { return this.model.findByIdAndDelete(id); }
+  async remove(id: string) {
+    const item = await this.model.findByIdAndDelete(id);
+    if (item) await deleteLocalUpload(item.image);
+    return item;
+  }
 }

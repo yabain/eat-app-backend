@@ -7,6 +7,8 @@ export class UpdateDeliveryZoneDto {
   @IsOptional() @IsString() district?: string;
   @ApiPropertyOptional({ example: 'Zone centre-ville, accès rapide' })
   @IsOptional() @IsString() details?: string;
+  @ApiPropertyOptional({ example: 'https://maps.google.com/?q=5.0,10.0' })
+  @IsOptional() @IsString() mapLink?: string;
   @ApiPropertyOptional({ example: 1500 })
   @IsOptional() @IsNumber() deliveryFee?: number;
   @ApiPropertyOptional({ example: 25, description: 'Durée estimée de livraison en minutes' })

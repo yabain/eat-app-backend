@@ -6,6 +6,7 @@ import { User, UserDocument } from '../../database/schemas/user.schema';
 import { UserRole } from '../../common/enums/roles.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search.util';
+import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
 import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateEmployeeDto } from './dto/update-employee.dto';
@@ -80,12 +81,18 @@ export class UsersService {
   }
 
   async update(id: string, dto: UpdateUserDto) {
+    const existing = await this.userModel.findById(id);
+    if (!existing) {
+      await deleteLocalUpload(dto.profileImage);
+      throw new NotFoundException('User not found');
+    }
     const payload: any = { ...dto };
     if (dto.email) payload.email = dto.email.toLowerCase();
     if (dto.password) payload.passwordHash = await this.hashPassword(dto.password);
     delete payload.password;
     const user = await this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash');
     if (!user) throw new NotFoundException('User not found');
+    if (payload.profileImage !== undefined) await deleteReplacedLocalUpload(existing.profileImage, payload.profileImage);
     return user;
   }
 
@@ -105,8 +112,14 @@ export class UsersService {
     if (dto.password) payload.passwordHash = await this.hashPassword(dto.password);
     Object.keys(payload).forEach((key) => payload[key] === undefined && delete payload[key]);
 
+    const existing = await this.userModel.findById(id);
+    if (!existing) {
+      await deleteLocalUpload(payload.profileImage);
+      throw new NotFoundException('User not found');
+    }
     const user = await this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash');
     if (!user) throw new NotFoundException('User not found');
+    if (payload.profileImage !== undefined) await deleteReplacedLocalUpload(existing.profileImage, payload.profileImage);
     return user;
   }
 
@@ -197,12 +210,18 @@ export class UsersService {
   }
 
   async updateMyProfileImage(userId: string, profileImage: string) {
+    const existing = await this.userModel.findById(userId).select('profileImage');
+    if (!existing) {
+      await deleteLocalUpload(profileImage);
+      throw new NotFoundException('User not found');
+    }
     const user = await this.userModel.findByIdAndUpdate(
       userId,
       { profileImage },
       { new: true },
     ).select('-passwordHash');
     if (!user) throw new NotFoundException('User not found');
+    await deleteReplacedLocalUpload(existing.profileImage, profileImage);
     return user;
   }
 
@@ -214,12 +233,15 @@ export class UsersService {
   }
 
   async deleteMyProfileImage(userId: string) {
+    const existing = await this.userModel.findById(userId).select('profileImage');
+    if (!existing) throw new NotFoundException('User not found');
     const user = await this.userModel.findByIdAndUpdate(
       userId,
       { $unset: { profileImage: 1 } },
       { new: true },
     ).select('-passwordHash');
     if (!user) throw new NotFoundException('User not found');
+    await deleteLocalUpload(existing.profileImage);
     return user;
   }
 

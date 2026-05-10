@@ -14,6 +14,9 @@ export class DeliveryZoneResponseDto {
   @ApiPropertyOptional({ example: 'Zone centre-ville, accès rapide' })
   details?: string;
 
+  @ApiPropertyOptional({ example: 'https://maps.google.com/?q=5.0,10.0' })
+  mapLink?: string;
+
   @ApiProperty({ example: 1500 })
   deliveryFee: number;
 

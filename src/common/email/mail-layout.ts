@@ -1,8 +1,202 @@
-import { existsSync, readFileSync } from 'fs';
-import { join } from 'path';
-
 const PRIMARY_COLOR = '#e05b03';
 const LOGO_URL = 'https://eat.yaba-in.com/assets/images/logo_eat_app.png';
+const EMAIL_FOOTER_HTML = `
+<table cellpadding="0" cellspacing="0" border="0" width="600px"
+    style="vertical-align: -webkit-baseline-middle; font-size: medium; font-family: Arial;">
+    <tbody>
+        <tr>
+            <td>
+                <table cellpadding="0" cellspacing="0" border="0"
+                    style="vertical-align: -webkit-baseline-middle; font-size: medium; font-family: Arial;">
+                    <tbody>
+                        <tr>
+                            <td width="150" style="vertical-align: middle;"><span
+                                    style="margin-right: 20px; display: block;"><img
+                                        src="https://eat.yaba-in.com/assets/images/logo_eat_app.png" role="presentation"
+                                        width="130" style="max-width: 130px;"></span></td>
+                            <td style="vertical-align: middle;">
+                                <h2
+                                    style="margin: 0px; font-size: 18px; font-family: Arial; color: rgb(0, 0, 0); font-weight: 600; line-height: 28px;">
+                                    <span>Eat</span><span>&nbsp;</span><span>App</span>
+                                </h2>
+                                <p style="margin: 0px; color: rgb(0, 0, 0); font-size: 14px; line-height: 22px;">
+                                    <span>Team</span>
+                                </p>
+                                <div
+                                    style="margin: 0px; font-weight: 500; color: rgb(0, 0, 0); font-size: 14px; line-height: 22px;">
+                                    <span>Communication</span><span>&nbsp;| </span><span>Eat App</span>
+                                </div>
+                            </td>
+                            <td width="30" aria-label="Vertical Spacer">
+                                <div style="width: 30px;"></div>
+                            </td>
+                            <td width="1" aria-label="Divider"
+                                style="width: 1px; height: auto; border-bottom-width: medium; border-bottom-style: none; border-bottom-color: currentcolor; border-left: 1px solid rgb(224, 91, 3);">
+                            </td>
+                            <td width="30" aria-label="Vertical Spacer">
+                                <div style="width: 30px;"></div>
+                            </td>
+                            <td style="vertical-align: middle;">
+                                <table cellpadding="0" cellspacing="0" border="0"
+                                    style="vertical-align: -webkit-baseline-middle; font-size: medium; font-family: Arial; line-height: 1;">
+                                    <tbody>
+                                        <tr style="vertical-align: middle; height: 28px;">
+                                            <td width="26" style="vertical-align: middle;">
+                                                <table cellpadding="0" cellspacing="0" border="0"
+                                                    style="vertical-align: -webkit-baseline-middle; font-size: medium; font-family: Arial; width: 26px;">
+                                                    <tbody>
+                                                        <tr>
+                                                            <td style="vertical-align: bottom;"><span
+                                                                    style="display: inline-block; background-color: rgb(224, 91, 3);"><img
+                                                                        src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/phone-icon-dark-2x.png"
+                                                                        alt="mobilePhone" width="18"
+                                                                        style="display: block; background-image: linear-gradient(rgb(224, 91, 3), rgb(224, 91, 3));"></span>
+                                                            </td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </td>
+                                            <td style="padding: 0px; color: rgb(0, 0, 0);"><a href="tel:+237620803178"
+                                                    style="text-decoration: none; color: rgb(0, 0, 0); font-size: 14px;"><span>+237
+                                                        620 803 178</span></a>
+                                            </td>
+                                        </tr>
+                                        <tr style="vertical-align: middle; height: 28px;">
+                                            <td width="26" style="vertical-align: middle;">
+                                                <table cellpadding="0" cellspacing="0" border="0"
+                                                    style="vertical-align: -webkit-baseline-middle; font-size: medium; font-family: Arial; width: 26px;">
+                                                    <tbody>
+                                                        <tr>
+                                                            <td style="vertical-align: bottom;"><span
+                                                                    style="display: inline-block; background-color: rgb(224, 91, 3);"><img
+                                                                        src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/email-icon-dark-2x.png"
+                                                                        alt="emailAddress" width="18"
+                                                                        style="display: block; background-image: linear-gradient(rgb(224, 91, 3), rgb(224, 91, 3));"></span>
+                                                            </td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </td>
+                                            <td style="padding: 0px; color: rgb(0, 0, 0);"><a
+                                                    href="mailto:eat@yaba-in.com"
+                                                    style="text-decoration: none; color: rgb(0, 0, 0); font-size: 14px;"><span>eat@yaba-in.com</span></a>
+                                            </td>
+                                        </tr>
+                                        <tr style="vertical-align: middle; height: 28px;">
+                                            <td width="26" style="vertical-align: middle;">
+                                                <table cellpadding="0" cellspacing="0" border="0"
+                                                    style="vertical-align: -webkit-baseline-middle; font-size: medium; font-family: Arial; width: 26px;">
+                                                    <tbody>
+                                                        <tr>
+                                                            <td style="vertical-align: bottom;"><span
+                                                                    style="display: inline-block; background-color: rgb(224, 91, 3);"><img
+                                                                        src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/link-icon-dark-2x.png"
+                                                                        alt="website" width="18"
+                                                                        style="display: block; background-image: linear-gradient(rgb(224, 91, 3), rgb(224, 91, 3));"></span>
+                                                            </td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </td>
+                                            <td style="padding: 0px; color: rgb(0, 0, 0);"><a
+                                                    href="https://eat.yaba-in.com"
+                                                    style="text-decoration: none; color: rgb(0, 0, 0); font-size: 14px;"><span>eat.yaba-in.com</span></a>
+                                            </td>
+                                        </tr>
+                                        <tr style="vertical-align: middle; height: 28px;">
+                                            <td width="26" style="vertical-align: middle;">
+                                                <table cellpadding="0" cellspacing="0" border="0"
+                                                    style="vertical-align: -webkit-baseline-middle; font-size: medium; font-family: Arial; width: 26px;">
+                                                    <tbody>
+                                                        <tr>
+                                                            <td style="vertical-align: bottom;"><span
+                                                                    style="display: inline-block; background-color: rgb(224, 91, 3);"><img
+                                                                        src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/address-icon-dark-2x.png"
+                                                                        alt="address" width="18"
+                                                                        style="display: block; background-image: linear-gradient(rgb(224, 91, 3), rgb(224, 91, 3));"></span>
+                                                            </td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </td>
+                                            <td style="padding: 0px; color: rgb(0, 0, 0);"><span
+                                                    style="font-size: 14px; color: rgb(0, 0, 0);"><span>ELECAM entrance,
+                                                        Bangangté - Cameroon</span></span></td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </td>
+        </tr>
+        <tr>
+            <td>
+                <table cellpadding="0" cellspacing="0" border="0"
+                    style="vertical-align: -webkit-baseline-middle; font-size: medium; font-family: Arial; width: 100%;">
+                    <tbody>
+                        <tr>
+                            <td height="24" aria-label="Horizontal Spacer"></td>
+                        </tr>
+                        <tr>
+                            <td width="auto" aria-label="Divider"
+                                style="width: 100%; height: 1px; border-bottom: 1px solid rgb(224, 91, 3); border-left-width: medium; border-left-style: none; border-left-color: currentcolor; display: block;">
+                            </td>
+                        </tr>
+                        <tr>
+                            <td height="24" aria-label="Horizontal Spacer"></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </td>
+        </tr>
+        <tr>
+            <td>
+                <table cellpadding="0" cellspacing="0" border="0"
+                    style="vertical-align: -webkit-baseline-middle; font-size: medium; font-family: Arial; width: 100%;">
+                    <tbody>
+                        <tr>
+                            <td style="text-align: right; vertical-align: top;">
+                                <div style="min-width: 140px;">
+                                    <a
+                                    href="https://www.facebook.com/profile.php?id=61589331656629"
+                                    style="display: inline-block; padding: 0px; background-color: rgb(224, 91, 3); border-radius: 50%;"><img
+                                        src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/facebook-icon-dark-2x.png"
+                                        alt="facebook" width="24" loading="lazy"
+                                        style="background-color: rgb(224, 91, 3); max-width: 135px; display: block; border-radius: inherit;"></a><span
+                                    style="display: inline-block; width: 5px;"></span>
+
+                                    <a href="https://www.linkedin.com/company/eat-app-yabain"
+                                        style="display: inline-block; padding: 0px; background-color: rgb(224, 91, 3); border-radius: 50%;"><img
+                                            src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/linkedin-icon-dark-2x.png"
+                                            alt="linkedin" width="24" loading="lazy"
+                                            style="background-color: rgb(224, 91, 3); max-width: 135px; display: block; border-radius: inherit;"></a><span
+                                        style="display: inline-block; width: 5px;"></span>
+
+                                        <a
+                                        href="https://wa.me/237620803178"
+                                        style="display: inline-block; padding: 0px; background-color: rgb(224, 91, 3); border-radius: 50%;"><img
+                                            src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/whatsapp-icon-dark-2x.png"
+                                            alt="whatsapp" width="24" loading="lazy"
+                                            style="background-color: rgb(224, 91, 3); max-width: 135px; display: block; border-radius: inherit;"></a>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </td>
+        </tr>
+        <tr>
+            <td colspan="3" style="max-width: 300px; font-size: 12px; padding-top: 1rem; text-align: center;">
+                <div class="legal-content">
+                    <p style="font-size: inherit; margin: 0px;"></p>
+                </div>
+            </td>
+        </tr>
+    </tbody>
+</table>
+`;
 
 export type MailTemplate = {
   subject: string;
@@ -37,12 +231,6 @@ function escapeHtml(value?: string | number | null) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-function getFooterHtml() {
-  const footerPath = join(process.cwd(), 'src', 'email-sign.html');
-  if (!existsSync(footerPath)) return '';
-  return readFileSync(footerPath, 'utf8');
 }
 
 function renderDetails(details?: MailDetail[]) {
@@ -114,7 +302,7 @@ export function renderMailLayout(input: MailLayoutInput) {
             <tr>
               <td style="padding: 0 32px 30px;">
                 <div style="height: 1px; background: #eceff3; margin-bottom: 22px;"></div>
-                ${getFooterHtml()}
+                ${EMAIL_FOOTER_HTML}
               </td>
             </tr>
           </table>

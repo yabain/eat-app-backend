@@ -93,6 +93,9 @@ export class DeliveryAddressResponseDto {
 
   @ApiProperty({ example: 'Immeuble blanc, 2e étage' })
   details: string;
+
+  @ApiPropertyOptional({ example: 'https://maps.google.com/?q=5.0,10.0' })
+  mapLink?: string;
 }
 
 export class PricingSnapshotResponseDto {

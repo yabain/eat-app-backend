@@ -8,6 +8,7 @@ import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search
 import { CreateMenuItemDto } from './dto/create-menu-item.dto';
 import { MenuInventoryService } from './menu-inventory.service';
 import { UpdateMenuItemDto } from './dto/update-menu-item.dto';
+import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
 
 @Injectable()
 export class MenuService {
@@ -120,8 +121,14 @@ export class MenuService {
       filter = { _id: id, restaurantId: actor.restaurantId };
       delete (payload as any).restaurantId;
     }
+    const existing = await this.model.findOne(filter);
+    if (!existing) {
+      await deleteLocalUpload(payload.image);
+      throw new NotFoundException('Menu item not found');
+    }
     const item = await this.model.findOneAndUpdate(filter, payload, { new: true });
     if (!item) throw new NotFoundException('Menu item not found');
+    if (payload.image !== undefined) await deleteReplacedLocalUpload(existing.image, payload.image);
     return item;
   }
 
@@ -133,6 +140,7 @@ export class MenuService {
     }
     const item = await this.model.findOneAndDelete(filter);
     if (!item) throw new NotFoundException('Menu item not found');
+    await deleteLocalUpload(item.image);
     return item;
   }
 

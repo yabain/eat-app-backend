@@ -55,7 +55,7 @@ export class OrdersService {
           userId,
           restaurantId: dto.restaurantId,
           items: result.items,
-          deliveryAddress: { city: dto.city, district: dto.district, details: dto.details },
+          deliveryAddress: { city: dto.city, district: dto.district, details: dto.details, mapLink: result.deliveryMapLink },
           pricingSnapshot: result.pricingSnapshot,
           deliveryEstimateMinutes: result.deliveryEstimateMinutes,
           promoCode: dto.promoCode?.toUpperCase(),
@@ -182,6 +182,7 @@ export class OrdersService {
         grandTotal: itemsSubtotal + packagingTotal + deliveryFee + platformFee - promoDiscount,
       },
       deliveryEstimateMinutes,
+      deliveryMapLink: zone.mapLink || '',
       promo,
     };
   }

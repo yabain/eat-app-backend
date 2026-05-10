@@ -16,6 +16,7 @@ class DeliveryAddress {
   @Prop({ required: true }) city: string;
   @Prop({ required: true }) district: string;
   @Prop({ required: true }) details: string;
+  @Prop() mapLink?: string;
 }
 class PricingSnapshot {
   @Prop({ required: true }) itemsSubtotal: number;

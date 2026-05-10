@@ -6,6 +6,7 @@ import { Restaurant, RestaurantDocument } from '../../database/schemas/restauran
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
+import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
 import { AssignManagerDto } from './dto/assign-manager.dto';
 import { CreateRestaurantDto } from './dto/create-restaurant.dto';
 import { UpdateRestaurantMediaDto } from './dto/update-restaurant-media.dto';
@@ -112,6 +113,11 @@ export class RestaurantsService {
   }
 
   async update(id: string, dto: UpdateRestaurantDto, actor?: any) {
+    const existing = await this.model.findById(id);
+    if (!existing) {
+      await this.deleteNewMedia(dto);
+      throw new NotFoundException('Restaurant not found');
+    }
     if (actor?.role === UserRole.MANAGER) {
       if (actor.restaurantId?.toString() !== id) throw new ForbiddenException('You can only edit your own restaurant');
       delete dto.managerId;
@@ -121,6 +127,7 @@ export class RestaurantsService {
     }
     const item = await this.model.findByIdAndUpdate(id, dto, { new: true });
     if (!item) throw new NotFoundException('Restaurant not found');
+    await this.deleteReplacedMedia(existing, dto);
     return item;
   }
   async activate(id: string) {
@@ -142,14 +149,44 @@ export class RestaurantsService {
   }
 
   async updateMedia(id: string, dto: UpdateRestaurantMediaDto) {
+    const existing = await this.model.findById(id);
     const updatePayload: any = { ...dto };
     if (dto.bannerImage && !dto.coverImage) updatePayload.coverImage = dto.bannerImage;
+    if (!existing) {
+      await this.deleteNewMedia(updatePayload);
+      throw new NotFoundException('Restaurant not found');
+    }
     const item = await this.model.findByIdAndUpdate(id, updatePayload, { new: true });
     if (!item) throw new NotFoundException('Restaurant not found');
+    await this.deleteReplacedMedia(existing, updatePayload);
     return item;
   }
 
-  remove(id: string) {
-    return this.model.findByIdAndDelete(id);
+  async remove(id: string) {
+    const item = await this.model.findByIdAndDelete(id);
+    if (item) {
+      await Promise.all([
+        deleteLocalUpload(item.logo),
+        deleteLocalUpload(item.bannerImage),
+        deleteLocalUpload(item.coverImage),
+      ]);
+    }
+    return item;
+  }
+
+  private async deleteReplacedMedia(previous: RestaurantDocument, next: { logo?: string; bannerImage?: string; coverImage?: string }) {
+    await Promise.all([
+      next.logo !== undefined ? deleteReplacedLocalUpload(previous.logo, next.logo) : Promise.resolve(),
+      next.bannerImage !== undefined ? deleteReplacedLocalUpload(previous.bannerImage, next.bannerImage) : Promise.resolve(),
+      next.coverImage !== undefined ? deleteReplacedLocalUpload(previous.coverImage, next.coverImage) : Promise.resolve(),
+    ]);
+  }
+
+  private async deleteNewMedia(media: { logo?: string; bannerImage?: string; coverImage?: string }) {
+    await Promise.all([
+      deleteLocalUpload(media.logo),
+      deleteLocalUpload(media.bannerImage),
+      deleteLocalUpload(media.coverImage),
+    ]);
   }
 }
