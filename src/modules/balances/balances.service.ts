@@ -3,12 +3,12 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
+import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { WithdrawalRequest, WithdrawalRequestDocument } from '../../database/schemas/withdrawal-request.schema';
-import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { UserRole } from '../../common/enums/roles.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
-import { CreditDriverDto } from './dto/credit-driver.dto';
+import { AdminBalanceOperationDto } from './dto/admin-balance-operation.dto';
 import { CreateWithdrawalDto } from './dto/create-withdrawal.dto';
 
 @Injectable()
@@ -17,18 +17,11 @@ export class BalancesService {
     @InjectModel(BalanceTransaction.name) private balanceModel: Model<BalanceTransactionDocument>,
     @InjectModel(WithdrawalRequest.name) private withdrawalModel: Model<WithdrawalRequestDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
   ) {}
 
   private oid(id: string | Types.ObjectId) { return new Types.ObjectId(String(id)); }
-
-  private async platformFeesTotal(): Promise<number> {
-    const agg = await this.orderModel.aggregate([
-      { $match: { paymentStatus: PaymentStatus.PAID } },
-      { $group: { _id: null, total: { $sum: '$pricingSnapshot.platformFee' } } },
-    ]);
-    return Number(agg[0]?.total || 0);
-  }
 
   private async balanceFor(filter: any): Promise<number> {
     const agg = await this.balanceModel.aggregate([
@@ -51,10 +44,9 @@ export class BalancesService {
   async summary(actor: any) {
     const scope = this.scopeForActor(actor);
     const ledgerBalance = await this.balanceFor(scope);
-    const platformFees = scope.ownerType === 'system' ? await this.platformFeesTotal() : 0;
     return {
       ownerType: scope.ownerType,
-      balance: scope.ownerType === 'system' ? platformFees + ledgerBalance : ledgerBalance,
+      balance: ledgerBalance,
       currency: 'XAF',
     };
   }
@@ -80,13 +72,56 @@ export class BalancesService {
     return { data, meta: buildPaginationMeta(pagination.page, pagination.limit, total) };
   }
 
-  async creditDriver(driverId: string, dto: CreditDriverDto, actor: any) {
-    if (actor.role !== UserRole.ADMIN) throw new ForbiddenException('Only admin can credit a driver');
+  private assertAdmin(actor: any) {
+    if (actor.role !== UserRole.ADMIN) throw new ForbiddenException('Only admin can manage balances');
+  }
+
+  private normalizeAmount(dto: AdminBalanceOperationDto) {
     const amount = Number(dto.amount || 0);
     if (amount <= 0) throw new BadRequestException('Amount must be positive');
+    return amount;
+  }
+
+  private async findDriverOrFail(driverId: string) {
     const driver = await this.userModel.findById(driverId);
     if (!driver) throw new NotFoundException('Driver not found');
     if (driver.role !== UserRole.DRIVER) throw new BadRequestException('Selected user is not a driver');
+    return driver;
+  }
+
+  private async findRestaurantOrFail(restaurantId: string) {
+    const restaurant = await this.restaurantModel.findById(restaurantId);
+    if (!restaurant) throw new NotFoundException('Restaurant not found');
+    return restaurant;
+  }
+
+
+  async driverBalance(driverId: string, actor: any) {
+    this.assertAdmin(actor);
+    const driver = await this.findDriverOrFail(driverId);
+    return {
+      ownerType: 'user',
+      userId: driver._id,
+      balance: await this.balanceFor({ ownerType: 'user', userId: driver._id }),
+      currency: 'XAF',
+    };
+  }
+
+  async restaurantBalance(restaurantId: string, actor: any) {
+    this.assertAdmin(actor);
+    const restaurant = await this.findRestaurantOrFail(restaurantId);
+    return {
+      ownerType: 'restaurant',
+      restaurantId: restaurant._id,
+      balance: await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id }),
+      currency: 'XAF',
+    };
+  }
+
+  async creditDriver(driverId: string, dto: AdminBalanceOperationDto, actor: any) {
+    this.assertAdmin(actor);
+    const amount = this.normalizeAmount(dto);
+    const driver = await this.findDriverOrFail(driverId);
 
     const mainBalance = (await this.summary(actor)).balance;
     if (amount > mainBalance) throw new BadRequestException('Insufficient main balance');
@@ -98,6 +133,66 @@ export class BalancesService {
     ]);
 
     return { systemDebit, driverCredit, driverBalance: await this.balanceFor({ ownerType: 'user', userId: driver._id }) };
+  }
+
+  async debitDriver(driverId: string, dto: AdminBalanceOperationDto, actor: any) {
+    this.assertAdmin(actor);
+    const amount = this.normalizeAmount(dto);
+    const driver = await this.findDriverOrFail(driverId);
+    const driverBalance = await this.balanceFor({ ownerType: 'user', userId: driver._id });
+    if (amount > driverBalance) throw new BadRequestException('Insufficient driver balance');
+
+    const createdBy = this.oid(actor.sub);
+    const transaction = await this.balanceModel.create({
+      ownerType: 'user',
+      userId: driver._id,
+      amount: -amount,
+      type: 'debit',
+      reason: 'admin_driver_debit',
+      createdBy,
+      note: dto.note,
+      currency: 'XAF',
+    });
+
+    return { transaction, driverBalance: await this.balanceFor({ ownerType: 'user', userId: driver._id }) };
+  }
+
+  async creditRestaurant(restaurantId: string, dto: AdminBalanceOperationDto, actor: any) {
+    this.assertAdmin(actor);
+    const amount = this.normalizeAmount(dto);
+    const restaurant = await this.findRestaurantOrFail(restaurantId);
+    const mainBalance = (await this.summary(actor)).balance;
+    if (amount > mainBalance) throw new BadRequestException('Insufficient main balance');
+
+    const createdBy = this.oid(actor.sub);
+    const [systemDebit, restaurantCredit] = await Promise.all([
+      this.balanceModel.create({ ownerType: 'system', amount: -amount, type: 'debit', reason: 'restaurant_funding', restaurantId: restaurant._id, createdBy, note: dto.note, currency: 'XAF' }),
+      this.balanceModel.create({ ownerType: 'restaurant', restaurantId: restaurant._id, amount, type: 'credit', reason: 'admin_restaurant_credit', createdBy, note: dto.note, currency: 'XAF' }),
+    ]);
+
+    return { systemDebit, restaurantCredit, restaurantBalance: await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id }) };
+  }
+
+  async debitRestaurant(restaurantId: string, dto: AdminBalanceOperationDto, actor: any) {
+    this.assertAdmin(actor);
+    const amount = this.normalizeAmount(dto);
+    const restaurant = await this.findRestaurantOrFail(restaurantId);
+    const restaurantBalance = await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id });
+    if (amount > restaurantBalance) throw new BadRequestException('Insufficient restaurant balance');
+
+    const createdBy = this.oid(actor.sub);
+    const transaction = await this.balanceModel.create({
+      ownerType: 'restaurant',
+      restaurantId: restaurant._id,
+      amount: -amount,
+      type: 'debit',
+      reason: 'admin_restaurant_debit',
+      createdBy,
+      note: dto.note,
+      currency: 'XAF',
+    });
+
+    return { transaction, restaurantBalance: await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id }) };
   }
 
   async createWithdrawal(actor: any, dto: CreateWithdrawalDto) {

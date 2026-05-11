@@ -18,7 +18,8 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { extname, join } from 'path';
+import { extname } from 'path';
+import { resolveUploadDir } from '../../common/utils/upload-dir.util';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -34,8 +35,7 @@ import { PaginatedUsersResponseDto, ProfileImageResponseDto, UserResponseDto } f
 
 const profileUploadStorage = diskStorage({
   destination: (_req, _file, cb) => {
-    const baseDir = process.env.UPLOAD_DIR || 'uploads';
-    const target = join(process.cwd(), baseDir, 'profiles');
+    const target = resolveUploadDir('profiles');
     mkdirSync(target, { recursive: true });
     cb(null, target);
   },

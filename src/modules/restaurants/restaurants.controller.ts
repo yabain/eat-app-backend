@@ -4,7 +4,8 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { extname, join } from 'path';
+import { extname } from 'path';
+import { resolveUploadDir } from '../../common/utils/upload-dir.util';
 import { RestaurantsService } from './restaurants.service';
 import { AssignManagerDto } from './dto/assign-manager.dto';
 import { CreateRestaurantDto } from './dto/create-restaurant.dto';
@@ -23,8 +24,7 @@ import {
 
 const restaurantUploadStorage = diskStorage({
   destination: (_req, _file, cb) => {
-    const baseDir = process.env.UPLOAD_DIR || 'uploads';
-    const target = join(process.cwd(), baseDir, 'restaurants');
+    const target = resolveUploadDir('restaurants');
     mkdirSync(target, { recursive: true });
     cb(null, target);
   },

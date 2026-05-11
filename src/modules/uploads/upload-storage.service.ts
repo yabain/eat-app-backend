@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { mkdirSync } from 'fs';
-import { join } from 'path';
+import { resolveUploadDir } from '../../common/utils/upload-dir.util';
 
 @Injectable()
 export class UploadStorageService {
@@ -25,9 +25,8 @@ export class UploadStorageService {
 
   resolveDestination(rawFolder?: string | string[]) {
     this.assertLocalDriver();
-    const baseDir = this.configService.get<string>('UPLOAD_DIR', 'uploads');
     const folder = this.parseFolder(rawFolder);
-    const target = folder ? join(process.cwd(), baseDir, folder) : join(process.cwd(), baseDir);
+    const target = resolveUploadDir(folder);
     mkdirSync(target, { recursive: true });
     return target;
   }

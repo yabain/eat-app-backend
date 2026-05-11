@@ -284,32 +284,65 @@ export class PaymentsService {
   }
 
 
-  private restaurantBalanceAmount(order: any): number {
+  private orderBalanceDistribution(order: any) {
     const pricing = order.pricingSnapshot || {};
     const grandTotal = Number(pricing.grandTotal || 0);
     const platformFee = Number(pricing.platformFee || 0);
-    return Math.max(0, grandTotal - platformFee);
+    const deliveryFee = Number(pricing.deliveryFee || 0);
+    const packagingTotal = Number(pricing.packagingTotal || 0);
+
+    return {
+      systemAmount: Math.max(0, platformFee + packagingTotal + deliveryFee * 0.25),
+      restaurantAmount: Math.max(0, grandTotal - platformFee - deliveryFee - packagingTotal),
+    };
   }
 
-  private async creditRestaurantBalance(order: any, payment: any) {
-    const amount = this.restaurantBalanceAmount(order);
-    if (!amount || !order.restaurantId || !payment?._id) return;
-    await this.balanceModel.updateOne(
-      { paymentId: payment._id },
-      {
-        $setOnInsert: {
-          ownerType: 'restaurant',
-          restaurantId: order.restaurantId,
-          orderId: order._id,
-          paymentId: payment._id,
-          amount,
-          type: 'credit',
-          reason: 'order_payment',
-          currency: payment.currency || 'XAF',
+  private async creditOrderBalances(order: any, payment: any) {
+    if (!payment?._id) return;
+    const { systemAmount, restaurantAmount } = this.orderBalanceDistribution(order);
+    const currency = payment.currency || 'XAF';
+    const operations: Promise<any>[] = [];
+
+    if (systemAmount > 0) {
+      operations.push(this.balanceModel.updateOne(
+        { paymentId: payment._id, ownerType: 'system', reason: 'order_system_share' },
+        {
+          $setOnInsert: {
+            ownerType: 'system',
+            orderId: order._id,
+            paymentId: payment._id,
+            amount: systemAmount,
+            type: 'credit',
+            reason: 'order_system_share',
+            note: 'Platform fee + packaging fees + 25% delivery fee',
+            currency,
+          },
         },
-      },
-      { upsert: true },
-    );
+        { upsert: true },
+      ));
+    }
+
+    if (restaurantAmount > 0 && order.restaurantId) {
+      operations.push(this.balanceModel.updateOne(
+        { paymentId: payment._id, ownerType: 'restaurant', restaurantId: order.restaurantId, reason: 'order_restaurant_share' },
+        {
+          $setOnInsert: {
+            ownerType: 'restaurant',
+            restaurantId: order.restaurantId,
+            orderId: order._id,
+            paymentId: payment._id,
+            amount: restaurantAmount,
+            type: 'credit',
+            reason: 'order_restaurant_share',
+            note: 'Order total minus platform, delivery and packaging fees',
+            currency,
+          },
+        },
+        { upsert: true },
+      ));
+    }
+
+    await Promise.all(operations);
   }
 
   private async applyPayinStatus(payment: any, order: any, status: string, payload: any) {
@@ -339,7 +372,7 @@ export class PaymentsService {
     await order.save();
 
     if (success && !wasAlreadyPaid) {
-      await this.creditRestaurantBalance(order, payment);
+      await this.creditOrderBalances(order, payment);
       await Promise.all(
         order.items.map((item: any) =>
           this.inventory.adjustStock(item.menuItemId, -item.quantity),

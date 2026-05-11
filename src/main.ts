@@ -2,9 +2,9 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { resolveUploadDir } from './common/utils/upload-dir.util';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -31,8 +31,7 @@ async function bootstrap() {
     swaggerOptions: { persistAuthorization: true },
   });
 
-  const uploadDir = process.env.UPLOAD_DIR || 'uploads';
-  const staticPath = join(process.cwd(), uploadDir);
+  const staticPath = resolveUploadDir();
   if (!existsSync(staticPath)) mkdirSync(staticPath, { recursive: true });
   app.useStaticAssets(staticPath, { prefix: '/uploads' });
   await app.listen(process.env.PORT || 3000);

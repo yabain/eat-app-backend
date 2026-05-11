@@ -1,5 +1,6 @@
 import { unlink } from 'fs/promises';
-import { resolve } from 'path';
+import { relative, resolve } from 'path';
+import { resolveUploadDir } from './upload-dir.util';
 
 function toLocalUploadPath(fileUrl?: string | null) {
   if (!fileUrl) return null;
@@ -14,12 +15,11 @@ function toLocalUploadPath(fileUrl?: string | null) {
 
   if (!path.startsWith('/uploads/')) return null;
 
-  const uploadDir = process.env.UPLOAD_DIR || 'uploads';
-  const uploadRoot = resolve(process.cwd(), uploadDir);
+  const uploadRoot = resolve(resolveUploadDir());
   const relativePath = path.replace(/^\/uploads\/?/, '');
   const absolutePath = resolve(uploadRoot, relativePath);
 
-  if (!absolutePath.startsWith(uploadRoot)) return null;
+  if (relative(uploadRoot, absolutePath).startsWith('..')) return null;
   return absolutePath;
 }
 

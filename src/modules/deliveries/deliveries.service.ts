@@ -5,9 +5,12 @@ import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.sche
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
+import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
+import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
 import { UserRole } from '../../common/enums/roles.enum';
+import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { AssignDeliveryDto } from './dto/assign-delivery.dto';
 import { UpdateDeliveryStatusDto } from './dto/update-delivery-status.dto';
 
@@ -18,6 +21,8 @@ export class DeliveriesService {
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
+    @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
+    @InjectModel(BalanceTransaction.name) private balanceModel: Model<BalanceTransactionDocument>,
   ) {}
 
   async assign(dto: AssignDeliveryDto, actor: any) {
@@ -44,6 +49,35 @@ export class DeliveriesService {
       status: 'assigned',
       assignedAt: new Date(),
     });
+  }
+
+  private async creditDriverDeliveryShare(order: OrderDocument, driverId: Types.ObjectId) {
+    const deliveryFee = Number(order.pricingSnapshot?.deliveryFee || 0);
+    const driverAmount = Math.max(0, deliveryFee * 0.75);
+    if (!driverAmount) return;
+
+    const payment = await this.paymentModel
+      .findOne({ orderId: order._id, status: PaymentStatus.PAID })
+      .sort({ completedAt: -1, updatedAt: -1 });
+    if (!payment?._id) return;
+
+    await this.balanceModel.updateOne(
+      { paymentId: payment._id, ownerType: 'user', userId: driverId, reason: 'order_delivery_share' },
+      {
+        $setOnInsert: {
+          ownerType: 'user',
+          userId: driverId,
+          orderId: order._id,
+          paymentId: payment._id,
+          amount: driverAmount,
+          type: 'credit',
+          reason: 'order_delivery_share',
+          note: '75% delivery fee',
+          currency: payment.currency || 'XAF',
+        },
+      },
+      { upsert: true },
+    );
   }
 
   async my(driverId: string, page?: number, limit?: number, filters?: { q?: string; status?: string; orderId?: string }) {
@@ -148,6 +182,7 @@ export class DeliveriesService {
     order.orderStatus = dto.status === 'delivered' ? 'delivered' : dto.status;
     if (dto.status === 'out_for_delivery' && !order.outForDeliveryAt) order.outForDeliveryAt = new Date();
     await order.save();
+    if (dto.status === 'delivered') await this.creditDriverDeliveryShare(order, delivery.driverId);
     return delivery;
   }
 }

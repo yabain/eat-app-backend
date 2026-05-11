@@ -4,10 +4,10 @@ import { MulterModule } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { mkdirSync } from 'fs';
 import { extname } from 'path';
-import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { UploadsController } from './uploads.controller';
 import { UploadStorageService } from './upload-storage.service';
+import { resolveUploadDir } from '../../common/utils/upload-dir.util';
 
 @Module({
   imports: [
@@ -28,8 +28,7 @@ import { UploadStorageService } from './upload-storage.service';
                 return cb(new Error('Invalid upload folder'), '');
               }
 
-              const baseDir = configService.get<string>('UPLOAD_DIR', 'uploads');
-              const target = folder ? join(process.cwd(), baseDir, folder) : join(process.cwd(), baseDir);
+              const target = resolveUploadDir(folder);
               mkdirSync(target, { recursive: true });
               cb(null, target);
             } catch (error) {

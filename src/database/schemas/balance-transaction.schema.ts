@@ -21,5 +21,8 @@ export class BalanceTransaction {
   @Prop({ default: 'XAF' }) currency: string;
 }
 export const BalanceTransactionSchema = SchemaFactory.createForClass(BalanceTransaction);
-BalanceTransactionSchema.index({ paymentId: 1 }, { unique: true, sparse: true });
+BalanceTransactionSchema.index(
+  { paymentId: 1, ownerType: 1, restaurantId: 1, userId: 1, reason: 1 },
+  { unique: true, sparse: true },
+);
 BalanceTransactionSchema.index({ ownerType: 1, restaurantId: 1, userId: 1, createdAt: -1 });

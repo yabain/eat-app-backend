@@ -27,7 +27,8 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { extname, join } from 'path';
+import { extname } from 'path';
+import { resolveUploadDir } from '../../common/utils/upload-dir.util';
 import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
@@ -40,8 +41,7 @@ import { CategoryResponseDto, PaginatedCategoriesResponseDto } from './dto/categ
 
 const categoryUploadStorage = diskStorage({
   destination: (_req, _file, cb) => {
-    const baseDir = process.env.UPLOAD_DIR || 'uploads';
-    const target = join(process.cwd(), baseDir, 'categories');
+    const target = resolveUploadDir('categories');
     mkdirSync(target, { recursive: true });
     cb(null, target);
   },
