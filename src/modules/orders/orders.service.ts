@@ -13,6 +13,7 @@ import { PreviewOrderDto } from './dto/preview-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { CheckoutFromCartDto } from './dto/checkout-from-cart.dto';
 import { NotificationsService } from '../notifications/notifications.service';
+import { MenuInventoryService } from '../menu/menu-inventory.service';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
@@ -28,6 +29,7 @@ export class OrdersService {
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Cart.name) private cartModel: Model<CartDocument>,
     private notifications: NotificationsService,
+    private inventory: MenuInventoryService,
   ) {}
 
   private async buildPreviewInputFromCart(userId: string, dto: CheckoutFromCartDto, session?: ClientSession): Promise<PreviewOrderDto> {
@@ -47,6 +49,14 @@ export class OrdersService {
 
   private async placeOrderWithinSession(userId: string, dto: PreviewOrderDto, session: ClientSession) {
     const result = await this.calculate(dto, session);
+
+    // Réservation atomique du stock : on décrémente chaque item dans la même
+    // transaction que la création de la commande. Si un item n'a plus assez de
+    // stock (race avec une autre commande), `adjustStock` lève BadRequestException
+    // et la transaction est rollback.
+    for (const item of result.items) {
+      await this.inventory.adjustStock(item.menuItemId, -item.quantity, session);
+    }
 
     const [order] = await this.orderModel.create(
       [

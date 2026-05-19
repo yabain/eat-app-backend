@@ -75,11 +75,14 @@ export class PaymentsController {
   @Post('webhook/digikuntz')
   @ApiOperation({
     summary: 'Webhook DigiKuntz',
-    description: 'Reçoit les notifications de statut de paiement de DigiKuntz. Statuts traités : `payin_success` (paiement confirmé, stock décrémenté), `payin_error` / `payin_closed` (paiement échoué). `payin_pending` est ignoré.',
+    description: 'Reçoit les notifications de statut de paiement de DigiKuntz. Statuts traités : `payin_success` (paiement confirmé), `payin_error` / `payin_closed` (paiement échoué, stock restitué). `payin_pending` est ignoré. Le query param `token` doit correspondre à `DIGIKUNTZ_WEBHOOK_SECRET`. Le payload n\'est pas considéré comme source de vérité : le serveur réinterroge DigiKuntz pour valider le statut et compare le montant avec celui enregistré localement avant toute mise à jour.',
   })
+  @ApiQuery({ name: 'token', required: false, description: 'Webhook shared secret (configured via DIGIKUNTZ_WEBHOOK_SECRET).' })
   @ApiBody({ type: DigikuntzWebhookDto })
   @ApiOkResponse({ description: 'Webhook traité', type: OkResponseDto })
-  webhook(@Body() body: DigikuntzWebhookDto) { return this.service.webhook(body); }
+  webhook(@Body() body: DigikuntzWebhookDto, @Query('token') token?: string) {
+    return this.service.webhook(body, token);
+  }
 
 
   @UseGuards(JwtAuthGuard, RolesGuard)

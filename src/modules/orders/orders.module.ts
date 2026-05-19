@@ -9,6 +9,7 @@ import { Cart, CartSchema } from '../../database/schemas/cart.schema';
 import { OrdersController } from './orders.controller';
 import { OrdersService } from './orders.service';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { MenuModule } from '../menu/menu.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
       { name: Cart.name, schema: CartSchema },
     ]),
     NotificationsModule,
+    MenuModule,
   ],
   providers: [OrdersService],
   controllers: [OrdersController],

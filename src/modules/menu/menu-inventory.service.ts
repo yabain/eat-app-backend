@@ -1,7 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { ClientSession, Model, Types } from 'mongoose';
 import { Category, CategoryDocument } from '../../database/schemas/category.schema';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
 
@@ -14,15 +14,32 @@ export class MenuInventoryService {
     @InjectModel(Category.name) private readonly categoryModel: Model<CategoryDocument>,
   ) {}
 
-  async adjustStock(menuItemId: string | Types.ObjectId, delta: number) {
-    return this.menuModel.findByIdAndUpdate(
-      menuItemId,
-      [
-        { $set: { stock: { $add: ['$stock', delta] } } },
-        { $set: { isAvailable: { $gt: ['$stock', 0] } } },
-      ],
-      { new: true },
-    );
+  async adjustStock(
+    menuItemId: string | Types.ObjectId,
+    delta: number,
+    session?: ClientSession,
+  ) {
+    const update = [
+      { $set: { stock: { $add: ['$stock', delta] } } },
+      { $set: { isAvailable: { $gt: ['$stock', 0] } } },
+    ];
+    const options: any = { new: true };
+    if (session) options.session = session;
+
+    if (delta < 0) {
+      // Décrément conditionnel : si le stock est insuffisant, l'update échoue
+      // (retourne null) plutôt que de descendre en négatif.
+      const required = -delta;
+      const result = await this.menuModel.findOneAndUpdate(
+        { _id: menuItemId, stock: { $gte: required } },
+        update,
+        options,
+      );
+      if (!result) throw new BadRequestException(`Insufficient stock for menu item ${menuItemId}`);
+      return result;
+    }
+
+    return this.menuModel.findByIdAndUpdate(menuItemId, update, options);
   }
 
   normalizeAvailabilityForStock<T extends { stock?: number; isAvailable?: boolean }>(payload: T): T {

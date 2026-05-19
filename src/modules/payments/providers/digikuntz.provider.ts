@@ -15,7 +15,10 @@ export class DigikuntzProvider {
   }
 
   async initiatePayment(orderNumber: string, amount: number, userPhone?: string, userEmail?: string) {
-    const callbackUrl = `${process.env.APP_URL}/api/payments/webhook/digikuntz`;
+    const webhookSecret = process.env.DIGIKUNTZ_WEBHOOK_SECRET;
+    const callbackUrl = webhookSecret
+      ? `${process.env.APP_URL}/api/payments/webhook/digikuntz?token=${encodeURIComponent(webhookSecret)}`
+      : `${process.env.APP_URL}/api/payments/webhook/digikuntz`;
     const res = await fetch(`${this.baseUrl}/dev/transaction`, {
       method: 'POST',
       headers: this.headers,

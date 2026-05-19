@@ -3,16 +3,18 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Cart, CartDocument } from '../../database/schemas/cart.schema';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
-import { MenuInventoryService } from '../menu/menu-inventory.service';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
 
 @Injectable()
 export class CartsService {
+  // NB: le stock n'est PAS décrémenté à l'ajout au panier. La réservation
+  // atomique se fait au moment de la création de la commande (cf.
+  // OrdersService.placeOrderWithinSession). Le panier valide seulement la
+  // disponibilité côté lecture pour donner un feedback utilisateur immédiat.
   constructor(
     @InjectModel(Cart.name) private cartModel: Model<CartDocument>,
     @InjectModel(MenuItem.name) private menuModel: Model<MenuItemDocument>,
-    private readonly inventory: MenuInventoryService,
   ) {}
 
   private async findMenuItemOrFail(menuItemId: string) {
@@ -66,10 +68,7 @@ export class CartsService {
       cart.items.push({ menuItemId: new Types.ObjectId(dto.menuItemId), quantity: dto.quantity } as any);
     }
     cart.restaurantId = menuItem.restaurantId;
-    await Promise.all([
-      cart.save(),
-      this.inventory.adjustStock(dto.menuItemId, -dto.quantity),
-    ]);
+    await cart.save();
     return this.populateCart(cart._id);
   }
 
@@ -78,9 +77,8 @@ export class CartsService {
     const item = cart.items.find((i) => String(i.menuItemId) === menuItemId);
     if (!item) throw new NotFoundException('Item not found in cart');
 
-    const delta = item.quantity - dto.quantity;
     const menuItem = await this.findMenuItemOrFail(menuItemId);
-    if (menuItem.stock + delta < 0) {
+    if (dto.quantity > menuItem.stock) {
       throw new BadRequestException('Requested quantity exceeds available stock');
     }
 
@@ -89,7 +87,6 @@ export class CartsService {
       { $set: { 'items.$.quantity': dto.quantity } },
       { new: true },
     );
-    await this.inventory.adjustStock(menuItemId, delta);
     return this.populateCart(updated._id);
   }
 
@@ -100,21 +97,15 @@ export class CartsService {
 
     cart.items = cart.items.filter((i) => String(i.menuItemId) !== menuItemId) as any;
     if (cart.items.length === 0) cart.restaurantId = null;
-    await Promise.all([
-      cart.save(),
-      this.inventory.adjustStock(menuItemId, item.quantity),
-    ]);
+    await cart.save();
     return this.populateCart(cart._id);
   }
 
   async clear(userId: string) {
     const cart = await this.findOrCreateCart(userId);
-    const stockUpdates = cart.items.map((i) =>
-      this.inventory.adjustStock(i.menuItemId, i.quantity),
-    );
     cart.items = [];
     cart.restaurantId = null;
-    await Promise.all([cart.save(), ...stockUpdates]);
+    await cart.save();
     return { ok: true };
   }
 }

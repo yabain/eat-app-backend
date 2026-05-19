@@ -1,7 +1,8 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { timingSafeEqual } from 'crypto';
 import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
@@ -17,6 +18,8 @@ import { buildContainsRegex } from '../../common/utils/search.util';
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
+
   constructor(
     @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
@@ -251,16 +254,90 @@ export class PaymentsService {
     };
   }
 
-  async webhook(payload: any) {
-    // DigiKuntz envoie { id, status, data }
+  async webhook(payload: any, providedToken?: string) {
+    this.assertWebhookAuthenticated(providedToken);
+
+    if (!payload?.id) throw new BadRequestException('Missing transaction id');
+
     const payment = await this.paymentModel.findOne({ providerRef: payload.id });
     if (!payment) throw new NotFoundException('Payment not found');
+
+    // Idempotence stricte : une transaction PAID ou FAILED ne doit pas être rejouée
+    // par un retry de DigiKuntz qui voudrait nous renvoyer un autre statut.
+    if (payment.status === PaymentStatus.PAID) return { ok: true, idempotent: true };
+    if (payment.status === PaymentStatus.FAILED && ['payin_error', 'payin_closed'].includes(payload.status)) {
+      return { ok: true, idempotent: true };
+    }
+
+    // Trust but verify : on ne fait pas confiance au payload du webhook,
+    // on réinterroge DigiKuntz pour obtenir le vrai statut.
+    const remote = await this.provider.getTransactionStatus(payload.id);
+    if (!remote) {
+      this.logger.error(`Webhook received for ${payload.id} but DigiKuntz status fetch failed`);
+      throw new ServiceUnavailableException('Unable to verify DigiKuntz transaction status');
+    }
+
+    if (remote.id && String(remote.id) !== String(payload.id)) {
+      this.logger.error(`Webhook id mismatch: payload=${payload.id} remote=${remote.id}`);
+      throw new BadRequestException('Transaction id mismatch');
+    }
+
+    const remoteAmount = this.extractRemoteAmount(remote);
+    const expectedAmount = Number(payment.amount);
+    if (
+      !Number.isFinite(expectedAmount)
+      || remoteAmount === null
+      || Math.abs(remoteAmount - expectedAmount) > 0.5
+    ) {
+      this.logger.error(
+        `Webhook amount mismatch for payment ${payment._id}: expected=${expectedAmount} remote=${remoteAmount}`,
+      );
+      throw new BadRequestException('Payment amount mismatch');
+    }
 
     const order = await this.orderModel.findById(payment.orderId);
     if (!order) throw new NotFoundException('Order not found');
 
-    await this.applyPayinStatus(payment, order, payload.status, payload);
+    await this.applyPayinStatus(payment, order, remote.status, remote);
     return { ok: true };
+  }
+
+  private assertWebhookAuthenticated(providedToken?: string) {
+    const expected = process.env.DIGIKUNTZ_WEBHOOK_SECRET;
+    if (!expected) {
+      if (process.env.NODE_ENV === 'production') {
+        this.logger.error('DIGIKUNTZ_WEBHOOK_SECRET is not configured — refusing webhook in production');
+        throw new UnauthorizedException('Webhook authentication is not configured');
+      }
+      this.logger.warn('DIGIKUNTZ_WEBHOOK_SECRET is not configured — webhook is unauthenticated (dev mode only)');
+      return;
+    }
+    if (!providedToken || !this.constantTimeEquals(providedToken, expected)) {
+      this.logger.warn('Rejected DigiKuntz webhook with invalid or missing token');
+      throw new UnauthorizedException('Invalid webhook token');
+    }
+  }
+
+  private constantTimeEquals(a: string, b: string): boolean {
+    const ba = Buffer.from(a, 'utf8');
+    const bb = Buffer.from(b, 'utf8');
+    if (ba.length !== bb.length) return false;
+    return timingSafeEqual(ba, bb);
+  }
+
+  private extractRemoteAmount(remote: any): number | null {
+    const candidates = [
+      remote?.data?.estimation,
+      remote?.data?.amount,
+      remote?.data?.paymentWithTaxes,
+      remote?.amount,
+    ];
+    for (const candidate of candidates) {
+      if (candidate === undefined || candidate === null) continue;
+      const value = Number(candidate);
+      if (Number.isFinite(value)) return value;
+    }
+    return null;
   }
 
   @Cron(CronExpression.EVERY_5_MINUTES)
@@ -281,6 +358,89 @@ export class PaymentsService {
 
       await this.applyPayinStatus(payment, order, remote.status, remote);
     }
+
+    await this.expireStalePendingOrders();
+  }
+
+  private getOrderPaymentTimeoutMs(): number {
+    const minutes = Number(process.env.ORDER_PAYMENT_TIMEOUT_MINUTES);
+    const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 30;
+    return safeMinutes * 60 * 1000;
+  }
+
+  /**
+   * Annule les commandes restées en PENDING_PAYMENT au-delà du TTL et restitue
+   * leur stock. Avant d'annuler, on tente une dernière vérification auprès de
+   * DigiKuntz pour éviter d'écraser un paiement réussi tardivement (mobile money
+   * peut prendre plusieurs minutes).
+   */
+  private async expireStalePendingOrders() {
+    const cutoff = new Date(Date.now() - this.getOrderPaymentTimeoutMs());
+    const staleOrders = await this.orderModel.find({
+      orderStatus: OrderStatus.PENDING_PAYMENT,
+      createdAt: { $lt: cutoff },
+    });
+
+    for (const order of staleOrders) {
+      try {
+        const latestPayment = await this.paymentModel
+          .findOne({ orderId: order._id })
+          .sort({ createdAt: -1 });
+
+        if (latestPayment?.providerRef) {
+          const remote = await this.provider.getTransactionStatus(latestPayment.providerRef);
+          if (remote && remote.status !== 'payin_pending') {
+            // Issue connue par le provider — laisser applyPayinStatus gérer
+            // (succès tardif OU échec déjà confirmé, qui restituera le stock).
+            await this.applyPayinStatus(latestPayment, order, remote.status, remote);
+            continue;
+          }
+        }
+
+        await this.expireOrderForTimeout(order, latestPayment);
+      } catch (err: any) {
+        this.logger.error(`Failed to expire stale order ${order._id}: ${err?.message || err}`);
+      }
+    }
+  }
+
+  private async expireOrderForTimeout(order: any, payment: any | null) {
+    // Transition atomique : seul le run qui flip PENDING_PAYMENT -> PAYMENT_FAILED
+    // restitue le stock. Tout autre run concurrent (ou re-run après crash partiel)
+    // verra `transitioned === null` et n'agira pas → pas de double restitution.
+    const transitioned = await this.orderModel.findOneAndUpdate(
+      { _id: order._id, orderStatus: OrderStatus.PENDING_PAYMENT },
+      { $set: { orderStatus: OrderStatus.PAYMENT_FAILED, paymentStatus: PaymentStatus.FAILED } },
+      { new: true },
+    );
+    if (!transitioned) return;
+
+    if (payment && payment.status !== PaymentStatus.FAILED && payment.status !== PaymentStatus.PAID) {
+      payment.status = PaymentStatus.FAILED;
+      payment.completedAt = new Date();
+      payment.callbackPayload = {
+        ...(payment.callbackPayload || {}),
+        expiredAt: new Date(),
+        reason: 'payment_timeout',
+      };
+      await payment.save();
+    }
+
+    await Promise.all(
+      (transitioned.items || []).map((item: any) =>
+        this.inventory
+          .adjustStock(item.menuItemId, Number(item.quantity) || 0)
+          .catch((err) => {
+            this.logger.error(
+              `Failed to restore stock for expired order ${transitioned._id} item ${item.menuItemId}: ${err?.message || err}`,
+            );
+          }),
+      ),
+    );
+
+    this.logger.log(
+      `Order ${transitioned.orderNumber} expired (PENDING_PAYMENT > ${process.env.ORDER_PAYMENT_TIMEOUT_MINUTES || 30}min) — stock restored`,
+    );
   }
 
 
@@ -353,6 +513,7 @@ export class PaymentsService {
     if (payment.status === PaymentStatus.PAID && !success) return;
 
     const wasAlreadyPaid = payment.status === PaymentStatus.PAID;
+    const wasAlreadyFailed = payment.status === PaymentStatus.FAILED;
 
     payment.status = pending
       ? PaymentStatus.PROCESSING
@@ -372,14 +533,24 @@ export class PaymentsService {
     await order.save();
 
     if (success && !wasAlreadyPaid) {
+      // Stock déjà décrémenté dans la transaction de création de commande
+      // (cf. OrdersService.placeOrderWithinSession). On ne re-décrémente pas ici.
       await this.creditOrderBalances(order, payment);
-      await Promise.all(
-        order.items.map((item: any) =>
-          this.inventory.adjustStock(item.menuItemId, -item.quantity),
-        ),
-      );
       const user = await this.userModel.findById(order.userId);
       if (user) await this.notifications.sendOrderConfirmed(user.email, user.phone, order.orderNumber);
+    }
+
+    if (failed && !wasAlreadyFailed && !wasAlreadyPaid) {
+      // Restitution du stock réservé à la création de la commande
+      await Promise.all(
+        (order.items || []).map((item: any) =>
+          this.inventory.adjustStock(item.menuItemId, Number(item.quantity) || 0).catch((err) => {
+            this.logger.error(
+              `Failed to restore stock for order ${order._id} item ${item.menuItemId}: ${err?.message || err}`,
+            );
+          }),
+        ),
+      );
     }
   }
 }
