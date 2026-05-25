@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { MenuService } from './menu.service';
+import { MenuInventoryService } from './menu-inventory.service';
 import { CreateMenuItemDto } from './dto/create-menu-item.dto';
 import { UpdateMenuItemDto } from './dto/update-menu-item.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -13,7 +14,29 @@ import { MenuItemResponseDto, PaginatedMenuItemsResponseDto } from './dto/menu-i
 @ApiTags('menu-items')
 @Controller('menu-items')
 export class MenuController {
-  constructor(private readonly service: MenuService) {}
+  constructor(
+    private readonly service: MenuService,
+    private readonly inventory: MenuInventoryService,
+  ) {}
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Post('admin/reset-midnight-stocks')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({
+    summary: 'Déclencher manuellement le reset de stock minuit (admin)',
+    description:
+      "Exécute immédiatement la même logique que le cron quotidien (`0 0 * * *` Africa/Douala) : met à 0 le stock de tous les menu items des catégories ayant `resetStockAtMidnight=true`. Utile pour vérifier la configuration sans attendre minuit.",
+  })
+  @ApiOkResponse({
+    description: 'Reset stock exécuté',
+    schema: {
+      example: { matchedCount: 12, modifiedCount: 10, categories: 2 },
+    },
+  })
+  triggerMidnightStockReset() {
+    return this.inventory.resetStocksForConfiguredCategories('manual');
+  }
   @Get('public/:restaurantId')
   @ApiOperation({ summary: 'Lister les items publics d’un restaurant' })
   @ApiParam({ name: 'restaurantId', example: '665d58e63d7bfeb8f7f6172e' })

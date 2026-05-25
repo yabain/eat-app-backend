@@ -35,6 +35,10 @@ type GoogleTokenInfo = {
 @Injectable()
 export class AuthService {
   private static readonly RESET_PASSWORD_TTL_MS = 60 * 60 * 1000;
+  static readonly ACCESS_TOKEN_EXPIRES_IN = '15m';
+  static readonly REFRESH_TOKEN_EXPIRES_IN = '7d';
+  static readonly REFRESH_TOKEN_EXPIRES_MS = 7 * 24 * 60 * 60 * 1000;
+  static readonly REFRESH_TOKEN_COOKIE = 'refresh_token';
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
@@ -42,6 +46,30 @@ export class AuthService {
     private jwtService: JwtService,
     private configService: ConfigService,
   ) {}
+
+  private getRefreshSecret(): string {
+    return (
+      this.configService.get<string>('JWT_REFRESH_SECRET')
+      || this.configService.get<string>('JWT_SECRET')
+      || ''
+    );
+  }
+
+  async refresh(refreshToken: string | undefined) {
+    if (!refreshToken) throw new UnauthorizedException('Missing refresh token');
+    let decoded: { sub: string };
+    try {
+      decoded = this.jwtService.verify(refreshToken, { secret: this.getRefreshSecret() });
+    } catch {
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
+    if (!decoded?.sub) throw new UnauthorizedException('Invalid refresh token payload');
+
+    const user = await this.userModel.findById(decoded.sub);
+    if (!user || !user.isActive) throw new UnauthorizedException('Account not found or disabled');
+
+    return this.buildAuthResponse(user);
+  }
 
   async register(dto: RegisterDto) {
     const exists = await this.userModel.findOne({ email: dto.email.toLowerCase() });
@@ -343,7 +371,11 @@ export class AuthService {
       restaurantId: user.restaurantId ? user.restaurantId.toString() : undefined,
     };
     return {
-      accessToken: this.jwtService.sign(payload),
+      accessToken: this.jwtService.sign(payload, { expiresIn: AuthService.ACCESS_TOKEN_EXPIRES_IN }),
+      refreshToken: this.jwtService.sign(
+        { sub: user._id.toString() },
+        { secret: this.getRefreshSecret(), expiresIn: AuthService.REFRESH_TOKEN_EXPIRES_IN },
+      ),
       user: userResponse,
       requiresProfileCompletion: missingProfileFields.length > 0,
       missingProfileFields,

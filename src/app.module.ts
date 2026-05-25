@@ -18,6 +18,7 @@ import { CartsModule } from './modules/carts/carts.module';
 import { FeedbacksModule } from './modules/feedbacks/feedbacks.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { BalancesModule } from './modules/balances/balances.module';
+import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { BalancesModule } from './modules/balances/balances.module';
     FeedbacksModule,
     DashboardModule,
     BalancesModule,
+    AuditLogsModule,
   ],
 })
 export class AppModule {}

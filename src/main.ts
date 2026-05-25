@@ -2,6 +2,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { existsSync, mkdirSync } from 'fs';
+import * as cookieParser from 'cookie-parser';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { resolveUploadDir } from './common/utils/upload-dir.util';
@@ -53,6 +54,7 @@ async function bootstrap() {
     allowedHeaders: corsHeaders,
     optionsSuccessStatus: 204,
   });
+  app.use(cookieParser());
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
