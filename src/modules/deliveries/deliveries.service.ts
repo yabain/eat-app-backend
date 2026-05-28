@@ -11,6 +11,8 @@ import { buildPaginationMeta, normalizePagination } from '../../common/paginatio
 import { buildContainsRegex } from '../../common/utils/search.util';
 import { UserRole } from '../../common/enums/roles.enum';
 import { PaymentStatus } from '../../common/enums/payment-status.enum';
+import { OrderStatus } from '../../common/enums/order-status.enum';
+import { orderStatusForDeliveryStatus } from '../../common/utils/delivery-order-status.util';
 import { AssignDeliveryDto } from './dto/assign-delivery.dto';
 import { UpdateDeliveryStatusDto } from './dto/update-delivery-status.dto';
 
@@ -40,7 +42,7 @@ export class DeliveriesService {
     }
 
     order.assignedDriverId = new Types.ObjectId(dto.driverId);
-    order.orderStatus = 'assigned';
+    order.orderStatus = OrderStatus.ASSIGNED;
     await order.save();
 
     return this.deliveryModel.create({
@@ -179,9 +181,12 @@ export class DeliveriesService {
     if (dto.status === 'delivered') delivery.deliveredAt = new Date();
     await delivery.save();
 
-    order.orderStatus = dto.status === 'delivered' ? 'delivered' : dto.status;
-    if (dto.status === 'out_for_delivery' && !order.outForDeliveryAt) order.outForDeliveryAt = new Date();
-    await order.save();
+    const nextOrderStatus = orderStatusForDeliveryStatus(dto.status);
+    if (nextOrderStatus) {
+      order.orderStatus = nextOrderStatus;
+      if (dto.status === 'out_for_delivery' && !order.outForDeliveryAt) order.outForDeliveryAt = new Date();
+      await order.save();
+    }
     if (dto.status === 'delivered') await this.creditDriverDeliveryShare(order, delivery.driverId);
     return delivery;
   }

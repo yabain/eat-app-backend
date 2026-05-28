@@ -57,7 +57,7 @@ export class AuthService {
 
   async refresh(refreshToken: string | undefined) {
     if (!refreshToken) throw new UnauthorizedException('Missing refresh token');
-    let decoded: { sub: string };
+    let decoded: { sub: string; rtv?: number };
     try {
       decoded = this.jwtService.verify(refreshToken, { secret: this.getRefreshSecret() });
     } catch {
@@ -68,7 +68,25 @@ export class AuthService {
     const user = await this.userModel.findById(decoded.sub);
     if (!user || !user.isActive) throw new UnauthorizedException('Account not found or disabled');
 
+    const tokenVersion = decoded.rtv ?? 0;
+    const userVersion = user.refreshTokenVersion ?? 0;
+    if (tokenVersion !== userVersion) {
+      throw new UnauthorizedException('Refresh token revoked');
+    }
+
     return this.buildAuthResponse(user);
+  }
+
+  async logout(refreshToken: string | undefined) {
+    if (!refreshToken) return;
+    let decoded: { sub: string };
+    try {
+      decoded = this.jwtService.verify(refreshToken, { secret: this.getRefreshSecret() });
+    } catch {
+      return;
+    }
+    if (!decoded?.sub) return;
+    await this.userModel.findByIdAndUpdate(decoded.sub, { $inc: { refreshTokenVersion: 1 } });
   }
 
   async register(dto: RegisterDto) {
@@ -140,6 +158,7 @@ export class AuthService {
     await this.userModel.findByIdAndUpdate(user._id, {
       passwordHash,
       $unset: { passwordResetTokenHash: 1, passwordResetExpiresAt: 1 },
+      $inc: { refreshTokenVersion: 1 },
     });
 
     this.sendPasswordChangedEmail(user).catch((error) => {
@@ -373,7 +392,7 @@ export class AuthService {
     return {
       accessToken: this.jwtService.sign(payload, { expiresIn: AuthService.ACCESS_TOKEN_EXPIRES_IN }),
       refreshToken: this.jwtService.sign(
-        { sub: user._id.toString() },
+        { sub: user._id.toString(), rtv: user.refreshTokenVersion ?? 0 },
         { secret: this.getRefreshSecret(), expiresIn: AuthService.REFRESH_TOKEN_EXPIRES_IN },
       ),
       user: userResponse,

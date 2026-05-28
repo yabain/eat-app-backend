@@ -103,9 +103,15 @@ export class AuthController {
   }
 
   @Post('logout')
-  @ApiOperation({ summary: 'Déconnexion (efface le cookie de refresh)' })
+  @ApiOperation({
+    summary: 'Déconnexion',
+    description:
+      'Révoque le refresh token côté serveur (incrémente refreshTokenVersion) et efface le cookie httpOnly.',
+  })
   @ApiOkResponse({ description: 'Déconnecté', type: OkResponseDto })
-  logout(@Res({ passthrough: true }) res: Response) {
+  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const cookieToken = req.cookies?.[AuthService.REFRESH_TOKEN_COOKIE];
+    await this.authService.logout(cookieToken);
     this.clearRefreshCookie(res);
     return { ok: true };
   }

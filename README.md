@@ -8,6 +8,13 @@ npm run seed:admin
 npm run start:dev
 ```
 
+## CORS
+- Configure `FRONTEND_URL` (URL exacte du site Angular, sans `/` final).
+- Ajoutez d'autres origines via `CORS_ORIGINS` (séparées par des virgules), par ex. `https://www.eat.yaba-in.com`.
+- En **production** (`NODE_ENV=production`), au moins une de ces variables est **obligatoire**.
+- En **développement**, `http://localhost:4200` et `http://localhost:5173` sont autorisés par défaut en plus des variables d'environnement.
+- Les cookies refresh (`credentials: true`) exigent une liste blanche stricte — pas de `*`.
+
 ## Default admin
 - email: `admin@example.com`
 - password: `Admin@12345`
