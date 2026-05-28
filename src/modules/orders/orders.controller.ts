@@ -141,6 +141,7 @@ export class OrdersController {
     ],
   })
   @ApiQuery({ name: 'restaurantId', required: false, type: String, example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiQuery({ name: 'unassigned', required: false, type: Boolean, example: true })
   @ApiQuery({ name: 'from', required: false, type: String, example: '2026-04-01' })
   @ApiQuery({ name: 'to', required: false, type: String, example: '2026-04-23' })
   @ApiOkResponse({
@@ -152,10 +153,18 @@ export class OrdersController {
     @Query('q') q?: string,
     @Query('status') status?: OrderStatus,
     @Query('restaurantId') restaurantId?: string,
+    @Query('unassigned') unassigned?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
   ) {
-    return this.service.readyForDelivery(query.page, query.limit, { q, status, restaurantId, from, to });
+    return this.service.readyForDelivery(query.page, query.limit, {
+      q,
+      status,
+      restaurantId,
+      unassigned: unassigned === 'true',
+      from,
+      to,
+    });
   }
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER, UserRole.CLIENT)
   @UseGuards(RolesGuard)

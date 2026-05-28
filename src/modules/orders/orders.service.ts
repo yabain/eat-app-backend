@@ -313,6 +313,7 @@ export class OrdersService {
       q?: string;
       status?: OrderStatus;
       restaurantId?: string;
+      unassigned?: boolean;
       from?: string;
       to?: string;
     },
@@ -342,10 +343,27 @@ export class OrdersService {
       }),
       orderStatus: orderStatusFilter,
     };
+    if (filters?.unassigned) {
+      const existingOr = Array.isArray(filter.$or) ? filter.$or : null;
+      if (existingOr) delete filter.$or;
+      filter.$and = [
+        ...(Array.isArray(filter.$and) ? filter.$and : []),
+        ...(existingOr ? [{ $or: existingOr }] : []),
+        {
+          $or: [
+        { assignedDriverId: null },
+        { assignedDriverId: { $exists: false } },
+          ],
+        },
+      ];
+    }
 
     const [data, total] = await Promise.all([
       this.orderModel
         .find(filter)
+        .populate({ path: 'restaurantId' })
+        .populate({ path: 'userId', select: 'firstName lastName email phone profileImage role restaurantId isActive' })
+        .populate({ path: 'assignedDriverId', select: 'firstName lastName email phone profileImage role restaurantId isActive' })
         .sort({ createdAt: -1 })
         .skip(pagination.skip)
         .limit(pagination.limit),
