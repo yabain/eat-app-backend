@@ -9,6 +9,8 @@ export class UpdateCategoryDto {
   @IsOptional() @IsString() image?: string;
   @ApiPropertyOptional({ example: true })
   @IsOptional() @IsBoolean() isActive?: boolean;
+  @ApiPropertyOptional({ example: false, description: 'Catégorie affichée par défaut sur la page restaurant' })
+  @IsOptional() @IsBoolean() isDefault?: boolean;
   @ApiPropertyOptional({
     example: false,
     description: 'Remet le stock des menu items de cette categorie a 0 chaque jour a minuit, heure du Cameroun.',

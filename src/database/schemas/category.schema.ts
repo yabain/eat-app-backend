@@ -8,6 +8,7 @@ export class Category {
   @Prop() description?: string;
   @Prop() image?: string;
   @Prop({ default: true }) isActive: boolean;
+  @Prop({ default: false }) isDefault: boolean;
   @Prop({ default: false }) resetStockAtMidnight: boolean;
 }
 export const CategorySchema = SchemaFactory.createForClass(Category);
