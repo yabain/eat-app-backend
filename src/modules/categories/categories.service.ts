@@ -11,7 +11,12 @@ import { UpdateCategoryDto } from './dto/update-category.dto';
 @Injectable()
 export class CategoriesService {
   constructor(@InjectModel(Category.name) private model: Model<CategoryDocument>) {}
-  create(dto: CreateCategoryDto) { return this.model.create(dto); }
+  async create(dto: CreateCategoryDto) {
+    if (dto.isDefault === true) {
+      await this.model.updateMany({ isDefault: true }, { $set: { isDefault: false } });
+    }
+    return this.model.create(dto);
+  }
   async findOne(id: string) {
     const item = await this.model.findById(id);
     if (!item) throw new NotFoundException('Category not found');
@@ -48,6 +53,9 @@ export class CategoriesService {
     if (!existing) {
       await deleteLocalUpload(dto.image);
       throw new NotFoundException('Category not found');
+    }
+    if (dto.isDefault === true) {
+      await this.model.updateMany({ _id: { $ne: id }, isDefault: true }, { $set: { isDefault: false } });
     }
     const item = await this.model.findByIdAndUpdate(id, dto, { new: true });
     if (!item) throw new NotFoundException('Category not found');

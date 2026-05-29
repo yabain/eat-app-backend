@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { Connection, Model, Types } from 'mongoose';
 import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
@@ -25,35 +25,54 @@ export class DeliveriesService {
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
     @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
     @InjectModel(BalanceTransaction.name) private balanceModel: Model<BalanceTransactionDocument>,
+    @InjectConnection() private readonly connection: Connection,
   ) {}
 
   async assign(dto: AssignDeliveryDto, actor: any) {
-    const order = await this.orderModel.findById(dto.orderId);
-    if (!order) throw new NotFoundException('Order not found');
-    if (actor.role === UserRole.MANAGER && String(order.restaurantId) !== String(actor.restaurantId)) {
-      throw new ForbiddenException('You can only assign deliveries for your restaurant');
+    const session = await this.connection.startSession();
+    try {
+      let delivery: DeliveryDocument | null = null;
+      await session.withTransaction(async () => {
+        const order = await this.orderModel.findById(dto.orderId).session(session);
+        if (!order) throw new NotFoundException('Order not found');
+        if (actor.role === UserRole.MANAGER && String(order.restaurantId) !== String(actor.restaurantId)) {
+          throw new ForbiddenException('You can only assign deliveries for your restaurant');
+        }
+        if (order.assignedDriverId) throw new BadRequestException('Order already has an assigned driver');
+        if (order.orderStatus !== OrderStatus.READY) throw new BadRequestException('Only ready orders can be assigned');
+
+        const activeDelivery = await this.deliveryModel.findOne({
+          orderId: order._id,
+          status: { $in: ['assigned', 'picked_up', 'out_for_delivery'] },
+        }).session(session);
+        if (activeDelivery) throw new BadRequestException('Order already has an active delivery');
+
+        const driver = await this.userModel.findById(dto.driverId).session(session);
+        if (!driver) throw new NotFoundException('Driver not found');
+        if (driver.role !== UserRole.DRIVER) throw new BadRequestException('Assigned user must be a driver');
+        if (driver.isActive === false) throw new BadRequestException('Assigned driver is inactive');
+        if (driver.isDriverAvailable === false) throw new BadRequestException('Assigned driver is unavailable');
+        if (actor.role === UserRole.MANAGER && String(driver.restaurantId || '') !== String(actor.restaurantId || '')) {
+          throw new ForbiddenException('Manager can only assign drivers from their restaurant');
+        }
+
+        order.assignedDriverId = new Types.ObjectId(dto.driverId);
+        order.orderStatus = OrderStatus.ASSIGNED;
+        driver.isDriverAvailable = false;
+        await order.save({ session });
+        await driver.save({ session });
+
+        [delivery] = await this.deliveryModel.create([{
+          orderId: order._id,
+          driverId: dto.driverId,
+          status: 'assigned',
+          assignedAt: new Date(),
+        }], { session });
+      });
+      return delivery;
+    } finally {
+      await session.endSession();
     }
-
-    const driver = await this.userModel.findById(dto.driverId);
-    if (!driver) throw new NotFoundException('Driver not found');
-    if (driver.role !== UserRole.DRIVER) throw new BadRequestException('Assigned user must be a driver');
-    if (driver.isActive === false) throw new BadRequestException('Assigned driver is inactive');
-    if (driver.isDriverAvailable === false) throw new BadRequestException('Assigned driver is unavailable');
-    if (actor.role === UserRole.MANAGER && String(driver.restaurantId || '') !== String(actor.restaurantId || '')) {
-      throw new ForbiddenException('Manager can only assign drivers from their restaurant');
-    }
-
-    order.assignedDriverId = new Types.ObjectId(dto.driverId);
-    order.orderStatus = OrderStatus.ASSIGNED;
-    driver.isDriverAvailable = false;
-    await Promise.all([order.save(), driver.save()]);
-
-    return this.deliveryModel.create({
-      orderId: order._id,
-      driverId: dto.driverId,
-      status: 'assigned',
-      assignedAt: new Date(),
-    });
   }
 
   private async creditDriverDeliveryShare(order: OrderDocument, driverId: Types.ObjectId) {
@@ -179,6 +198,7 @@ export class DeliveriesService {
       throw new ForbiddenException('You can only update deliveries for your restaurant');
     }
 
+    const previousStatus = delivery.status;
     delivery.status = dto.status;
     if (dto.status === 'out_for_delivery' && !delivery.outForDeliveryAt) delivery.outForDeliveryAt = new Date();
     if (dto.status === 'delivered') delivery.deliveredAt = new Date();
@@ -198,6 +218,12 @@ export class DeliveriesService {
           { $set: { isDriverAvailable: true } },
         ),
       ]);
+    }
+    if (dto.status === 'failed' && previousStatus !== 'failed') {
+      await this.userModel.updateOne(
+        { _id: delivery.driverId, role: UserRole.DRIVER },
+        { $set: { isDriverAvailable: true } },
+      );
     }
     return delivery;
   }

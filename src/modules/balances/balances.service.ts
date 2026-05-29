@@ -1,7 +1,8 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { timingSafeEqual } from 'crypto';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
@@ -30,6 +31,29 @@ export class BalancesService {
   ) {}
 
   private oid(id: string | Types.ObjectId) { return new Types.ObjectId(String(id)); }
+
+  private constantTimeEquals(a: string, b: string): boolean {
+    const ba = Buffer.from(a, 'utf8');
+    const bb = Buffer.from(b, 'utf8');
+    if (ba.length !== bb.length) return false;
+    return timingSafeEqual(ba, bb);
+  }
+
+  private assertWithdrawalWebhookAuthenticated(providedToken?: string) {
+    const expected = process.env.DIGIKUNTZ_WEBHOOK_SECRET;
+    if (!expected) {
+      if (process.env.NODE_ENV === 'production') {
+        this.logger.error('DIGIKUNTZ_WEBHOOK_SECRET is not configured — refusing withdrawal webhook in production');
+        throw new UnauthorizedException('Webhook authentication is not configured');
+      }
+      this.logger.warn('DIGIKUNTZ_WEBHOOK_SECRET is not configured — withdrawal webhook is unauthenticated (dev mode only)');
+      return;
+    }
+    if (!providedToken || !this.constantTimeEquals(providedToken, expected)) {
+      this.logger.warn('Rejected DigiKuntz withdrawal webhook with invalid or missing token');
+      throw new UnauthorizedException('Invalid webhook token');
+    }
+  }
 
   private async balanceFor(filter: any, session?: ClientSession): Promise<number> {
     const agg = await this.balanceModel.aggregate([
@@ -392,10 +416,7 @@ export class BalancesService {
   }
 
   async processDigikuntzWithdrawalWebhook(withdrawalId: string, payload: any, providedToken?: string) {
-    const expectedToken = process.env.DIGIKUNTZ_WEBHOOK_SECRET;
-    if (expectedToken && providedToken !== expectedToken) {
-      throw new ForbiddenException('Invalid webhook token');
-    }
+    this.assertWithdrawalWebhookAuthenticated(providedToken);
 
     const providerStatus = payload?.status || payload?.data?.status;
     if (!providerStatus) throw new BadRequestException('Missing provider status');

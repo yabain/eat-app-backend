@@ -192,7 +192,7 @@ export class PaymentsService {
     const user = await this.userModel.findById(order.userId);
     const response = await this.provider.initiatePayment(
       order.orderNumber,
-      order.pricingSnapshot.grandTotal - order.pricingSnapshot.platformFee, // Envoyer le montant total - frais de la plateforme car recalculé chez digikuntz payments
+      order.pricingSnapshot.grandTotal,
       user?.phone,
       user?.email,
     );
