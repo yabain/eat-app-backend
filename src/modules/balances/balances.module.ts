@@ -5,7 +5,8 @@ import { Order, OrderSchema } from '../../database/schemas/order.schema';
 import { Restaurant, RestaurantSchema } from '../../database/schemas/restaurant.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
 import { WithdrawalRequest, WithdrawalRequestSchema } from '../../database/schemas/withdrawal-request.schema';
-import { BalancesController } from './balances.controller';
+import { DigikuntzProvider } from '../payments/providers/digikuntz.provider';
+import { BalancesController, BalancesWebhookController } from './balances.controller';
 import { BalancesService } from './balances.service';
 
 @Module({
@@ -18,8 +19,8 @@ import { BalancesService } from './balances.service';
       { name: Order.name, schema: OrderSchema },
     ]),
   ],
-  providers: [BalancesService],
-  controllers: [BalancesController],
+  providers: [BalancesService, DigikuntzProvider],
+  controllers: [BalancesController, BalancesWebhookController],
   exports: [BalancesService],
 })
 export class BalancesModule {}

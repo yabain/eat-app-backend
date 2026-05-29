@@ -62,4 +62,42 @@ export class DigikuntzProvider {
       return null;
     }
   }
+
+  async initiatePayout(input: {
+    amount: number;
+    phone: string;
+    receiverName: string;
+    narration: string;
+    callbackUrl?: string;
+  }) {
+    const res = await fetch(`${this.baseUrl}/dev/payout`, {
+      method: 'POST',
+      headers: this.headers,
+      body: JSON.stringify({
+        amount: input.amount,
+        accountBankCode: 'MTN',
+        accountNumber: input.phone,
+        receiverName: input.receiverName,
+        currency: 'XAF',
+        narration: input.narration,
+        ...(input.callbackUrl ? { callbackUrl: input.callbackUrl } : {}),
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new InternalServerErrorException(`DigiKuntz payout error: ${err}`);
+    }
+
+    const data = await res.json();
+    return {
+      providerRef: data.id,
+      transactionRef: data.data?.transactionRef,
+      amount: data.data?.estimation,
+      paymentWithTaxes: data.data?.paymentWithTaxes,
+      invoiceTaxes: data.data?.invoiceTaxes,
+      status: data.status,
+      raw: data,
+    };
+  }
 }

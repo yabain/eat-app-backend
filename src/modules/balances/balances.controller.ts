@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -8,6 +8,7 @@ import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { BalancesService } from './balances.service';
 import { AdminBalanceOperationDto } from './dto/admin-balance-operation.dto';
 import { CreateWithdrawalDto } from './dto/create-withdrawal.dto';
+import { UpdateWithdrawalStatusDto } from './dto/update-withdrawal-status.dto';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @ApiBearerAuth('bearer')
@@ -35,10 +36,20 @@ export class BalancesController {
     return this.service.withdrawals(req.user, query.page, query.limit);
   }
 
-  @Roles(UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER)
+  @Roles(UserRole.MANAGER, UserRole.DRIVER)
   @Post('withdrawals')
   @ApiOperation({ summary: 'Initier une demande de retrait MTN Cameroun' })
   withdraw(@Req() req: any, @Body() dto: CreateWithdrawalDto) { return this.service.createWithdrawal(req.user, dto); }
+
+  @Roles(UserRole.ADMIN)
+  @Patch('withdrawals/:id/status')
+  @ApiOperation({
+    summary: 'Traiter une demande de retrait (admin)',
+    description: 'Passe une demande à approved, paid, rejected ou failed. Les statuts rejected/failed recréditent automatiquement le solde concerné une seule fois.',
+  })
+  updateWithdrawalStatus(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateWithdrawalStatusDto) {
+    return this.service.updateWithdrawalStatus(id, dto, req.user);
+  }
 
 
   @Roles(UserRole.ADMIN)
@@ -81,5 +92,21 @@ export class BalancesController {
   @ApiOperation({ summary: 'Débiter le solde d’un restaurant (admin)' })
   debitRestaurant(@Req() req: any, @Param('restaurantId') restaurantId: string, @Body() dto: AdminBalanceOperationDto) {
     return this.service.debitRestaurant(restaurantId, dto, req.user);
+  }
+}
+
+@ApiTags('balances')
+@Controller('balances')
+export class BalancesWebhookController {
+  constructor(private readonly service: BalancesService) {}
+
+  @Post('withdrawals/:id/webhook/digikuntz')
+  @ApiOperation({ summary: 'Webhook DigiKuntz pour actualiser un retrait' })
+  processDigikuntzWithdrawalWebhook(
+    @Param('id') id: string,
+    @Body() payload: any,
+    @Query('token') token?: string,
+  ) {
+    return this.service.processDigikuntzWithdrawalWebhook(id, payload, token);
   }
 }

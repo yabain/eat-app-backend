@@ -21,4 +21,6 @@ export class CreateUserDto {
   @IsOptional() @IsMongoId() restaurantId?: string;
   @ApiPropertyOptional({ example: true })
   @IsOptional() @IsBoolean() isActive?: boolean;
+  @ApiPropertyOptional({ example: true, description: 'Disponibilité pour les utilisateurs livreurs' })
+  @IsOptional() @IsBoolean() isDriverAvailable?: boolean;
 }

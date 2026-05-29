@@ -37,13 +37,16 @@ export class DeliveriesService {
     const driver = await this.userModel.findById(dto.driverId);
     if (!driver) throw new NotFoundException('Driver not found');
     if (driver.role !== UserRole.DRIVER) throw new BadRequestException('Assigned user must be a driver');
+    if (driver.isActive === false) throw new BadRequestException('Assigned driver is inactive');
+    if (driver.isDriverAvailable === false) throw new BadRequestException('Assigned driver is unavailable');
     if (actor.role === UserRole.MANAGER && String(driver.restaurantId || '') !== String(actor.restaurantId || '')) {
       throw new ForbiddenException('Manager can only assign drivers from their restaurant');
     }
 
     order.assignedDriverId = new Types.ObjectId(dto.driverId);
     order.orderStatus = OrderStatus.ASSIGNED;
-    await order.save();
+    driver.isDriverAvailable = false;
+    await Promise.all([order.save(), driver.save()]);
 
     return this.deliveryModel.create({
       orderId: order._id,
@@ -138,17 +141,17 @@ export class DeliveriesService {
             },
             {
               path: 'userId',
-              select: 'firstName lastName email phone profileImage role restaurantId isActive',
+              select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable',
             },
             {
               path: 'assignedDriverId',
-              select: 'firstName lastName email phone profileImage role restaurantId isActive',
+              select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable isDriverAvailable',
             },
           ],
         })
         .populate({
           path: 'driverId',
-          select: 'firstName lastName email phone profileImage role restaurantId isActive',
+          select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable isDriverAvailable',
         })
         .sort({ createdAt: -1 })
         .skip(pagination.skip)
@@ -187,7 +190,15 @@ export class DeliveriesService {
       if (dto.status === 'out_for_delivery' && !order.outForDeliveryAt) order.outForDeliveryAt = new Date();
       await order.save();
     }
-    if (dto.status === 'delivered') await this.creditDriverDeliveryShare(order, delivery.driverId);
+    if (dto.status === 'delivered') {
+      await Promise.all([
+        this.creditDriverDeliveryShare(order, delivery.driverId),
+        this.userModel.updateOne(
+          { _id: delivery.driverId, role: UserRole.DRIVER },
+          { $set: { isDriverAvailable: true } },
+        ),
+      ]);
+    }
     return delivery;
   }
 }

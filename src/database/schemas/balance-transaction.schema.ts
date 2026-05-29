@@ -23,6 +23,10 @@ export class BalanceTransaction {
 export const BalanceTransactionSchema = SchemaFactory.createForClass(BalanceTransaction);
 BalanceTransactionSchema.index(
   { paymentId: 1, ownerType: 1, restaurantId: 1, userId: 1, reason: 1 },
-  { unique: true, sparse: true },
+  { unique: true, partialFilterExpression: { paymentId: { $exists: true } } },
+);
+BalanceTransactionSchema.index(
+  { withdrawalId: 1, reason: 1 },
+  { unique: true, partialFilterExpression: { withdrawalId: { $exists: true } } },
 );
 BalanceTransactionSchema.index({ ownerType: 1, restaurantId: 1, userId: 1, createdAt: -1 });

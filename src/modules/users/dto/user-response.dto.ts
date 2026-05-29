@@ -30,6 +30,9 @@ export class UserResponseDto {
   @ApiProperty({ example: true })
   isActive: boolean;
 
+  @ApiPropertyOptional({ example: true, description: 'Disponibilité pour les utilisateurs livreurs' })
+  isDriverAvailable?: boolean;
+
   @ApiProperty({ enum: ['local', 'google'], example: 'local' })
   authProvider: 'local' | 'google';
 

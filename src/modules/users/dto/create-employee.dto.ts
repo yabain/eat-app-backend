@@ -33,4 +33,9 @@ export class CreateEmployeeDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional({ example: true, description: 'Disponibilité pour les utilisateurs livreurs' })
+  @IsOptional()
+  @IsBoolean()
+  isDriverAvailable?: boolean;
 }

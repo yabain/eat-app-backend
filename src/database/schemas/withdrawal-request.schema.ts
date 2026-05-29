@@ -2,7 +2,7 @@ import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 import { BalanceOwnerType } from './balance-transaction.schema';
 export type WithdrawalRequestDocument = HydratedDocument<WithdrawalRequest>;
-export type WithdrawalStatus = 'pending' | 'approved' | 'rejected' | 'paid';
+export type WithdrawalStatus = 'pending' | 'approved' | 'rejected' | 'failed' | 'paid';
 
 @Schema({ timestamps: true })
 export class WithdrawalRequest {
@@ -13,7 +13,12 @@ export class WithdrawalRequest {
   @Prop({ required: true }) amount: number;
   @Prop({ required: true }) phone: string;
   @Prop({ default: 'XAF' }) currency: string;
-  @Prop({ enum: ['pending', 'approved', 'rejected', 'paid'], default: 'pending' }) status: WithdrawalStatus;
+  @Prop({ enum: ['pending', 'approved', 'rejected', 'failed', 'paid'], default: 'pending' }) status: WithdrawalStatus;
+  @Prop({ default: 'digikuntz' }) provider?: string;
+  @Prop() providerRef?: string;
+  @Prop() transactionRef?: string;
+  @Prop() providerStatus?: string;
+  @Prop({ type: Object }) providerPayload?: Record<string, any>;
   @Prop() note?: string;
   @Prop({ type: Types.ObjectId, ref: 'User' }) processedBy?: Types.ObjectId;
   @Prop() processedAt?: Date;

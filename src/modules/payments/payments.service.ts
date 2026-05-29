@@ -19,6 +19,7 @@ import { buildContainsRegex } from '../../common/utils/search.util';
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
+  private isSyncingProviderPayments = false;
 
   constructor(
     @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
@@ -89,7 +90,7 @@ export class PaymentsService {
           path: 'orderId',
           populate: [
             { path: 'restaurantId' },
-            { path: 'userId', select: 'firstName lastName email phone profileImage role restaurantId isActive' },
+            { path: 'userId', select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable' },
           ],
         })
         .sort({ createdAt: -1 })
@@ -148,8 +149,8 @@ export class PaymentsService {
         path: 'orderId',
         populate: [
           { path: 'restaurantId' },
-          { path: 'userId', select: 'firstName lastName email phone profileImage role restaurantId isActive' },
-          { path: 'assignedDriverId', select: 'firstName lastName email phone profileImage role restaurantId isActive' },
+          { path: 'userId', select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable' },
+          { path: 'assignedDriverId', select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable' },
         ],
       });
     if (!payment) throw new NotFoundException('Payment not found');
@@ -191,7 +192,7 @@ export class PaymentsService {
     const user = await this.userModel.findById(order.userId);
     const response = await this.provider.initiatePayment(
       order.orderNumber,
-      order.pricingSnapshot.grandTotal,
+      order.pricingSnapshot.grandTotal - order.pricingSnapshot.platformFee, // Envoyer le montant total - frais de la plateforme car recalculé chez digikuntz payments
       user?.phone,
       user?.email,
     );
@@ -340,26 +341,43 @@ export class PaymentsService {
     return null;
   }
 
-  @Cron(CronExpression.EVERY_5_MINUTES)
+  @Cron(CronExpression.EVERY_MINUTE)
   async syncPendingPayments() {
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-    const pendingPayments = await this.paymentModel.find({
-      status: PaymentStatus.PROCESSING,
-      initiatedAt: { $lte: fiveMinutesAgo },
-    });
-
-    for (const payment of pendingPayments) {
-      if (!payment.providerRef) continue;
-      const remote = await this.provider.getTransactionStatus(payment.providerRef);
-      if (!remote || remote.status === 'payin_pending') continue;
-
-      const order = await this.orderModel.findById(payment.orderId);
-      if (!order) continue;
-
-      await this.applyPayinStatus(payment, order, remote.status, remote);
+    if (this.isSyncingProviderPayments) {
+      this.logger.debug('DigiKuntz payment sync already running, skipping');
+      return;
     }
 
-    await this.expireStalePendingOrders();
+    this.isSyncingProviderPayments = true;
+    try {
+      const limit = Number(process.env.DIGIKUNTZ_SYNC_BATCH_LIMIT || 100);
+      const pendingPayments = await this.paymentModel
+        .find({
+          provider: 'digikuntz',
+          status: { $in: [PaymentStatus.PENDING, PaymentStatus.PROCESSING] },
+          providerRef: { $exists: true, $ne: null },
+        })
+        .sort({ updatedAt: 1 })
+        .limit(Number.isFinite(limit) && limit > 0 ? limit : 100);
+
+      for (const payment of pendingPayments) {
+        try {
+          const remote = await this.provider.getTransactionStatus(payment.providerRef || '');
+          if (!remote) continue;
+
+          const order = await this.orderModel.findById(payment.orderId);
+          if (!order) continue;
+
+          await this.applyPayinStatus(payment, order, remote.status, remote);
+        } catch (err: any) {
+          this.logger.warn(`Failed to sync DigiKuntz payment ${payment._id}: ${err?.message || err}`);
+        }
+      }
+
+      await this.expireStalePendingOrders();
+    } finally {
+      this.isSyncingProviderPayments = false;
+    }
   }
 
   private getOrderPaymentTimeoutMs(): number {

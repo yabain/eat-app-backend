@@ -15,6 +15,7 @@ export class User {
   @Prop({ enum: Object.values(UserRole), default: UserRole.CLIENT }) role: UserRole;
   @Prop({ type: Types.ObjectId, ref: 'Restaurant', default: null }) restaurantId?: Types.ObjectId;
   @Prop({ default: true }) isActive: boolean;
+  @Prop({ default: true }) isDriverAvailable: boolean;
   @Prop({ enum: ['local', 'google'], default: 'local' }) authProvider: 'local' | 'google';
   @Prop({ unique: true, sparse: true }) googleId?: string;
   @Prop({ select: false }) passwordResetTokenHash?: string;

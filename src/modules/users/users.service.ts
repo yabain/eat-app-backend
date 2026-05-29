@@ -43,7 +43,7 @@ export class UsersService {
   async findAll(
     page?: number,
     limit?: number,
-    filters?: { q?: string; role?: UserRole; isActive?: string; restaurantId?: string },
+    filters?: { q?: string; role?: UserRole; isActive?: string; isDriverAvailable?: string; restaurantId?: string },
   ) {
     const pagination = normalizePagination(page, limit);
     const qRegex = buildContainsRegex(filters?.q);
@@ -51,6 +51,10 @@ export class UsersService {
     if (filters?.role) filter.role = filters.role;
     const isActive = parseBooleanQuery(filters?.isActive);
     if (isActive !== undefined) filter.isActive = isActive;
+    const isDriverAvailable = parseBooleanQuery(filters?.isDriverAvailable);
+    if (isDriverAvailable !== undefined) {
+      filter.isDriverAvailable = isDriverAvailable ? { $ne: false } : false;
+    }
     if (filters?.restaurantId) filter.restaurantId = filters.restaurantId;
     if (qRegex) {
       filter.$or = [
@@ -109,6 +113,9 @@ export class UsersService {
       phone: dto.phone,
       profileImage: dto.profileImage,
     };
+    if (actor.role === UserRole.DRIVER && dto.isDriverAvailable !== undefined) {
+      payload.isDriverAvailable = dto.isDriverAvailable;
+    }
     if (dto.password) payload.passwordHash = await this.hashPassword(dto.password);
     Object.keys(payload).forEach((key) => payload[key] === undefined && delete payload[key]);
 
@@ -141,6 +148,7 @@ export class UsersService {
       role,
       restaurantId: manager.restaurantId,
       isActive: dto.isActive ?? true,
+      isDriverAvailable: dto.isDriverAvailable ?? true,
       passwordHash,
     });
     return this.userModel.findById(created._id).select('-passwordHash');

@@ -124,11 +124,11 @@ export class OrdersService {
       { path: 'restaurantId' },
       {
         path: 'userId',
-        select: 'firstName lastName email phone profileImage role restaurantId isActive',
+        select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable',
       },
       {
         path: 'assignedDriverId',
-        select: 'firstName lastName email phone profileImage role restaurantId isActive',
+        select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable',
       },
     ]);
   }
@@ -255,7 +255,7 @@ export class OrdersService {
         .find(filter)
         .populate({
           path: 'userId',
-          select: 'firstName lastName email phone profileImage role restaurantId isActive',
+          select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable',
         })
         .sort({ createdAt: -1 })
         .skip(pagination.skip)
@@ -362,8 +362,8 @@ export class OrdersService {
       this.orderModel
         .find(filter)
         .populate({ path: 'restaurantId' })
-        .populate({ path: 'userId', select: 'firstName lastName email phone profileImage role restaurantId isActive' })
-        .populate({ path: 'assignedDriverId', select: 'firstName lastName email phone profileImage role restaurantId isActive' })
+        .populate({ path: 'userId', select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable' })
+        .populate({ path: 'assignedDriverId', select: 'firstName lastName email phone profileImage role restaurantId isActive isDriverAvailable' })
         .sort({ createdAt: -1 })
         .skip(pagination.skip)
         .limit(pagination.limit),
