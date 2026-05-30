@@ -1,4 +1,5 @@
-const DEV_DEFAULT_ORIGINS = ['http://localhost:4200', 'http://localhost:5173'];
+const DEV_DEFAULT_ORIGINS = ['http://localhost:4200', 'http://localhost:5173', 'https://eat.yaba-in.com',];
+const PROD_DEFAULT_ORIGINS = ['https://eat.yaba-in.com', 'https://www.eat.yaba-in.com'];
 
 const CORS_METHODS_LIST = ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'] as const;
 
@@ -28,7 +29,7 @@ export function buildCorsOrigins(): Set<string> {
     .filter(Boolean);
 
   if (isProduction()) {
-    return new Set(fromEnv);
+    return new Set([...fromEnv, ...PROD_DEFAULT_ORIGINS]);
   }
 
   return new Set([...fromEnv, ...DEV_DEFAULT_ORIGINS]);
