@@ -36,8 +36,8 @@ type GoogleTokenInfo = {
 export class AuthService {
   private static readonly RESET_PASSWORD_TTL_MS = 60 * 60 * 1000;
   static readonly ACCESS_TOKEN_EXPIRES_IN = '15m';
-  static readonly REFRESH_TOKEN_EXPIRES_IN = '7d';
-  static readonly REFRESH_TOKEN_EXPIRES_MS = 7 * 24 * 60 * 60 * 1000;
+  static readonly REFRESH_TOKEN_EXPIRES_IN = '90d';
+  static readonly REFRESH_TOKEN_EXPIRES_MS = 90 * 24 * 60 * 60 * 1000;
   static readonly REFRESH_TOKEN_COOKIE = 'refresh_token';
   private readonly logger = new Logger(AuthService.name);
 
