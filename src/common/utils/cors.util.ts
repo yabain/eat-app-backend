@@ -35,6 +35,12 @@ export function buildCorsOrigins(): Set<string> {
   return new Set([...fromEnv, ...DEV_DEFAULT_ORIGINS]);
 }
 
+export function isAllowedCorsOrigin(origin: string | undefined, allowedOrigins: Set<string>): boolean {
+  if (!origin) return true;
+  const normalizedOrigin = normalizeOrigin(origin);
+  return allowedOrigins.has(normalizedOrigin);
+}
+
 export function assertCorsOriginsConfigured(origins: Set<string>): void {
   if (!isProduction() || origins.size > 0) return;
 
