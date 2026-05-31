@@ -216,6 +216,9 @@ export class AuthService {
     userPayload.isProfileComplete = this.getMissingProfileFields(userPayload).length === 0;
 
     const created = await this.userModel.create(userPayload);
+    this.sendAccountCreatedEmail(created).catch((error) => {
+      this.logger.warn(`Unable to send Google account created email to ${created.email}: ${error?.message || error}`);
+    });
     return this.buildAuthResponse(created);
   }
 

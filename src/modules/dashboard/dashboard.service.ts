@@ -93,16 +93,17 @@ export class DashboardService {
     const dateFilter = { createdAt: { $gte: start } };
     const orderFilter = { ...restaurantFilter, ...dateFilter };
     const paidOrderFilter = { ...orderFilter, paymentStatus: PaymentStatus.PAID };
-    const balanceRestaurantFilter = restaurantFilter.restaurantId
+    const isRestaurantScope = Boolean(restaurantFilter.restaurantId) || actor.role !== UserRole.ADMIN;
+    const balanceFilter = isRestaurantScope
       ? { ownerType: 'restaurant', restaurantId: restaurantFilter.restaurantId }
-      : { ownerType: 'restaurant' };
+      : { ownerType: 'system' };
 
     const [ordersTotal, paidOrders, menuItemsTotal, balanceAgg, revenueAgg, series, topItems, restaurantBalances] = await Promise.all([
       this.orderModel.countDocuments(orderFilter),
       this.orderModel.countDocuments(paidOrderFilter),
       this.menuModel.countDocuments(restaurantFilter),
       this.balanceModel.aggregate([
-        { $match: balanceRestaurantFilter },
+        { $match: balanceFilter },
         { $group: { _id: null, balance: { $sum: '$amount' } } },
       ]),
       this.orderModel.aggregate([
@@ -166,7 +167,7 @@ export class DashboardService {
 
     return {
       period: normalizedPeriod,
-      scope: isAdmin ? 'system' : 'restaurant',
+      scope: isRestaurantScope ? 'restaurant' : 'system',
       balance: Number(balanceAgg[0]?.balance || 0),
       metrics,
       series: this.hydrateSeries(normalizedPeriod, start, series),

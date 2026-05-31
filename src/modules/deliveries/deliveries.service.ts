@@ -7,6 +7,8 @@ import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
 import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
+import { PaymentsService } from '../payments/payments.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
 import { UserRole } from '../../common/enums/roles.enum';
@@ -26,7 +28,46 @@ export class DeliveriesService {
     @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
     @InjectModel(BalanceTransaction.name) private balanceModel: Model<BalanceTransactionDocument>,
     @InjectConnection() private readonly connection: Connection,
+    private readonly paymentsService: PaymentsService,
+    private readonly notifications: NotificationsService,
   ) {}
+
+  private displayName(user: any) {
+    return `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || user?.phone || '';
+  }
+
+  private orderAddress(order: any) {
+    const address = order?.deliveryAddress || {};
+    return [address.district, address.city, address.details].filter(Boolean).join(', ');
+  }
+
+  private async notifyDeliveryAssigned(delivery: DeliveryDocument | null) {
+    if (!delivery) return;
+    try {
+      const [order, driver] = await Promise.all([
+        this.orderModel.findById(delivery.orderId).populate('restaurantId').populate({
+          path: 'userId',
+          select: 'firstName lastName email phone',
+        }),
+        this.userModel.findById(delivery.driverId).select('firstName lastName email phone'),
+      ]);
+      if (!order || !driver) return;
+      const restaurant = order.restaurantId as any;
+      const client = order.userId as any;
+      await this.notifications.sendDeliveryAssigned(driver.email, {
+        orderNumber: order.orderNumber,
+        driverName: this.displayName(driver),
+        restaurantName: restaurant?.name,
+        clientName: this.displayName(client),
+        clientPhone: client?.phone,
+        address: this.orderAddress(order),
+        total: Number(order.pricingSnapshot?.grandTotal || 0),
+      });
+    } catch (error: any) {
+      // L'assignation ne doit pas echouer si le mail est indisponible.
+      // Le logger de NotificationsService detaille deja les erreurs SMTP.
+    }
+  }
 
   async assign(dto: AssignDeliveryDto, actor: any) {
     const session = await this.connection.startSession();
@@ -69,6 +110,7 @@ export class DeliveriesService {
           assignedAt: new Date(),
         }], { session });
       });
+      await this.notifyDeliveryAssigned(delivery);
       return delivery;
     } finally {
       await session.endSession();
@@ -212,7 +254,7 @@ export class DeliveriesService {
     }
     if (dto.status === 'delivered') {
       await Promise.all([
-        this.creditDriverDeliveryShare(order, delivery.driverId),
+        this.paymentsService.ensurePaidOrderBalances(order, delivery.driverId),
         this.userModel.updateOne(
           { _id: delivery.driverId, role: UserRole.DRIVER },
           { $set: { isDriverAvailable: true } },

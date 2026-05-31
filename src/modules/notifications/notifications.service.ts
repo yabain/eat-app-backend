@@ -2,9 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 import {
+  deliveryAssignedTemplate,
   orderConfirmedTemplate,
   orderDeliveredTemplate,
   orderStatusChangedTemplate,
+  restaurantOrderConfirmedTemplate,
 } from '../../common/email/templates';
 import { MailTemplate } from '../../common/email/mail-layout';
 
@@ -20,6 +22,39 @@ export class NotificationsService {
       orderUrl: this.buildOrderUrl(orderNumber),
     }));
     this.logger.log(`Notify confirmed order ${orderNumber} to ${email} / ${phone}`);
+  }
+
+  async sendRestaurantOrderConfirmed(recipients: string[], order: any) {
+    const emails = [...new Set((recipients || []).filter(Boolean))];
+    if (!emails.length) return;
+
+    const template = restaurantOrderConfirmedTemplate({
+      orderNumber: order.orderNumber,
+      restaurantName: order.restaurantName,
+      clientName: order.clientName,
+      clientPhone: order.clientPhone,
+      address: order.address,
+      total: order.total,
+      items: order.items,
+      orderUrl: this.buildOpsOrderUrl(order.orderId),
+    });
+
+    await Promise.all(emails.map((email) => this.sendTemplate(email, template)));
+    this.logger.log(`Notify restaurant staff order ${order.orderNumber} to ${emails.join(', ')}`);
+  }
+
+  async sendDeliveryAssigned(email: string | undefined, order: any) {
+    await this.sendTemplate(email, deliveryAssignedTemplate({
+      orderNumber: order.orderNumber,
+      driverName: order.driverName,
+      restaurantName: order.restaurantName,
+      clientName: order.clientName,
+      clientPhone: order.clientPhone,
+      address: order.address,
+      total: order.total,
+      orderUrl: this.buildDriverUrl(),
+    }));
+    this.logger.log(`Notify delivery assignment ${order.orderNumber} to ${email}`);
   }
 
   async sendStatusChanged(email: string, phone: string, orderNumber: string, status: string) {
@@ -43,6 +78,18 @@ export class NotificationsService {
     const frontendUrl = this.configService.get<string>('FRONTEND_URL')?.replace(/\/+$/, '');
     if (!frontendUrl) return undefined;
     return `${frontendUrl}/orders/${encodeURIComponent(orderNumber)}`;
+  }
+
+  private buildOpsOrderUrl(orderId?: string) {
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL')?.replace(/\/+$/, '');
+    if (!frontendUrl || !orderId) return undefined;
+    return `${frontendUrl}/manager/orders/${encodeURIComponent(orderId)}`;
+  }
+
+  private buildDriverUrl() {
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL')?.replace(/\/+$/, '');
+    if (!frontendUrl) return undefined;
+    return `${frontendUrl}/driver`;
   }
 
   private createTransporter() {

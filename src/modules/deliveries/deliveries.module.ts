@@ -8,16 +8,22 @@ import { Payment, PaymentSchema } from '../../database/schemas/payment.schema';
 import { BalanceTransaction, BalanceTransactionSchema } from '../../database/schemas/balance-transaction.schema';
 import { DeliveriesController } from './deliveries.controller';
 import { DeliveriesService } from './deliveries.service';
+import { PaymentsModule } from '../payments/payments.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
-  imports: [MongooseModule.forFeature([
-    { name: Delivery.name, schema: DeliverySchema },
-    { name: Order.name, schema: OrderSchema },
-    { name: User.name, schema: UserSchema },
-    { name: Restaurant.name, schema: RestaurantSchema },
-    { name: Payment.name, schema: PaymentSchema },
-    { name: BalanceTransaction.name, schema: BalanceTransactionSchema },
-  ])],
+  imports: [
+    MongooseModule.forFeature([
+      { name: Delivery.name, schema: DeliverySchema },
+      { name: Order.name, schema: OrderSchema },
+      { name: User.name, schema: UserSchema },
+      { name: Restaurant.name, schema: RestaurantSchema },
+      { name: Payment.name, schema: PaymentSchema },
+      { name: BalanceTransaction.name, schema: BalanceTransactionSchema },
+    ]),
+    PaymentsModule,
+    NotificationsModule,
+  ],
   providers: [DeliveriesService],
   controllers: [DeliveriesController],
 })

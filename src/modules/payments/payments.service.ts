@@ -9,6 +9,7 @@ import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { DigikuntzProvider } from './providers/digikuntz.provider';
 import { NotificationsService } from '../notifications/notifications.service';
 import { User, UserDocument } from '../../database/schemas/user.schema';
+import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
 import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { UserRole } from '../../common/enums/roles.enum';
@@ -25,6 +26,7 @@ export class PaymentsService {
     @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
     @InjectModel(BalanceTransaction.name) private balanceModel: Model<BalanceTransactionDocument>,
     private readonly inventory: MenuInventoryService,
     private provider: DigikuntzProvider,
@@ -472,55 +474,144 @@ export class PaymentsService {
     return {
       systemAmount: Math.max(0, platformFee + packagingTotal + deliveryFee * 0.25),
       restaurantAmount: Math.max(0, grandTotal - platformFee - deliveryFee - packagingTotal),
+      driverAmount: Math.max(0, deliveryFee * 0.75),
     };
   }
 
-  private async creditOrderBalances(order: any, payment: any) {
+  private async createBalanceIfMissing(filter: any, payload: any) {
+    const exists = await this.balanceModel.exists(filter);
+    if (exists) return null;
+
+    try {
+      return await this.balanceModel.updateOne(
+        filter,
+        { $setOnInsert: payload },
+        { upsert: true },
+      );
+    } catch (err: any) {
+      if (err?.code === 11000) return null;
+      throw err;
+    }
+  }
+
+  private async creditOrderBalances(order: any, payment: any, driverId?: any) {
     if (!payment?._id) return;
-    const { systemAmount, restaurantAmount } = this.orderBalanceDistribution(order);
+    const { systemAmount, restaurantAmount, driverAmount } = this.orderBalanceDistribution(order);
     const currency = payment.currency || 'XAF';
     const operations: Promise<any>[] = [];
 
     if (systemAmount > 0) {
-      operations.push(this.balanceModel.updateOne(
+      operations.push(this.createBalanceIfMissing(
         { paymentId: payment._id, ownerType: 'system', reason: 'order_system_share' },
         {
-          $setOnInsert: {
-            ownerType: 'system',
-            orderId: order._id,
-            paymentId: payment._id,
-            amount: systemAmount,
-            type: 'credit',
-            reason: 'order_system_share',
-            note: 'Platform fee + packaging fees + 25% delivery fee',
-            currency,
-          },
+          ownerType: 'system',
+          orderId: order._id,
+          paymentId: payment._id,
+          amount: systemAmount,
+          type: 'credit',
+          reason: 'order_system_share',
+          note: 'Platform fee + packaging fees + 25% delivery fee',
+          currency,
         },
-        { upsert: true },
       ));
     }
 
     if (restaurantAmount > 0 && order.restaurantId) {
-      operations.push(this.balanceModel.updateOne(
+      operations.push(this.createBalanceIfMissing(
         { paymentId: payment._id, ownerType: 'restaurant', restaurantId: order.restaurantId, reason: 'order_restaurant_share' },
         {
-          $setOnInsert: {
-            ownerType: 'restaurant',
-            restaurantId: order.restaurantId,
-            orderId: order._id,
-            paymentId: payment._id,
-            amount: restaurantAmount,
-            type: 'credit',
-            reason: 'order_restaurant_share',
-            note: 'Order total minus platform, delivery and packaging fees',
-            currency,
-          },
+          ownerType: 'restaurant',
+          restaurantId: order.restaurantId,
+          orderId: order._id,
+          paymentId: payment._id,
+          amount: restaurantAmount,
+          type: 'credit',
+          reason: 'order_restaurant_share',
+          note: 'Order total minus platform, delivery and packaging fees',
+          currency,
         },
-        { upsert: true },
+      ));
+    }
+
+    if (driverAmount > 0 && driverId) {
+      operations.push(this.createBalanceIfMissing(
+        { paymentId: payment._id, ownerType: 'user', userId: driverId, reason: 'order_delivery_share' },
+        {
+          ownerType: 'user',
+          userId: driverId,
+          orderId: order._id,
+          paymentId: payment._id,
+          amount: driverAmount,
+          type: 'credit',
+          reason: 'order_delivery_share',
+          note: '75% delivery fee',
+          currency,
+        },
       ));
     }
 
     await Promise.all(operations);
+  }
+
+  private displayName(user: any) {
+    return `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || user?.phone || '';
+  }
+
+  private orderAddress(order: any) {
+    const address = order.deliveryAddress || {};
+    return [address.district, address.city, address.details].filter(Boolean).join(', ');
+  }
+
+  private async notifyRestaurantStaffOrderConfirmed(order: any) {
+    try {
+      const [client, restaurant, staff] = await Promise.all([
+        this.userModel.findById(order.userId).select('firstName lastName email phone'),
+        this.restaurantModel.findById(order.restaurantId).select('name'),
+        this.userModel.find({
+          restaurantId: order.restaurantId,
+          role: { $in: [UserRole.MANAGER, UserRole.EMPLOYEE] },
+          isActive: { $ne: false },
+        }).select('email'),
+      ]);
+
+      await this.notifications.sendRestaurantOrderConfirmed(
+        staff.map((user) => user.email),
+        {
+          orderId: String(order._id),
+          orderNumber: order.orderNumber,
+          restaurantName: restaurant?.name,
+          clientName: this.displayName(client),
+          clientPhone: client?.phone,
+          address: this.orderAddress(order),
+          total: Number(order.pricingSnapshot?.grandTotal || 0),
+          items: (order.items || []).map((item: any) => ({
+            name: item.name,
+            quantity: Number(item.quantity || 0),
+            subtotal: Number(item.subtotal || 0),
+          })),
+        },
+      );
+    } catch (error: any) {
+      this.logger.warn(`Unable to notify restaurant staff for order ${order._id}: ${error?.message || error}`);
+    }
+  }
+
+  async ensurePaidOrderBalances(orderOrId: any, driverId?: any) {
+    const order = typeof orderOrId === 'string' || isValidObjectId(orderOrId)
+      ? await this.orderModel.findById(orderOrId)
+      : orderOrId;
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.paymentStatus !== PaymentStatus.PAID) {
+      throw new BadRequestException('Order payment is not paid');
+    }
+
+    const payment = await this.paymentModel
+      .findOne({ orderId: order._id, status: PaymentStatus.PAID })
+      .sort({ completedAt: -1, updatedAt: -1 });
+    if (!payment) throw new NotFoundException('Paid payment not found for order');
+
+    await this.creditOrderBalances(order, payment, driverId);
+    return { ok: true };
   }
 
   private async applyPayinStatus(payment: any, order: any, status: string, payload: any) {
@@ -556,6 +647,7 @@ export class PaymentsService {
       await this.creditOrderBalances(order, payment);
       const user = await this.userModel.findById(order.userId);
       if (user) await this.notifications.sendOrderConfirmed(user.email, user.phone, order.orderNumber);
+      await this.notifyRestaurantStaffOrderConfirmed(order);
     }
 
     if (failed && !wasAlreadyFailed && !wasAlreadyPaid) {
@@ -571,4 +663,25 @@ export class PaymentsService {
       );
     }
   }
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async reconcilePaidOrderBalances() {
+    const limit = Number(process.env.BALANCE_RECONCILIATION_BATCH_LIMIT || 100);
+    const payments = await this.paymentModel
+      .find({ status: PaymentStatus.PAID })
+      .sort({ updatedAt: -1 })
+      .limit(Number.isFinite(limit) && limit > 0 ? limit : 100);
+
+    for (const payment of payments) {
+      try {
+        const order = await this.orderModel.findById(payment.orderId);
+        if (!order || order.paymentStatus !== PaymentStatus.PAID) continue;
+        const driverId = order.orderStatus === OrderStatus.DELIVERED ? order.assignedDriverId : undefined;
+        await this.creditOrderBalances(order, payment, driverId);
+      } catch (err: any) {
+        this.logger.warn(`Failed to reconcile balances for payment ${payment._id}: ${err?.message || err}`);
+      }
+    }
+  }
+  
 }
