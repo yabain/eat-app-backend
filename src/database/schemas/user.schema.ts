@@ -21,7 +21,7 @@ export class User {
   @Prop({ select: false }) passwordResetTokenHash?: string;
   @Prop({ select: false }) passwordResetExpiresAt?: Date;
   @Prop({ default: true }) isProfileComplete: boolean;
-  /** Incrémenté au logout / reset password pour invalider les refresh tokens en cours. */
+  /** Incrémenté au logout / reset password pour invalider les JWT en cours. */
   @Prop({ default: 0 }) refreshTokenVersion: number;
 }
 export const UserSchema = SchemaFactory.createForClass(User);

@@ -4,6 +4,7 @@ import { Payment, PaymentSchema } from '../../database/schemas/payment.schema';
 import { Order, OrderSchema } from '../../database/schemas/order.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
 import { Restaurant, RestaurantSchema } from '../../database/schemas/restaurant.schema';
+import { Balance, BalanceSchema } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionSchema } from '../../database/schemas/balance-transaction.schema';
 import { PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
@@ -18,6 +19,7 @@ import { MenuModule } from '../menu/menu.module';
       { name: Order.name, schema: OrderSchema },
       { name: User.name, schema: UserSchema },
       { name: Restaurant.name, schema: RestaurantSchema },
+      { name: Balance.name, schema: BalanceSchema },
       { name: BalanceTransaction.name, schema: BalanceTransactionSchema },
     ]),
     NotificationsModule,

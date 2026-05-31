@@ -1,5 +1,4 @@
-import { Body, Controller, Get, Post, Req, Res, UseGuards } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiBearerAuth,
@@ -26,104 +25,51 @@ import { OkResponseDto } from '../../common/dto/response.dto';
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
-  private isCrossSiteProd(): boolean {
-    return process.env.NODE_ENV === 'production';
-  }
-
-  private setRefreshCookie(res: Response, refreshToken: string) {
-    const crossSite = this.isCrossSiteProd();
-    res.cookie(AuthService.REFRESH_TOKEN_COOKIE, refreshToken, {
-      httpOnly: true,
-      secure: crossSite,
-      sameSite: crossSite ? 'none' : 'lax',
-      path: '/api/auth',
-      maxAge: AuthService.REFRESH_TOKEN_EXPIRES_MS,
-    });
-  }
-
-  private clearRefreshCookie(res: Response) {
-    const crossSite = this.isCrossSiteProd();
-    res.clearCookie(AuthService.REFRESH_TOKEN_COOKIE, {
-      httpOnly: true,
-      secure: crossSite,
-      sameSite: crossSite ? 'none' : 'lax',
-      path: '/api/auth',
-    });
-  }
-
-  private respondWithAuth(result: any, res: Response) {
-    // Pose le refresh_token en cookie httpOnly, retire-le du body retourné au client.
-    if (result?.refreshToken) {
-      this.setRefreshCookie(res, result.refreshToken);
-    }
-    const { refreshToken, ...rest } = result || {};
-    return rest;
-  }
-
   @Post('register')
   @ApiOperation({ summary: 'Inscription utilisateur' })
   @ApiBody({ type: RegisterDto })
   @ApiCreatedResponse({
-    description: 'Utilisateur créé. Refresh token posé en cookie httpOnly (path=/api/auth).',
+    description: 'Utilisateur créé. JWT valable 90 jours retourné dans accessToken.',
     type: AuthResponseDto,
   })
   @ApiBadRequestResponse({ description: 'Email déjà utilisé ou données invalides' })
-  async register(@Body() dto: RegisterDto, @Res({ passthrough: true }) res: Response) {
-    return this.respondWithAuth(await this.authService.register(dto), res);
+  async register(@Body() dto: RegisterDto) {
+    return this.authService.register(dto);
   }
 
   @Post('login')
   @ApiOperation({ summary: 'Connexion utilisateur' })
   @ApiBody({ type: LoginDto })
   @ApiOkResponse({
-    description: 'Connexion réussie. Refresh token posé en cookie httpOnly (path=/api/auth).',
+    description: 'Connexion réussie. JWT valable 90 jours retourné dans accessToken.',
     type: AuthResponseDto,
   })
   @ApiUnauthorizedResponse({ description: 'Identifiants invalides, compte désactivé ou compte Google sans mot de passe local' })
-  async login(@Body() dto: LoginDto, @Res({ passthrough: true }) res: Response) {
-    return this.respondWithAuth(await this.authService.login(dto), res);
+  async login(@Body() dto: LoginDto) {
+    return this.authService.login(dto);
   }
 
-  @Post('refresh')
-  @ApiOperation({
-    summary: 'Rafraîchir le access token',
-    description:
-      'Lit le refresh token depuis le cookie httpOnly `refresh_token`, le vérifie, et émet une nouvelle paire (rotation). Le nouveau refresh token est reposé en cookie.',
-  })
-  @ApiOkResponse({ description: 'Nouveau access token émis', type: AuthResponseDto })
-  @ApiUnauthorizedResponse({ description: 'Refresh token absent, invalide ou expiré' })
-  async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const cookieToken = req.cookies?.[AuthService.REFRESH_TOKEN_COOKIE];
-    try {
-      return this.respondWithAuth(await this.authService.refresh(cookieToken), res);
-    } catch (err) {
-      this.clearRefreshCookie(res);
-      throw err;
-    }
-  }
-
+  @UseGuards(JwtAuthGuard)
   @Post('logout')
+  @ApiBearerAuth('bearer')
   @ApiOperation({
     summary: 'Déconnexion',
-    description:
-      'Révoque le refresh token côté serveur (incrémente refreshTokenVersion) et efface le cookie httpOnly.',
+    description: 'Révoque le JWT courant et tous les JWT précédents du compte en incrémentant la version serveur.',
   })
   @ApiOkResponse({ description: 'Déconnecté', type: OkResponseDto })
-  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const cookieToken = req.cookies?.[AuthService.REFRESH_TOKEN_COOKIE];
-    await this.authService.logout(cookieToken);
-    this.clearRefreshCookie(res);
+  async logout(@Req() req: any) {
+    await this.authService.logout(req.user?.sub);
     return { ok: true };
   }
 
   @Post('forgot-password')
   @ApiOperation({
-    summary: 'Demander un lien de reinitialisation de mot de passe',
-    description: "Envoie un email de reinitialisation si l'email existe.",
+    summary: 'Demander un lien de réinitialisation de mot de passe',
+    description: "Envoie un email de réinitialisation si l'email existe.",
   })
   @ApiBody({ type: ForgotPasswordDto })
   @ApiOkResponse({
-    description: 'Requete traitee',
+    description: 'Requête traitée',
     type: OkResponseDto,
   })
   forgotPassword(@Body() dto: ForgotPasswordDto) {
@@ -131,13 +77,13 @@ export class AuthController {
   }
 
   @Post('reset-password')
-  @ApiOperation({ summary: 'Reinitialiser le mot de passe avec un token' })
+  @ApiOperation({ summary: 'Réinitialiser le mot de passe avec un token' })
   @ApiBody({ type: ResetPasswordDto })
   @ApiOkResponse({
-    description: 'Mot de passe reinitialise',
+    description: 'Mot de passe réinitialisé',
     type: OkResponseDto,
   })
-  @ApiUnauthorizedResponse({ description: 'Token de reinitialisation invalide ou expire' })
+  @ApiUnauthorizedResponse({ description: 'Token de réinitialisation invalide ou expiré' })
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);
   }
@@ -146,7 +92,7 @@ export class AuthController {
   @ApiOperation({
     summary: 'Connexion ou inscription avec Google',
     description:
-      "Le client envoie le ID token Google. Si l'email n'existe pas encore, un compte client est créé. La réponse indique si le profil doit être complété. Le refresh token est posé en cookie httpOnly.",
+      "Le client envoie le ID token Google. Si l'email n'existe pas encore, un compte client est créé. La réponse indique si le profil doit être complété et retourne un JWT valable 90 jours.",
   })
   @ApiBody({ type: GoogleLoginDto })
   @ApiOkResponse({
@@ -155,8 +101,8 @@ export class AuthController {
   })
   @ApiBadRequestResponse({ description: 'Email déjà lié à un autre compte Google' })
   @ApiUnauthorizedResponse({ description: 'Token Google invalide, email Google non vérifié, audience invalide ou Google non configuré' })
-  async googleLogin(@Body() dto: GoogleLoginDto, @Res({ passthrough: true }) res: Response) {
-    return this.respondWithAuth(await this.authService.googleLogin(dto), res);
+  async googleLogin(@Body() dto: GoogleLoginDto) {
+    return this.authService.googleLogin(dto);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -183,8 +129,8 @@ export class AuthController {
       },
     },
   })
-  async completeProfile(@Req() req: any, @Body() dto: CompleteProfileDto, @Res({ passthrough: true }) res: Response) {
-    return this.respondWithAuth(await this.authService.completeProfile(req.user, dto), res);
+  async completeProfile(@Req() req: any, @Body() dto: CompleteProfileDto) {
+    return this.authService.completeProfile(req.user, dto);
   }
 
   @UseGuards(JwtAuthGuard)

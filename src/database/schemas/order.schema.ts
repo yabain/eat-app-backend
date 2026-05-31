@@ -24,6 +24,7 @@ class PricingSnapshot {
   @Prop({ required: true }) deliveryFee: number;
   @Prop({ required: true }) platformFee: number;
   @Prop({ required: true }) promoDiscount: number;
+  @Prop({ required: true }) paymentAmount: number;
   @Prop({ required: true }) grandTotal: number;
 }
 

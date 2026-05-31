@@ -1,18 +1,15 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, Model, Types } from 'mongoose';
 import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
-import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
-import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
 import { PaymentsService } from '../payments/payments.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
 import { UserRole } from '../../common/enums/roles.enum';
-import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { orderStatusForDeliveryStatus } from '../../common/utils/delivery-order-status.util';
 import { AssignDeliveryDto } from './dto/assign-delivery.dto';
@@ -20,13 +17,13 @@ import { UpdateDeliveryStatusDto } from './dto/update-delivery-status.dto';
 
 @Injectable()
 export class DeliveriesService {
+  private readonly logger = new Logger(DeliveriesService.name);
+
   constructor(
     @InjectModel(Delivery.name) private deliveryModel: Model<DeliveryDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
-    @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
-    @InjectModel(BalanceTransaction.name) private balanceModel: Model<BalanceTransactionDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly paymentsService: PaymentsService,
     private readonly notifications: NotificationsService,
@@ -64,8 +61,9 @@ export class DeliveriesService {
         total: Number(order.pricingSnapshot?.grandTotal || 0),
       });
     } catch (error: any) {
-      // L'assignation ne doit pas echouer si le mail est indisponible.
-      // Le logger de NotificationsService detaille deja les erreurs SMTP.
+      // L'assignation ne doit pas échouer si le mail est indisponible.
+      // Le logger de NotificationsService détaille déjà les erreurs SMTP.
+      this.logger.warn(`Unable to notify driver for delivery ${delivery._id}: ${error?.message || error}`);
     }
   }
 
@@ -115,35 +113,6 @@ export class DeliveriesService {
     } finally {
       await session.endSession();
     }
-  }
-
-  private async creditDriverDeliveryShare(order: OrderDocument, driverId: Types.ObjectId) {
-    const deliveryFee = Number(order.pricingSnapshot?.deliveryFee || 0);
-    const driverAmount = Math.max(0, deliveryFee * 0.75);
-    if (!driverAmount) return;
-
-    const payment = await this.paymentModel
-      .findOne({ orderId: order._id, status: PaymentStatus.PAID })
-      .sort({ completedAt: -1, updatedAt: -1 });
-    if (!payment?._id) return;
-
-    await this.balanceModel.updateOne(
-      { paymentId: payment._id, ownerType: 'user', userId: driverId, reason: 'order_delivery_share' },
-      {
-        $setOnInsert: {
-          ownerType: 'user',
-          userId: driverId,
-          orderId: order._id,
-          paymentId: payment._id,
-          amount: driverAmount,
-          type: 'credit',
-          reason: 'order_delivery_share',
-          note: '75% delivery fee',
-          currency: payment.currency || 'XAF',
-        },
-      },
-      { upsert: true },
-    );
   }
 
   async my(driverId: string, page?: number, limit?: number, filters?: { q?: string; status?: string; orderId?: string }) {
@@ -253,13 +222,19 @@ export class DeliveriesService {
       await order.save();
     }
     if (dto.status === 'delivered') {
-      await Promise.all([
-        this.paymentsService.ensurePaidOrderBalances(order, delivery.driverId),
-        this.userModel.updateOne(
-          { _id: delivery.driverId, role: UserRole.DRIVER },
-          { $set: { isDriverAvailable: true } },
-        ),
-      ]);
+      await this.userModel.updateOne(
+        { _id: delivery.driverId, role: UserRole.DRIVER },
+        { $set: { isDriverAvailable: true } },
+      );
+
+      try {
+        await this.paymentsService.ensurePaidOrderBalances(order, delivery.driverId);
+      } catch (error: any) {
+        this.logger.error(
+          `Failed to credit balances for delivered order ${order._id}: ${error?.message || error}`,
+          error?.stack,
+        );
+      }
     }
     if (dto.status === 'failed' && previousStatus !== 'failed') {
       await this.userModel.updateOne(

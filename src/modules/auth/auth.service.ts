@@ -35,10 +35,7 @@ type GoogleTokenInfo = {
 @Injectable()
 export class AuthService {
   private static readonly RESET_PASSWORD_TTL_MS = 60 * 60 * 1000;
-  static readonly ACCESS_TOKEN_EXPIRES_IN = '15m';
-  static readonly REFRESH_TOKEN_EXPIRES_IN = '90d';
-  static readonly REFRESH_TOKEN_EXPIRES_MS = 90 * 24 * 60 * 60 * 1000;
-  static readonly REFRESH_TOKEN_COOKIE = 'refresh_token';
+  static readonly ACCESS_TOKEN_EXPIRES_IN = '90d';
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
@@ -47,46 +44,9 @@ export class AuthService {
     private configService: ConfigService,
   ) {}
 
-  private getRefreshSecret(): string {
-    return (
-      this.configService.get<string>('JWT_REFRESH_SECRET')
-      || this.configService.get<string>('JWT_SECRET')
-      || ''
-    );
-  }
-
-  async refresh(refreshToken: string | undefined) {
-    if (!refreshToken) throw new UnauthorizedException('Missing refresh token');
-    let decoded: { sub: string; rtv?: number };
-    try {
-      decoded = this.jwtService.verify(refreshToken, { secret: this.getRefreshSecret() });
-    } catch {
-      throw new UnauthorizedException('Invalid or expired refresh token');
-    }
-    if (!decoded?.sub) throw new UnauthorizedException('Invalid refresh token payload');
-
-    const user = await this.userModel.findById(decoded.sub);
-    if (!user || !user.isActive) throw new UnauthorizedException('Account not found or disabled');
-
-    const tokenVersion = decoded.rtv ?? 0;
-    const userVersion = user.refreshTokenVersion ?? 0;
-    if (tokenVersion !== userVersion) {
-      throw new UnauthorizedException('Refresh token revoked');
-    }
-
-    return this.buildAuthResponse(user);
-  }
-
-  async logout(refreshToken: string | undefined) {
-    if (!refreshToken) return;
-    let decoded: { sub: string };
-    try {
-      decoded = this.jwtService.verify(refreshToken, { secret: this.getRefreshSecret() });
-    } catch {
-      return;
-    }
-    if (!decoded?.sub) return;
-    await this.userModel.findByIdAndUpdate(decoded.sub, { $inc: { refreshTokenVersion: 1 } });
+  async logout(userId: string | undefined) {
+    if (!userId) return;
+    await this.userModel.findByIdAndUpdate(userId, { $inc: { refreshTokenVersion: 1 } });
   }
 
   async register(dto: RegisterDto) {
@@ -391,13 +351,10 @@ export class AuthService {
       email: user.email,
       role: user.role,
       restaurantId: user.restaurantId ? user.restaurantId.toString() : undefined,
+      rtv: user.refreshTokenVersion ?? 0,
     };
     return {
       accessToken: this.jwtService.sign(payload, { expiresIn: AuthService.ACCESS_TOKEN_EXPIRES_IN }),
-      refreshToken: this.jwtService.sign(
-        { sub: user._id.toString(), rtv: user.refreshTokenVersion ?? 0 },
-        { secret: this.getRefreshSecret(), expiresIn: AuthService.REFRESH_TOKEN_EXPIRES_IN },
-      ),
       user: userResponse,
       requiresProfileCompletion: missingProfileFields.length > 0,
       missingProfileFields,

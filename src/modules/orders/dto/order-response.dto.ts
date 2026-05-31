@@ -114,6 +114,9 @@ export class PricingSnapshotResponseDto {
   @ApiProperty({ example: 500 })
   promoDiscount: number;
 
+  @ApiProperty({ example: 6400, description: 'Montant envoyé au prestataire hors frais plateforme estimés' })
+  paymentAmount: number;
+
   @ApiProperty({ example: 6900 })
   grandTotal: number;
 }

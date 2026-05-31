@@ -5,6 +5,13 @@ export type BalanceTransactionDocument = HydratedDocument<BalanceTransaction>;
 export type BalanceOwnerType = 'restaurant' | 'user' | 'system';
 export type BalanceTransactionType = 'credit' | 'debit';
 
+function toInteger(value: unknown): number {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount)) return 0;
+  const sign = amount < 0 ? -1 : 1;
+  return sign * Math.floor(Math.abs(amount));
+}
+
 @Schema({ timestamps: true })
 export class BalanceTransaction {
   @Prop({ enum: ['restaurant', 'user', 'system'], required: true, default: 'restaurant' }) ownerType: BalanceOwnerType;
@@ -14,7 +21,7 @@ export class BalanceTransaction {
   @Prop({ type: Types.ObjectId, ref: 'Payment' }) paymentId?: Types.ObjectId;
   @Prop({ type: Types.ObjectId, ref: 'WithdrawalRequest' }) withdrawalId?: Types.ObjectId;
   @Prop({ type: Types.ObjectId, ref: 'User' }) createdBy?: Types.ObjectId;
-  @Prop({ required: true }) amount: number;
+  @Prop({ required: true, set: toInteger }) amount: number;
   @Prop({ default: 'credit', enum: ['credit', 'debit'] }) type: BalanceTransactionType;
   @Prop({ default: 'order_payment' }) reason: string;
   @Prop() note?: string;

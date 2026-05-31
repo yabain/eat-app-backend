@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { Balance, BalanceSchema } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionSchema } from '../../database/schemas/balance-transaction.schema';
 import { Order, OrderSchema } from '../../database/schemas/order.schema';
 import { Restaurant, RestaurantSchema } from '../../database/schemas/restaurant.schema';
@@ -12,6 +13,7 @@ import { BalancesService } from './balances.service';
 @Module({
   imports: [
     MongooseModule.forFeature([
+      { name: Balance.name, schema: BalanceSchema },
       { name: BalanceTransaction.name, schema: BalanceTransactionSchema },
       { name: WithdrawalRequest.name, schema: WithdrawalRequestSchema },
       { name: User.name, schema: UserSchema },

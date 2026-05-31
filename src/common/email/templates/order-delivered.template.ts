@@ -2,14 +2,14 @@ import { MailTemplate, renderMailLayout } from '../mail-layout';
 
 export function orderDeliveredTemplate(input: { orderNumber: string; orderUrl?: string }): MailTemplate {
   return {
-    subject: `Commande livree - ${input.orderNumber}`,
+    subject: `Commande livrée - ${input.orderNumber}`,
     html: renderMailLayout({
-      preview: `Votre commande ${input.orderNumber} a ete livree.`,
+      preview: `Votre commande ${input.orderNumber} a été livrée.`,
       eyebrow: 'Livraison',
-      title: 'Commande livree',
-      intro: 'Votre commande a ete livree. Merci d’avoir utilise Eat App.',
-      details: [{ label: 'Numero de commande', value: input.orderNumber }],
-      cta: input.orderUrl ? { label: 'Voir le recu', url: input.orderUrl } : undefined,
+      title: 'Commande livrée',
+      intro: 'Votre commande a été livrée. Merci d’avoir utilisé Eat App.',
+      details: [{ label: 'Numéro de commande', value: input.orderNumber }],
+      cta: input.orderUrl ? { label: 'Voir le reçu', url: input.orderUrl } : undefined,
     }),
   };
 }

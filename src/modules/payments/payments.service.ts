@@ -4,6 +4,7 @@ import { isValidObjectId, Model } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { timingSafeEqual } from 'crypto';
 import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
+import { Balance, BalanceDocument, BalanceAccountType } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { DigikuntzProvider } from './providers/digikuntz.provider';
@@ -27,7 +28,8 @@ export class PaymentsService {
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
-    @InjectModel(BalanceTransaction.name) private balanceModel: Model<BalanceTransactionDocument>,
+    @InjectModel(Balance.name) private balanceModel: Model<BalanceDocument>,
+    @InjectModel(BalanceTransaction.name) private transactionModel: Model<BalanceTransactionDocument>,
     private readonly inventory: MenuInventoryService,
     private provider: DigikuntzProvider,
     private notifications: NotificationsService,
@@ -143,6 +145,42 @@ export class PaymentsService {
     return this.orderModel.findOne(filter);
   }
 
+  private money(value: any): number {
+    const amount = Number(value || 0);
+    if (!Number.isFinite(amount)) return 0;
+    return Math.max(0, Math.floor(amount));
+  }
+
+  private orderPaymentAmount(order: any): number {
+    const pricing = order?.pricingSnapshot || {};
+    const explicit = Number(pricing.paymentAmount);
+    if (Number.isFinite(explicit) && explicit > 0) return this.money(explicit);
+
+    const itemsSubtotal = Number(pricing.itemsSubtotal);
+    const packagingTotal = Number(pricing.packagingTotal);
+    const deliveryFee = Number(pricing.deliveryFee);
+    const promoDiscount = Number(pricing.promoDiscount || 0);
+    if ([itemsSubtotal, packagingTotal, deliveryFee].every(Number.isFinite)) {
+      return this.money(itemsSubtotal + packagingTotal + deliveryFee - promoDiscount);
+    }
+
+    return this.money(Number(pricing.grandTotal || 0) - Number(pricing.platformFee || 0));
+  }
+
+  private cameroonDateKey(date: Date | string | number): string {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Douala',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(date));
+  }
+
+  private isOrderFromCurrentCameroonDay(order: any): boolean {
+    if (!order?.createdAt) return false;
+    return this.cameroonDateKey(order.createdAt) === this.cameroonDateKey(new Date());
+  }
+
 
   async findOne(id: string, actor: any) {
     const payment = await this.paymentModel
@@ -167,6 +205,9 @@ export class PaymentsService {
     if (!order) throw new NotFoundException('Order not found');
     this.assertOrderAccess(order, actor);
     if (order.paymentStatus === PaymentStatus.PAID) throw new BadRequestException('Order already paid');
+    if (!this.isOrderFromCurrentCameroonDay(order)) {
+      throw new BadRequestException('Le paiement est autorisé uniquement pour les commandes du jour.');
+    }
 
     const existingPayment = await this.paymentModel
       .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
@@ -192,16 +233,19 @@ export class PaymentsService {
     }
 
     const user = await this.userModel.findById(order.userId);
+    const paymentAmount = this.orderPaymentAmount(order);
+    if (paymentAmount <= 0) throw new BadRequestException('Invalid order payment amount');
+
     const response = await this.provider.initiatePayment(
       order.orderNumber,
-      order.pricingSnapshot.grandTotal,
+      paymentAmount,
       user?.phone,
       user?.email,
     );
 
     const payment = await this.paymentModel.create({
       orderId: order._id,
-      amount: order.pricingSnapshot.grandTotal,
+      amount: paymentAmount,
       provider: 'digikuntz',
       currency: 'XAF',
       status: PaymentStatus.PROCESSING,
@@ -466,28 +510,76 @@ export class PaymentsService {
 
   private orderBalanceDistribution(order: any) {
     const pricing = order.pricingSnapshot || {};
-    const grandTotal = Number(pricing.grandTotal || 0);
-    const platformFee = Number(pricing.platformFee || 0);
-    const deliveryFee = Number(pricing.deliveryFee || 0);
-    const packagingTotal = Number(pricing.packagingTotal || 0);
+    const paymentAmount = this.orderPaymentAmount(order);
+    const deliveryFee = this.money(pricing.deliveryFee);
+    const packagingTotal = this.money(pricing.packagingTotal);
+    const driverAmount = this.money(deliveryFee * 0.75);
+    const systemDeliveryShare = Math.max(0, deliveryFee - driverAmount);
 
     return {
-      systemAmount: Math.max(0, platformFee + packagingTotal + deliveryFee * 0.25),
-      restaurantAmount: Math.max(0, grandTotal - platformFee - deliveryFee - packagingTotal),
-      driverAmount: Math.max(0, deliveryFee * 0.75),
+      systemAmount: this.money(packagingTotal + systemDeliveryShare),
+      restaurantAmount: this.money(paymentAmount - deliveryFee - packagingTotal),
+      driverAmount,
+    };
+  }
+
+  private balanceAccountFromTransactionPayload(payload: any): { accountType: BalanceAccountType; ownerId: string } {
+    if (payload.ownerType === 'restaurant') {
+      return { accountType: 'restaurant', ownerId: String(payload.restaurantId) };
+    }
+    if (payload.ownerType === 'user') {
+      return { accountType: 'driver', ownerId: String(payload.userId) };
+    }
+    return { accountType: 'system', ownerId: '0000000' };
+  }
+
+  private balanceFilterFromTransactionPayload(payload: any) {
+    return this.balanceAccountFromTransactionPayload(payload);
+  }
+
+  private balanceInsertFromTransactionPayload(payload: any) {
+    const account = this.balanceAccountFromTransactionPayload(payload);
+    return {
+      ...account,
+      balance: 0,
+      currency: payload.currency || 'XAF',
     };
   }
 
   private async createBalanceIfMissing(filter: any, payload: any) {
-    const exists = await this.balanceModel.exists(filter);
-    if (exists) return null;
+    const { amount, note, currency, orderId, paymentId, ...insertPayload } = payload;
+    const previous = await this.transactionModel.findOne(filter).select('amount');
+    const previousAmount = Number(previous?.amount || 0);
+    const nextAmount = this.money(amount);
+    const delta = nextAmount - previousAmount;
+    const update = {
+      $setOnInsert: insertPayload,
+      $set: {
+        amount: nextAmount,
+        note,
+        currency,
+        orderId,
+        paymentId,
+      },
+    };
 
     try {
-      return await this.balanceModel.updateOne(
+      const result = await this.transactionModel.updateOne(
         filter,
-        { $setOnInsert: payload },
+        update,
         { upsert: true },
       );
+      if (delta !== 0) {
+        await this.balanceModel.updateOne(
+          this.balanceFilterFromTransactionPayload(payload),
+          {
+            $setOnInsert: this.balanceInsertFromTransactionPayload(payload),
+            $inc: { balance: delta },
+          },
+          { upsert: true },
+        );
+      }
+      return result;
     } catch (err: any) {
       if (err?.code === 11000) return null;
       throw err;
@@ -510,7 +602,7 @@ export class PaymentsService {
           amount: systemAmount,
           type: 'credit',
           reason: 'order_system_share',
-          note: 'Platform fee + packaging fees + 25% delivery fee',
+          note: 'packaging fees + 25% delivery fee, excluding DigiKuntz platform fees',
           currency,
         },
       ));
@@ -527,7 +619,7 @@ export class PaymentsService {
           amount: restaurantAmount,
           type: 'credit',
           reason: 'order_restaurant_share',
-          note: 'Order total minus platform, delivery and packaging fees',
+          note: 'Payment amount minus delivery and packaging fees',
           currency,
         },
       ));
@@ -683,5 +775,5 @@ export class PaymentsService {
       }
     }
   }
-  
+
 }

@@ -20,8 +20,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
   async validate(payload: JwtPayload) {
-    const user = await this.userModel.findById(payload.sub).select('isActive');
+    const user = await this.userModel.findById(payload.sub).select('isActive refreshTokenVersion');
     if (!user || !user.isActive) throw new UnauthorizedException('Account is disabled');
+    if ((payload.rtv ?? 0) !== (user.refreshTokenVersion ?? 0)) {
+      throw new UnauthorizedException('Token revoked');
+    }
     return payload;
   }
 }

@@ -1,7 +1,7 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
+import { Balance, BalanceDocument } from '../../database/schemas/balance.schema';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { PaymentStatus } from '../../common/enums/payment-status.enum';
@@ -12,7 +12,7 @@ export class DashboardService {
   constructor(
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(MenuItem.name) private menuModel: Model<MenuItemDocument>,
-    @InjectModel(BalanceTransaction.name) private balanceModel: Model<BalanceTransactionDocument>,
+    @InjectModel(Balance.name) private balanceModel: Model<BalanceDocument>,
   ) {}
 
   private readonly dayLabels = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
@@ -95,17 +95,14 @@ export class DashboardService {
     const paidOrderFilter = { ...orderFilter, paymentStatus: PaymentStatus.PAID };
     const isRestaurantScope = Boolean(restaurantFilter.restaurantId) || actor.role !== UserRole.ADMIN;
     const balanceFilter = isRestaurantScope
-      ? { ownerType: 'restaurant', restaurantId: restaurantFilter.restaurantId }
-      : { ownerType: 'system' };
+      ? { accountType: 'restaurant', ownerId: String(restaurantFilter.restaurantId) }
+      : { accountType: 'system', ownerId: '0000000' };
 
     const [ordersTotal, paidOrders, menuItemsTotal, balanceAgg, revenueAgg, series, topItems, restaurantBalances] = await Promise.all([
       this.orderModel.countDocuments(orderFilter),
       this.orderModel.countDocuments(paidOrderFilter),
       this.menuModel.countDocuments(restaurantFilter),
-      this.balanceModel.aggregate([
-        { $match: balanceFilter },
-        { $group: { _id: null, balance: { $sum: '$amount' } } },
-      ]),
+      this.balanceModel.findOne(balanceFilter),
       this.orderModel.aggregate([
         { $match: paidOrderFilter },
         { $group: {
@@ -140,9 +137,9 @@ export class DashboardService {
       ]),
       actor.role === UserRole.ADMIN && !restaurantId
         ? this.balanceModel.aggregate([
-            { $match: { ownerType: 'restaurant' } },
-            { $group: { _id: '$restaurantId', balance: { $sum: '$amount' } } },
-            { $lookup: { from: 'restaurants', localField: '_id', foreignField: '_id', as: 'restaurant' } },
+            { $match: { accountType: 'restaurant' } },
+            { $addFields: { ownerObjectId: { $toObjectId: '$ownerId' } } },
+            { $lookup: { from: 'restaurants', localField: 'ownerObjectId', foreignField: '_id', as: 'restaurant' } },
             { $unwind: { path: '$restaurant', preserveNullAndEmptyArrays: true } },
             { $sort: { balance: -1 } },
             { $limit: 20 },
@@ -168,13 +165,13 @@ export class DashboardService {
     return {
       period: normalizedPeriod,
       scope: isRestaurantScope ? 'restaurant' : 'system',
-      balance: Number(balanceAgg[0]?.balance || 0),
+      balance: Number((balanceAgg as any)?.balance || 0),
       metrics,
       series: this.hydrateSeries(normalizedPeriod, start, series),
       topItems: topItems.map((item) => ({ menuItemId: item._id, name: item.name, quantity: item.quantity, revenue: item.revenue })),
       restaurantBalances: restaurantBalances.map((item: any) => ({
-        restaurantId: item._id,
-        restaurantName: item.restaurant?.name || String(item._id),
+        restaurantId: item.ownerId,
+        restaurantName: item.restaurant?.name || String(item.ownerId),
         logo: item.restaurant?.logo,
         balance: item.balance,
       })),

@@ -19,6 +19,7 @@ import { OrderPreviewResponseDto, OrderResponseDto, PaginatedOrdersResponseDto }
 @Controller('orders')
 export class OrdersController {
   constructor(private readonly service: OrdersService) {}
+
   @Post('preview')
   @ApiOperation({ summary: 'Prévisualiser le prix de la commande' })
   @ApiBody({ type: PreviewOrderDto })
@@ -27,6 +28,7 @@ export class OrdersController {
     type: OrderPreviewResponseDto,
   })
   preview(@Body() dto: PreviewOrderDto) { return this.service.preview(dto); }
+
   @Roles(UserRole.CLIENT)
   @UseGuards(RolesGuard)
   @Post('preview-from-cart')
@@ -37,6 +39,7 @@ export class OrdersController {
     type: OrderPreviewResponseDto,
   })
   previewFromCart(@Req() req: any, @Body() dto: CheckoutFromCartDto) { return this.service.previewFromCart(req.user.sub, dto); }
+  
   @Roles(UserRole.CLIENT)
   @UseGuards(RolesGuard)
   @Post()
@@ -44,6 +47,7 @@ export class OrdersController {
   @ApiBody({ type: PreviewOrderDto })
   @ApiOkResponse({ description: 'Commande créée', type: OrderResponseDto })
   create(@Req() req: any, @Body() dto: PreviewOrderDto) { return this.service.create(req.user.sub, dto); }
+  
   @Roles(UserRole.CLIENT)
   @UseGuards(RolesGuard)
   @Post('from-cart')
@@ -51,6 +55,7 @@ export class OrdersController {
   @ApiBody({ type: CheckoutFromCartDto })
   @ApiOkResponse({ description: 'Commande créée depuis le panier', type: OrderResponseDto })
   createFromCart(@Req() req: any, @Body() dto: CheckoutFromCartDto) { return this.service.createFromCart(req.user.sub, dto); }
+  
   @Roles(UserRole.CLIENT)
   @UseGuards(RolesGuard)
   @Get('my')
@@ -83,6 +88,7 @@ export class OrdersController {
       to,
     });
   }
+ 
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER)
   @UseGuards(RolesGuard)
   @Get()
@@ -121,6 +127,7 @@ export class OrdersController {
       to,
     });
   }
+  
   @Roles(UserRole.ADMIN, UserRole.DRIVER)
   @UseGuards(RolesGuard)
   @Get('ready-for-delivery')
@@ -166,6 +173,7 @@ export class OrdersController {
       to,
     });
   }
+  
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER, UserRole.CLIENT)
   @UseGuards(RolesGuard)
   @Get(':id')

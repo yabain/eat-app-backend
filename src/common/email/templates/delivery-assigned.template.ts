@@ -11,22 +11,22 @@ export function deliveryAssignedTemplate(input: {
   orderUrl?: string;
 }): MailTemplate {
   return {
-    subject: `Livraison assignee - ${input.orderNumber}`,
+    subject: `Livraison assignée - ${input.orderNumber}`,
     html: renderMailLayout({
-      preview: `La commande ${input.orderNumber} vous a ete assignee.`,
+      preview: `La commande ${input.orderNumber} vous a été assignée.`,
       eyebrow: 'Livraison',
-      title: 'Nouvelle livraison assignee',
-      intro: `Bonjour ${input.driverName || ''}, une commande vous a ete assignee pour livraison.`.trim(),
+      title: 'Nouvelle livraison assignée',
+      intro: `Bonjour ${input.driverName || ''}, une commande vous a été assignée pour livraison.`.trim(),
       details: [
-        { label: 'Numero de commande', value: input.orderNumber },
+        { label: 'Numéro de commande', value: input.orderNumber },
         { label: 'Restaurant', value: input.restaurantName },
         { label: 'Client', value: input.clientName },
-        { label: 'Telephone client', value: input.clientPhone },
+        { label: 'Téléphone client', value: input.clientPhone },
         { label: 'Adresse de livraison', value: input.address },
-        { label: 'Total commande', value: input.total !== undefined ? `${input.total} XAF` : undefined },
+        // { label: 'Total commande', value: input.total !== undefined ? `${input.total} XAF` : undefined },
       ],
       cta: input.orderUrl ? { label: 'Voir la livraison', url: input.orderUrl } : undefined,
-      note: 'Consultez votre espace livreur pour demarrer la livraison et mettre a jour son statut.',
+      note: 'Consultez votre espace livreur pour démarrer la livraison et mettre à jour son statut.',
     }),
   };
 }

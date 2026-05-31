@@ -3,6 +3,7 @@ import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { timingSafeEqual } from 'crypto';
+import { Balance, BalanceAccountType, BalanceDocument } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
@@ -19,9 +20,11 @@ import { UpdateWithdrawalStatusDto } from './dto/update-withdrawal-status.dto';
 export class BalancesService {
   private readonly logger = new Logger(BalancesService.name);
   private isSyncingProviderWithdrawals = false;
+  private isBackfillingBalances = false;
 
   constructor(
-    @InjectModel(BalanceTransaction.name) private balanceModel: Model<BalanceTransactionDocument>,
+    @InjectModel(Balance.name) private balanceModel: Model<BalanceDocument>,
+    @InjectModel(BalanceTransaction.name) private transactionModel: Model<BalanceTransactionDocument>,
     @InjectModel(WithdrawalRequest.name) private withdrawalModel: Model<WithdrawalRequestDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
@@ -55,12 +58,76 @@ export class BalancesService {
     }
   }
 
-  private async balanceFor(filter: any, session?: ClientSession): Promise<number> {
-    const agg = await this.balanceModel.aggregate([
-      { $match: filter },
-      { $group: { _id: null, balance: { $sum: '$amount' } } },
-    ]).session(session || null);
-    return Number(agg[0]?.balance || 0);
+  private balanceAccountForScope(scope: any): { accountType: BalanceAccountType; ownerId: string } {
+    if (scope.ownerType === 'restaurant') return { accountType: 'restaurant', ownerId: String(scope.restaurantId) };
+    if (scope.ownerType === 'user') return { accountType: 'driver', ownerId: String(scope.userId) };
+    return { accountType: 'system', ownerId: '0000000' };
+  }
+
+  private async balanceFor(scope: any, session?: ClientSession): Promise<number> {
+    const account = this.balanceAccountForScope(scope);
+    let doc = await this.balanceModel.findOne(account).session(session || null);
+    if (!doc) {
+      const agg = await this.transactionModel.aggregate([
+        { $match: scope },
+        { $group: { _id: null, balance: { $sum: '$amount' } } },
+      ]).session(session || null);
+      const balance = this.toBalanceInteger(agg[0]?.balance || 0);
+      doc = await this.balanceModel.findOneAndUpdate(
+        account,
+        { $setOnInsert: { ...account, balance, currency: 'XAF' } },
+        { upsert: true, new: true, session },
+      );
+    }
+    return this.toBalanceInteger(doc?.balance || 0);
+  }
+
+  private toBalanceInteger(value: any): number {
+    const amount = Number(value || 0);
+    if (!Number.isFinite(amount)) return 0;
+    const sign = amount < 0 ? -1 : 1;
+    return sign * Math.floor(Math.abs(amount));
+  }
+
+  private async recordBalanceTransaction(payload: any, session?: ClientSession) {
+    const amount = this.toBalanceInteger(payload.amount);
+    payload.amount = amount;
+    const account = this.balanceAccountForScope(payload);
+    const [transaction] = await this.transactionModel.create([payload], { session });
+    await this.balanceModel.updateOne(
+      account,
+      {
+        $setOnInsert: { ...account, balance: 0, currency: payload.currency || 'XAF' },
+        $inc: { balance: amount },
+      },
+      { upsert: true, session },
+    );
+    return transaction;
+  }
+
+  private async upsertBalanceTransaction(filter: any, payload: any, session?: ClientSession) {
+    const previous = await this.transactionModel.findOne(filter).session(session || null).select('amount');
+    const previousAmount = Number(previous?.amount || 0);
+    const nextAmount = this.toBalanceInteger(payload.amount);
+    payload.amount = nextAmount;
+    const delta = nextAmount - previousAmount;
+    const account = this.balanceAccountForScope(payload);
+    const result = await this.transactionModel.updateOne(
+      filter,
+      { $setOnInsert: payload },
+      { upsert: true, session },
+    );
+    if (delta !== 0) {
+      await this.balanceModel.updateOne(
+        account,
+        {
+          $setOnInsert: { ...account, balance: 0, currency: payload.currency || 'XAF' },
+          $inc: { balance: delta },
+        },
+        { upsert: true, session },
+      );
+    }
+    return result;
   }
 
   private scopeForActor(actor: any) {
@@ -73,11 +140,59 @@ export class BalancesService {
     throw new ForbiddenException('No balance available for this role');
   }
 
+  @Cron('*/5 * * * *')
+  async backfillBalancesFromTransactions() {
+    if (this.isBackfillingBalances) return;
+    this.isBackfillingBalances = true;
+    try {
+      const rows = await this.transactionModel.aggregate([
+        {
+          $group: {
+            _id: {
+              ownerType: '$ownerType',
+              restaurantId: '$restaurantId',
+              userId: '$userId',
+            },
+            balance: { $sum: '$amount' },
+            currency: { $first: '$currency' },
+          },
+        },
+      ]);
+
+      for (const row of rows) {
+        const scope = row._id.ownerType === 'restaurant'
+          ? { ownerType: 'restaurant', restaurantId: row._id.restaurantId }
+          : row._id.ownerType === 'user'
+            ? { ownerType: 'user', userId: row._id.userId }
+            : { ownerType: 'system' };
+        const account = this.balanceAccountForScope(scope);
+        await this.balanceModel.updateOne(
+          account,
+          {
+            $set: {
+              ...account,
+              balance: this.toBalanceInteger(row.balance),
+              currency: row.currency || 'XAF',
+            },
+          },
+          { upsert: true },
+        );
+      }
+    } catch (error: any) {
+      this.logger.warn(`Failed to backfill balances: ${error?.message || error}`);
+    } finally {
+      this.isBackfillingBalances = false;
+    }
+  }
+
   async summary(actor: any) {
     const scope = this.scopeForActor(actor);
+    const account = this.balanceAccountForScope(scope);
     const ledgerBalance = await this.balanceFor(scope);
     return {
       ownerType: scope.ownerType,
+      accountType: account.accountType,
+      ownerId: account.ownerId,
       balance: ledgerBalance,
       currency: 'XAF',
     };
@@ -87,8 +202,8 @@ export class BalancesService {
     const scope = this.scopeForActor(actor);
     const pagination = normalizePagination(page, limit);
     const [data, total] = await Promise.all([
-      this.balanceModel.find(scope).sort({ createdAt: -1 }).skip(pagination.skip).limit(pagination.limit),
-      this.balanceModel.countDocuments(scope),
+      this.transactionModel.find(scope).sort({ createdAt: -1 }).skip(pagination.skip).limit(pagination.limit),
+      this.transactionModel.countDocuments(scope),
     ]);
     return { data, meta: buildPaginationMeta(pagination.page, pagination.limit, total) };
   }
@@ -109,9 +224,9 @@ export class BalancesService {
   }
 
   private normalizeAmount(dto: AdminBalanceOperationDto) {
-    const amount = Number(dto.amount || 0);
+    const amount = Math.floor(Number(dto.amount || 0));
     if (amount <= 0) throw new BadRequestException('Amount must be positive');
-    return amount;
+    return Math.floor(amount);
   }
 
   private async findDriverOrFail(driverId: string) {
@@ -157,7 +272,9 @@ export class BalancesService {
     const driver = await this.findDriverOrFail(driverId);
     return {
       ownerType: 'user',
+      accountType: 'driver',
       userId: driver._id,
+      ownerId: String(driver._id),
       balance: await this.balanceFor({ ownerType: 'user', userId: driver._id }),
       currency: 'XAF',
     };
@@ -168,7 +285,9 @@ export class BalancesService {
     const restaurant = await this.findRestaurantOrFail(restaurantId);
     return {
       ownerType: 'restaurant',
+      accountType: 'restaurant',
       restaurantId: restaurant._id,
+      ownerId: String(restaurant._id),
       balance: await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id }),
       currency: 'XAF',
     };
@@ -184,8 +303,8 @@ export class BalancesService {
 
     const createdBy = this.oid(actor.sub);
     const [systemDebit, driverCredit] = await Promise.all([
-      this.balanceModel.create({ ownerType: 'system', amount: -amount, type: 'debit', reason: 'driver_funding', userId: driver._id, createdBy, note: dto.note, currency: 'XAF' }),
-      this.balanceModel.create({ ownerType: 'user', userId: driver._id, amount, type: 'credit', reason: 'admin_driver_credit', createdBy, note: dto.note, currency: 'XAF' }),
+      this.recordBalanceTransaction({ ownerType: 'system', amount: -amount, type: 'debit', reason: 'driver_funding', userId: driver._id, createdBy, note: dto.note, currency: 'XAF' }),
+      this.recordBalanceTransaction({ ownerType: 'user', userId: driver._id, amount, type: 'credit', reason: 'admin_driver_credit', createdBy, note: dto.note, currency: 'XAF' }),
     ]);
 
     return { systemDebit, driverCredit, driverBalance: await this.balanceFor({ ownerType: 'user', userId: driver._id }) };
@@ -199,7 +318,7 @@ export class BalancesService {
     if (amount > driverBalance) throw new BadRequestException('Insufficient driver balance');
 
     const createdBy = this.oid(actor.sub);
-    const transaction = await this.balanceModel.create({
+    const transaction = await this.recordBalanceTransaction({
       ownerType: 'user',
       userId: driver._id,
       amount: -amount,
@@ -222,8 +341,8 @@ export class BalancesService {
 
     const createdBy = this.oid(actor.sub);
     const [systemDebit, restaurantCredit] = await Promise.all([
-      this.balanceModel.create({ ownerType: 'system', amount: -amount, type: 'debit', reason: 'restaurant_funding', restaurantId: restaurant._id, createdBy, note: dto.note, currency: 'XAF' }),
-      this.balanceModel.create({ ownerType: 'restaurant', restaurantId: restaurant._id, amount, type: 'credit', reason: 'admin_restaurant_credit', createdBy, note: dto.note, currency: 'XAF' }),
+      this.recordBalanceTransaction({ ownerType: 'system', amount: -amount, type: 'debit', reason: 'restaurant_funding', restaurantId: restaurant._id, createdBy, note: dto.note, currency: 'XAF' }),
+      this.recordBalanceTransaction({ ownerType: 'restaurant', restaurantId: restaurant._id, amount, type: 'credit', reason: 'admin_restaurant_credit', createdBy, note: dto.note, currency: 'XAF' }),
     ]);
 
     return { systemDebit, restaurantCredit, restaurantBalance: await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id }) };
@@ -237,7 +356,7 @@ export class BalancesService {
     if (amount > restaurantBalance) throw new BadRequestException('Insufficient restaurant balance');
 
     const createdBy = this.oid(actor.sub);
-    const transaction = await this.balanceModel.create({
+    const transaction = await this.recordBalanceTransaction({
       ownerType: 'restaurant',
       restaurantId: restaurant._id,
       amount: -amount,
@@ -277,7 +396,7 @@ export class BalancesService {
           status: 'pending',
         }], { session });
 
-        const [debit] = await this.balanceModel.create([{
+        const debit = await this.recordBalanceTransaction({
           ...scope,
           withdrawalId: withdrawal._id,
           amount: -amount,
@@ -286,7 +405,7 @@ export class BalancesService {
           currency: 'XAF',
           note: `Retrait MTN ${dto.phone}`,
           createdBy: this.oid(actor.sub),
-        }], { session });
+        }, session);
 
         result = {
           withdrawal,
@@ -374,23 +493,21 @@ export class BalancesService {
         const shouldRefund = ['rejected', 'failed'].includes(nextStatus);
         let refunded = false;
         if (shouldRefund) {
-          const refund = await this.balanceModel.updateOne(
+          const refund = await this.upsertBalanceTransaction(
             { withdrawalId: withdrawal._id, reason: 'withdrawal_refund' },
             {
-              $setOnInsert: {
-                ownerType: withdrawal.ownerType,
-                restaurantId: withdrawal.restaurantId,
-                userId: withdrawal.userId,
-                withdrawalId: withdrawal._id,
-                amount: withdrawal.amount,
-                type: 'credit',
-                reason: 'withdrawal_refund',
-                currency: withdrawal.currency || 'XAF',
-                note: note || `Remboursement retrait ${nextStatus}`,
-                createdBy: processedBy ? this.oid(processedBy) : undefined,
-              },
+              ownerType: withdrawal.ownerType,
+              restaurantId: withdrawal.restaurantId,
+              userId: withdrawal.userId,
+              withdrawalId: withdrawal._id,
+              amount: withdrawal.amount,
+              type: 'credit',
+              reason: 'withdrawal_refund',
+              currency: withdrawal.currency || 'XAF',
+              note: note || `Remboursement retrait ${nextStatus}`,
+              createdBy: processedBy ? this.oid(processedBy) : undefined,
             },
-            { upsert: true, session },
+            session,
           );
           refunded = Boolean(refund.upsertedCount);
         }
