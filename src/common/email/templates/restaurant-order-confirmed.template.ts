@@ -34,7 +34,7 @@ export function restaurantOrderConfirmedTemplate(input: {
         { label: 'Client', value: input.clientName },
         { label: 'Téléphone client', value: input.clientPhone },
         { label: 'Adresse', value: input.address },
-        { label: 'Total', value: input.total !== undefined ? `${input.total} XAF` : undefined },
+        // { label: 'Total', value: input.total !== undefined ? `${input.total} XAF` : undefined },
       ],
       cta: input.orderUrl ? { label: 'Voir la commande', url: input.orderUrl } : undefined,
       note: 'Merci de confirmer rapidement la commande et de démarrer la préparation.',
