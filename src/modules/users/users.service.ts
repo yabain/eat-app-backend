@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { User, UserDocument } from '../../database/schemas/user.schema';
+import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.schema';
 import { UserRole } from '../../common/enums/roles.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search.util';
@@ -14,7 +15,10 @@ import { UpdateUserDto } from './dto/update-user.dto';
 
 @Injectable()
 export class UsersService {
-  constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
+  constructor(
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(Delivery.name) private deliveryModel: Model<DeliveryDocument>,
+  ) {}
 
   private sanitizeRoleForManager(role?: UserRole) {
     const finalRole = role || UserRole.EMPLOYEE;
@@ -114,6 +118,15 @@ export class UsersService {
       profileImage: dto.profileImage,
     };
     if (actor.role === UserRole.DRIVER && dto.isDriverAvailable !== undefined) {
+      if (dto.isDriverAvailable === true) {
+        const activeDelivery = await this.deliveryModel.exists({
+          driverId: actor.sub,
+          status: { $in: ['assigned', 'picked_up', 'out_for_delivery'] },
+        });
+        if (activeDelivery) {
+          throw new BadRequestException('Vous ne pouvez pas vous rendre disponible pendant une livraison active');
+        }
+      }
       payload.isDriverAvailable = dto.isDriverAvailable;
     }
     if (dto.password) payload.passwordHash = await this.hashPassword(dto.password);
