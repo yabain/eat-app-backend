@@ -94,10 +94,13 @@ export class BalancesService {
     payload.amount = amount;
     const account = this.balanceAccountForScope(payload);
     const [transaction] = await this.transactionModel.create([payload], { session });
+    // NB: pas de `balance: 0` dans $setOnInsert — conflit avec $inc.
+    // Le default du schema (et la sémantique de $inc à l'insert qui démarre
+    // de 0) garantit la cohérence.
     await this.balanceModel.updateOne(
       account,
       {
-        $setOnInsert: { ...account, balance: 0, currency: payload.currency || 'XAF' },
+        $setOnInsert: { ...account, currency: payload.currency || 'XAF' },
         $inc: { balance: amount },
       },
       { upsert: true, session },
@@ -121,7 +124,7 @@ export class BalancesService {
       await this.balanceModel.updateOne(
         account,
         {
-          $setOnInsert: { ...account, balance: 0, currency: payload.currency || 'XAF' },
+          $setOnInsert: { ...account, currency: payload.currency || 'XAF' },
           $inc: { balance: delta },
         },
         { upsert: true, session },
@@ -138,6 +141,14 @@ export class BalancesService {
     }
     if (actor.role === UserRole.ADMIN) return { ownerType: 'system' };
     throw new ForbiddenException('No balance available for this role');
+  }
+
+  /**
+   * Recalcule chaque `Balance` à partir de la somme de ses `BalanceTransaction`.
+   * Idempotent : sûr de l'appeler à tout moment, manuellement ou via le cron.
+   */
+  async runBalancesBackfill() {
+    return this.backfillBalancesFromTransactions();
   }
 
   @Cron('*/5 * * * *')

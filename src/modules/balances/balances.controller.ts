@@ -53,6 +53,18 @@ export class BalancesController {
 
 
   @Roles(UserRole.ADMIN)
+  @Post('admin/reconcile')
+  @ApiOperation({
+    summary: 'Forcer la réconciliation des soldes (admin)',
+    description:
+      "Recalcule la collection `Balance` à partir de la somme de chaque `BalanceTransaction` du compte concerné. À utiliser après un correctif ou une migration pour resynchroniser immédiatement sans attendre le cron de 5 min.",
+  })
+  async triggerBalancesReconciliation() {
+    await this.service.runBalancesBackfill();
+    return { ok: true };
+  }
+
+  @Roles(UserRole.ADMIN)
   @Get('drivers/:driverId')
   @ApiOperation({ summary: 'Consulter le solde d’un livreur (admin)' })
   driverBalance(@Req() req: any, @Param('driverId') driverId: string) {

@@ -213,6 +213,7 @@ export class PaymentsService {
       .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
       .sort({ createdAt: -1 });
 
+    console.log('existingPayment: ', existingPayment);
     if (existingPayment) {
       const remote = existingPayment.providerRef
         ? await this.provider.getTransactionStatus(existingPayment.providerRef)
@@ -539,9 +540,13 @@ export class PaymentsService {
 
   private balanceInsertFromTransactionPayload(payload: any) {
     const account = this.balanceAccountFromTransactionPayload(payload);
+    // NB: on ne pose PAS `balance: 0` ici. MongoDB rejette un update qui
+    // contient $setOnInsert d'un champ ET $inc sur le même champ
+    // ("Updating the path 'balance' would create a conflict at 'balance'").
+    // Le `default: 0` du schema garantit la valeur initiale à l'insertion,
+    // puis $inc applique le delta.
     return {
       ...account,
-      balance: 0,
       currency: payload.currency || 'XAF',
     };
   }
@@ -591,6 +596,7 @@ export class PaymentsService {
     const { systemAmount, restaurantAmount, driverAmount } = this.orderBalanceDistribution(order);
     const currency = payment.currency || 'XAF';
     const operations: Promise<any>[] = [];
+    console.log('creditOrderBalances: systemAmount, restaurantAmount, driverAmount :', systemAmount, restaurantAmount, driverAmount);
 
     if (systemAmount > 0) {
       operations.push(this.createBalanceIfMissing(
