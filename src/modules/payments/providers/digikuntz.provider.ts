@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, ServiceUnavailableException } from '@nestjs/common';
 
 @Injectable()
 export class DigikuntzProvider {
@@ -34,11 +34,10 @@ export class DigikuntzProvider {
     });
 
     if (!res.ok) {
-      const err = await res.text();
-      throw new InternalServerErrorException(`DigiKuntz error: ${err}`);
+      throw this.buildProviderError(res, await res.text(), 'DigiKuntz payment');
     }
 
-    const data = await res.json();
+    const data = await this.readJsonResponse(res, 'DigiKuntz payment');
     return {
       providerRef: data.id,
       transactionRef: data.data?.transactionRef,
@@ -85,11 +84,10 @@ export class DigikuntzProvider {
     });
 
     if (!res.ok) {
-      const err = await res.text();
-      throw new InternalServerErrorException(`DigiKuntz payout error: ${err}`);
+      throw this.buildProviderError(res, await res.text(), 'DigiKuntz payout');
     }
 
-    const data = await res.json();
+    const data = await this.readJsonResponse(res, 'DigiKuntz payout');
     return {
       providerRef: data.id,
       transactionRef: data.data?.transactionRef,
@@ -99,5 +97,26 @@ export class DigikuntzProvider {
       status: data.status,
       raw: data,
     };
+  }
+
+  private async readJsonResponse(res: Response, context: string) {
+    try {
+      return await res.json();
+    } catch {
+      throw new ServiceUnavailableException(`${context} returned an invalid response`);
+    }
+  }
+
+  private buildProviderError(res: Response, rawBody: string, context: string) {
+    const body = String(rawBody || '');
+    const isHtml = /<\/?[a-z][\s\S]*>/i.test(body);
+    const title = body.match(/<title[^>]*>(.*?)<\/title>/i)?.[1]?.trim();
+    const safeDetail = isHtml ? title : body.slice(0, 300);
+    const message = res.status >= 500
+      ? 'Service de paiement temporairement indisponible. Réessayez dans quelques minutes.'
+      : `${context} error${safeDetail ? `: ${safeDetail}` : ''}`;
+
+    if (res.status >= 500) return new ServiceUnavailableException(message);
+    return new InternalServerErrorException(message);
   }
 }

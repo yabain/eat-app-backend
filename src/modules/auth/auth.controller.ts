@@ -54,11 +54,11 @@ export class AuthController {
   @ApiBearerAuth('bearer')
   @ApiOperation({
     summary: 'Déconnexion',
-    description: 'Révoque le JWT courant et tous les JWT précédents du compte en incrémentant la version serveur.',
+    description: 'Révoque le JWT courant en l’ajoutant à la liste noire serveur.',
   })
   @ApiOkResponse({ description: 'Déconnecté', type: OkResponseDto })
   async logout(@Req() req: any) {
-    await this.authService.logout(req.user?.sub);
+    await this.authService.logout(this.extractBearerToken(req));
     return { ok: true };
   }
 
@@ -141,5 +141,11 @@ export class AuthController {
   @ApiUnauthorizedResponse({ description: 'Token absent, invalide, expiré ou compte désactivé' })
   me(@Req() req: any) {
     return this.authService.me(req.user);
+  }
+
+  private extractBearerToken(req: any): string | undefined {
+    const authHeader = String(req?.headers?.authorization || '');
+    if (!authHeader.startsWith('Bearer ')) return undefined;
+    return authHeader.slice('Bearer '.length).trim() || undefined;
   }
 }

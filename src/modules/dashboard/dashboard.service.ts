@@ -77,11 +77,17 @@ export class DashboardService {
     });
   }
 
+  private restaurantIdFilter(restaurantId: string) {
+    const values: any[] = [restaurantId];
+    if (Types.ObjectId.isValid(restaurantId)) values.push(new Types.ObjectId(restaurantId));
+    return { restaurantId: { $in: values } };
+  }
+
   private restaurantFilter(actor: any, restaurantId?: string) {
-    if (actor.role === UserRole.ADMIN) return restaurantId ? { restaurantId: new Types.ObjectId(restaurantId) } : {};
+    if (actor.role === UserRole.ADMIN) return restaurantId ? this.restaurantIdFilter(restaurantId) : {};
     if ([UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role)) {
       if (!actor.restaurantId) throw new ForbiddenException('Restaurant context is required');
-      return { restaurantId: new Types.ObjectId(String(actor.restaurantId)) };
+      return this.restaurantIdFilter(String(actor.restaurantId));
     }
     throw new ForbiddenException('You are not allowed to access dashboard stats');
   }
@@ -93,9 +99,10 @@ export class DashboardService {
     const dateFilter = { createdAt: { $gte: start } };
     const orderFilter = { ...restaurantFilter, ...dateFilter };
     const paidOrderFilter = { ...orderFilter, paymentStatus: PaymentStatus.PAID };
-    const isRestaurantScope = Boolean(restaurantFilter.restaurantId) || actor.role !== UserRole.ADMIN;
+    const scopedRestaurantId = restaurantId || (actor.role !== UserRole.ADMIN ? String(actor.restaurantId || '') : '');
+    const isRestaurantScope = Boolean(scopedRestaurantId);
     const balanceFilter = isRestaurantScope
-      ? { accountType: 'restaurant', ownerId: String(restaurantFilter.restaurantId) }
+      ? { accountType: 'restaurant', ownerId: scopedRestaurantId }
       : { accountType: 'system', ownerId: '0000000' };
 
     const [ordersTotal, paidOrders, menuItemsTotal, balanceAgg, revenueAgg, series, topItems, restaurantBalances] = await Promise.all([

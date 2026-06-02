@@ -12,6 +12,7 @@ import {
   resetPasswordTemplate,
 } from '../../common/email/templates';
 import { deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
+import { RevokedToken, RevokedTokenDocument } from '../../database/schemas/revoked-token.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -40,13 +41,14 @@ export class AuthService {
 
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(RevokedToken.name) private revokedTokenModel: Model<RevokedTokenDocument>,
     private jwtService: JwtService,
     private configService: ConfigService,
   ) {}
 
-  async logout(userId: string | undefined) {
-    if (!userId) return;
-    await this.userModel.findByIdAndUpdate(userId, { $inc: { refreshTokenVersion: 1 } });
+  async logout(token: string | undefined) {
+    if (!token) return;
+    await this.revokedTokenModel.updateOne({ token }, { $setOnInsert: { token } }, { upsert: true });
   }
 
   async register(dto: RegisterDto) {
@@ -352,9 +354,12 @@ export class AuthService {
       role: user.role,
       restaurantId: user.restaurantId ? user.restaurantId.toString() : undefined,
       rtv: user.refreshTokenVersion ?? 0,
+      jti: crypto.randomUUID(),
     };
+    const token = this.jwtService.sign(payload, { expiresIn: AuthService.ACCESS_TOKEN_EXPIRES_IN });
     return {
-      accessToken: this.jwtService.sign(payload, { expiresIn: AuthService.ACCESS_TOKEN_EXPIRES_IN }),
+      accessToken: token,
+      token,
       user: userResponse,
       requiresProfileCompletion: missingProfileFields.length > 0,
       missingProfileFields,

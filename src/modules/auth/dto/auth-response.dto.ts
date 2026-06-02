@@ -40,6 +40,12 @@ export class AuthResponseDto {
   @ApiProperty({ example: 'jwt_token' })
   accessToken: string;
 
+  @ApiProperty({
+    description: 'Alias compatible DigiKuntz du JWT retourné dans accessToken.',
+    example: 'jwt_token',
+  })
+  token: string;
+
   @ApiProperty({ type: AuthUserResponseDto })
   user: AuthUserResponseDto;
 

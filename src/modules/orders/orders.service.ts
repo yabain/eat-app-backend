@@ -166,7 +166,7 @@ export class OrdersService {
     const feeType = process.env.PLATFORM_FEE_TYPE || 'fixed'; // if fixed, PLATFORM_FEE_VALUE=value. if percentage, PLATFORM_FEE_VALUE=percentage
     const feeValue = Number(process.env.PLATFORM_FEE_VALUE || 0);
     const payableBeforePlatformFee = Number(itemsSubtotal + packagingTotal + deliveryFee);
-    const platformFee = feeType === 'percentage' ? Math.round(payableBeforePlatformFee * feeValue / 100) : feeValue;
+    const platformFee = feeType === 'percentage' ? Math.ceil(payableBeforePlatformFee * feeValue / 100) : feeValue;
 
     let promoDiscount = 0;
     let promo: PromoCodeDocument | null = null;

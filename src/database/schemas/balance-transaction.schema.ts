@@ -30,10 +30,18 @@ export class BalanceTransaction {
 export const BalanceTransactionSchema = SchemaFactory.createForClass(BalanceTransaction);
 BalanceTransactionSchema.index(
   { paymentId: 1, ownerType: 1, restaurantId: 1, userId: 1, reason: 1 },
-  { unique: true, partialFilterExpression: { paymentId: { $exists: true } } },
+  {
+    name: 'paymentId_1_ownerType_1_restaurantId_1_userId_1_reason_1',
+    unique: true,
+    partialFilterExpression: { paymentId: { $type: 'objectId' } },
+  },
 );
 BalanceTransactionSchema.index(
   { withdrawalId: 1, reason: 1 },
-  { unique: true, partialFilterExpression: { withdrawalId: { $exists: true } } },
+  {
+    name: 'withdrawalId_1_reason_1',
+    unique: true,
+    partialFilterExpression: { withdrawalId: { $type: 'objectId' } },
+  },
 );
 BalanceTransactionSchema.index({ ownerType: 1, restaurantId: 1, userId: 1, createdAt: -1 });

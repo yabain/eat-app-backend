@@ -5,4 +5,5 @@ export interface JwtPayload {
   role: UserRole;
   restaurantId?: string;
   rtv?: number;
+  jti?: string;
 }

@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -19,7 +19,7 @@ import { buildPaginationMeta, normalizePagination } from '../../common/paginatio
 import { buildContainsRegex } from '../../common/utils/search.util';
 
 @Injectable()
-export class PaymentsService {
+export class PaymentsService implements OnModuleInit {
   private readonly logger = new Logger(PaymentsService.name);
   private isSyncingProviderPayments = false;
 
@@ -34,6 +34,62 @@ export class PaymentsService {
     private provider: DigikuntzProvider,
     private notifications: NotificationsService,
   ) {}
+
+  async onModuleInit() {
+    await this.ensureBalanceTransactionIndexes();
+  }
+
+  private async ensureBalanceTransactionIndexes() {
+    await this.dropLegacyBalanceTransactionIndexes();
+    await this.ensurePartialObjectIdIndex(
+      'withdrawalId_1_reason_1',
+      { withdrawalId: 1, reason: 1 },
+      { withdrawalId: { $type: 'objectId' } },
+    );
+    await this.ensurePartialObjectIdIndex(
+      'paymentId_1_ownerType_1_restaurantId_1_userId_1_reason_1',
+      { paymentId: 1, ownerType: 1, restaurantId: 1, userId: 1, reason: 1 },
+      { paymentId: { $type: 'objectId' } },
+    );
+  }
+
+  private async dropLegacyBalanceTransactionIndexes() {
+    const legacyIndexNames = ['paymentId_1'];
+    try {
+      const indexes = await this.transactionModel.collection.indexes();
+      for (const name of legacyIndexNames) {
+        if (!indexes.some((index: any) => index.name === name)) continue;
+        await this.transactionModel.collection.dropIndex(name);
+        this.logger.log(`Dropped legacy balance transaction index: ${name}`);
+      }
+    } catch (error: any) {
+      this.logger.warn(`Unable to drop legacy balance transaction indexes: ${error?.message || error}`);
+    }
+  }
+
+  private async ensurePartialObjectIdIndex(name: string, keys: Record<string, 1 | -1>, partialFilterExpression: any) {
+    try {
+      const indexes = await this.transactionModel.collection.indexes();
+      const existing = indexes.find((index: any) => index.name === name);
+      const expectedPartial = JSON.stringify(partialFilterExpression);
+      const currentPartial = JSON.stringify(existing?.partialFilterExpression || null);
+
+      if (existing && currentPartial !== expectedPartial) {
+        await this.transactionModel.collection.dropIndex(name);
+      }
+
+      if (!existing || currentPartial !== expectedPartial) {
+        await this.transactionModel.collection.createIndex(keys, {
+          name,
+          unique: true,
+          partialFilterExpression,
+        });
+        this.logger.log(`Balance transaction index ready: ${name}`);
+      }
+    } catch (error: any) {
+      this.logger.warn(`Unable to ensure balance transaction index ${name}: ${error?.message || error}`);
+    }
+  }
 
 
   async list(actor: any, page?: number, limit?: number, filters?: { q?: string; status?: string; provider?: string; from?: string; to?: string }) {
@@ -151,6 +207,13 @@ export class PaymentsService {
     return Math.max(0, Math.floor(amount));
   }
 
+  private balanceInteger(value: any): number {
+    const amount = Number(value || 0);
+    if (!Number.isFinite(amount)) return 0;
+    const sign = amount < 0 ? -1 : 1;
+    return sign * Math.floor(Math.abs(amount));
+  }
+
   private orderPaymentAmount(order: any): number {
     const pricing = order?.pricingSnapshot || {};
     const explicit = Number(pricing.paymentAmount);
@@ -213,7 +276,6 @@ export class PaymentsService {
       .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
       .sort({ createdAt: -1 });
 
-    console.log('existingPayment: ', existingPayment);
     if (existingPayment) {
       const remote = existingPayment.providerRef
         ? await this.provider.getTransactionStatus(existingPayment.providerRef)
@@ -428,7 +490,7 @@ export class PaymentsService {
   }
 
   private getOrderPaymentTimeoutMs(): number {
-    const minutes = Number(process.env.ORDER_PAYMENT_TIMEOUT_MINUTES);
+    const minutes = Number(process.env.ORDER_PAYMENT_TIMEOUT_MINUTES || process.env.PAYMENT_TIMEOUT_MINUTES);
     const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 30;
     return safeMinutes * 60 * 1000;
   }
@@ -448,6 +510,8 @@ export class PaymentsService {
 
     for (const order of staleOrders) {
       try {
+        if (!this.isOrderFromCurrentCameroonDay(order)) continue;
+
         const latestPayment = await this.paymentModel
           .findOne({ orderId: order._id })
           .sort({ createdAt: -1 });
@@ -534,61 +598,63 @@ export class PaymentsService {
     return { accountType: 'system', ownerId: '0000000' };
   }
 
-  private balanceFilterFromTransactionPayload(payload: any) {
-    return this.balanceAccountFromTransactionPayload(payload);
+  private async getBalanceTotalFromTransactions(payload: any): Promise<number> {
+    const match = payload.ownerType === 'restaurant'
+      ? { ownerType: 'restaurant', restaurantId: payload.restaurantId }
+      : payload.ownerType === 'user'
+        ? { ownerType: 'user', userId: payload.userId }
+        : { ownerType: 'system' };
+
+    const [row] = await this.transactionModel.aggregate([
+      { $match: match },
+      { $group: { _id: null, balance: { $sum: '$amount' } } },
+    ]);
+    return this.balanceInteger(row?.balance || 0);
   }
 
-  private balanceInsertFromTransactionPayload(payload: any) {
+  private async setBalanceTotal(payload: any): Promise<number> {
     const account = this.balanceAccountFromTransactionPayload(payload);
-    // NB: on ne pose PAS `balance: 0` ici. MongoDB rejette un update qui
-    // contient $setOnInsert d'un champ ET $inc sur le même champ
-    // ("Updating the path 'balance' would create a conflict at 'balance'").
-    // Le `default: 0` du schema garantit la valeur initiale à l'insertion,
-    // puis $inc applique le delta.
-    return {
-      ...account,
+    const balance = await this.getBalanceTotalFromTransactions(payload);
+    await this.balanceModel.findOneAndUpdate(
+      account,
+      {
+        $set: {
+          ...account,
+          balance,
+          currency: payload.currency || 'XAF',
+        },
+      },
+      { upsert: true, new: true, runValidators: true },
+    );
+    return balance;
+  }
+
+  private async recordOrderBalanceTransaction(filter: any, payload: any) {
+    const amount = this.money(payload.amount);
+    const doc = {
+      ...payload,
+      amount,
       currency: payload.currency || 'XAF',
     };
-  }
+    const { amount: _amount, note: _note, currency: _currency, ...insertOnlyDoc } = doc;
 
-  private async createBalanceIfMissing(filter: any, payload: any) {
-    const { amount, note, currency, orderId, paymentId, ...insertPayload } = payload;
-    const previous = await this.transactionModel.findOne(filter).select('amount');
-    const previousAmount = Number(previous?.amount || 0);
-    const nextAmount = this.money(amount);
-    const delta = nextAmount - previousAmount;
-    const update = {
-      $setOnInsert: insertPayload,
-      $set: {
-        amount: nextAmount,
-        note,
-        currency,
-        orderId,
-        paymentId,
+    await this.transactionModel.updateOne(
+      filter,
+      {
+        $setOnInsert: {
+          ...insertOnlyDoc,
+          createdAt: new Date(),
+        },
+        $set: {
+          amount,
+          note: doc.note,
+          currency: doc.currency,
+        },
       },
-    };
+      { upsert: true },
+    );
 
-    try {
-      const result = await this.transactionModel.updateOne(
-        filter,
-        update,
-        { upsert: true },
-      );
-      if (delta !== 0) {
-        await this.balanceModel.updateOne(
-          this.balanceFilterFromTransactionPayload(payload),
-          {
-            $setOnInsert: this.balanceInsertFromTransactionPayload(payload),
-            $inc: { balance: delta },
-          },
-          { upsert: true },
-        );
-      }
-      return result;
-    } catch (err: any) {
-      if (err?.code === 11000) return null;
-      throw err;
-    }
+    return this.setBalanceTotal(doc);
   }
 
   private async creditOrderBalances(order: any, payment: any, driverId?: any) {
@@ -596,10 +662,9 @@ export class PaymentsService {
     const { systemAmount, restaurantAmount, driverAmount } = this.orderBalanceDistribution(order);
     const currency = payment.currency || 'XAF';
     const operations: Promise<any>[] = [];
-    console.log('creditOrderBalances: systemAmount, restaurantAmount, driverAmount :', systemAmount, restaurantAmount, driverAmount);
 
     if (systemAmount > 0) {
-      operations.push(this.createBalanceIfMissing(
+      operations.push(this.recordOrderBalanceTransaction(
         { paymentId: payment._id, ownerType: 'system', reason: 'order_system_share' },
         {
           ownerType: 'system',
@@ -615,7 +680,7 @@ export class PaymentsService {
     }
 
     if (restaurantAmount > 0 && order.restaurantId) {
-      operations.push(this.createBalanceIfMissing(
+      operations.push(this.recordOrderBalanceTransaction(
         { paymentId: payment._id, ownerType: 'restaurant', restaurantId: order.restaurantId, reason: 'order_restaurant_share' },
         {
           ownerType: 'restaurant',
@@ -632,7 +697,7 @@ export class PaymentsService {
     }
 
     if (driverAmount > 0 && driverId) {
-      operations.push(this.createBalanceIfMissing(
+      operations.push(this.recordOrderBalanceTransaction(
         { paymentId: payment._id, ownerType: 'user', userId: driverId, reason: 'order_delivery_share' },
         {
           ownerType: 'user',
