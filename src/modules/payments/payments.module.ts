@@ -6,7 +6,7 @@ import { User, UserSchema } from '../../database/schemas/user.schema';
 import { Restaurant, RestaurantSchema } from '../../database/schemas/restaurant.schema';
 import { Balance, BalanceSchema } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionSchema } from '../../database/schemas/balance-transaction.schema';
-import { PaymentsController } from './payments.controller';
+import { DigikuntzWebhookController, PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
 import { DigikuntzProvider } from './providers/digikuntz.provider';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -26,7 +26,7 @@ import { MenuModule } from '../menu/menu.module';
     MenuModule,
   ],
   providers: [PaymentsService, DigikuntzProvider],
-  controllers: [PaymentsController],
+  controllers: [PaymentsController, DigikuntzWebhookController],
   exports: [PaymentsService],
 })
 export class PaymentsModule {}

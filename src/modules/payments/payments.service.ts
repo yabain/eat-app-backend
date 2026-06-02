@@ -364,8 +364,8 @@ export class PaymentsService implements OnModuleInit {
     };
   }
 
-  async webhook(payload: any, providedToken?: string) {
-    this.assertWebhookAuthenticated(providedToken);
+  async webhook(payload: any, providedToken?: string, options: { allowMissingToken?: boolean } = {}) {
+    this.assertWebhookAuthenticated(providedToken, options.allowMissingToken);
 
     if (!payload?.id) throw new BadRequestException('Missing transaction id');
 
@@ -412,8 +412,9 @@ export class PaymentsService implements OnModuleInit {
     return { ok: true };
   }
 
-  private assertWebhookAuthenticated(providedToken?: string) {
+  private assertWebhookAuthenticated(providedToken?: string, allowMissingToken = false) {
     const expected = process.env.DIGIKUNTZ_WEBHOOK_SECRET;
+    if (allowMissingToken && !providedToken) return;
     if (!expected) {
       if (process.env.NODE_ENV === 'production') {
         this.logger.error('DIGIKUNTZ_WEBHOOK_SECRET is not configured — refusing webhook in production');

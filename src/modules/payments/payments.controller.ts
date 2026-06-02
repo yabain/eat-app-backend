@@ -11,6 +11,25 @@ import { OkResponseDto } from '../../common/dto/response.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { PaginatedPaymentsResponseDto, PaymentInitiateResponseDto, PaymentStatusResponseDto, PaymentSyncResponseDto } from './dto/payment-response.dto';
 
+@ApiTags('webhooks')
+@Controller('webhook')
+export class DigikuntzWebhookController {
+  constructor(private readonly service: PaymentsService) {}
+
+  @Post('digikuntz')
+  @ApiOperation({
+    summary: 'Webhook public DigiKuntz',
+    description:
+      "Reçoit les notifications de statut des transactions apiCall envoyées par DigiKuntz via l’URL webhookUrl configurée dans la page des clés API. Cette route est exposée sans préfixe /api : /webhook/digikuntz.",
+  })
+  @ApiQuery({ name: 'token', required: false, description: 'Webhook shared secret optionnel.' })
+  @ApiBody({ type: DigikuntzWebhookDto })
+  @ApiOkResponse({ description: 'Webhook traité', type: OkResponseDto })
+  webhook(@Body() body: DigikuntzWebhookDto, @Query('token') token?: string) {
+    return this.service.webhook(body, token, { allowMissingToken: true });
+  }
+}
+
 @ApiTags('payments')
 @Controller('payments')
 export class PaymentsController {
