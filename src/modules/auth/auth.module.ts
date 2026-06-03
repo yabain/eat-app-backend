@@ -7,6 +7,8 @@ import { RevokedToken, RevokedTokenSchema } from '../../database/schemas/revoked
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { ProspectsModule } from '../prospects/prospects.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -23,6 +25,8 @@ import { JwtStrategy } from './strategies/jwt.strategy';
         signOptions: { expiresIn: '90d' },
       }),
     }),
+    ProspectsModule,
+    NotificationsModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],

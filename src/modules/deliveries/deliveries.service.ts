@@ -51,7 +51,7 @@ export class DeliveriesService {
       if (!order || !driver) return;
       const restaurant = order.restaurantId as any;
       const client = order.userId as any;
-      await this.notifications.sendDeliveryAssigned(driver.email, {
+      await this.notifications.sendDeliveryAssigned(driver.email, driver.phone, {
         orderNumber: order.orderNumber,
         driverName: this.displayName(driver),
         restaurantName: restaurant?.name,
@@ -65,6 +65,15 @@ export class DeliveriesService {
       // Le logger de NotificationsService détaille déjà les erreurs SMTP.
       this.logger.warn(`Unable to notify driver for delivery ${delivery._id}: ${error?.message || error}`);
     }
+  }
+
+  private notifyDelivered(order: OrderDocument) {
+    this.userModel.findById(order.userId).select('email phone').then((user) => {
+      if (!user) return;
+      void this.notifications.sendDelivered(user.email, user.phone, order.orderNumber);
+    }).catch((error: any) => {
+      this.logger.warn(`Unable to notify delivered order ${order._id}: ${error?.message || error}`);
+    });
   }
 
   async assign(dto: AssignDeliveryDto, actor: any) {
@@ -226,6 +235,7 @@ export class DeliveriesService {
         { _id: delivery.driverId, role: UserRole.DRIVER },
         { $set: { isDriverAvailable: true } },
       );
+      this.notifyDelivered(order);
 
       try {
         await this.paymentsService.ensurePaidOrderBalances(order, delivery.driverId);

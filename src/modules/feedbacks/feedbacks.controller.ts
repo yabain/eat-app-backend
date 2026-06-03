@@ -1,8 +1,12 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiConflictResponse, ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../../common/enums/roles.enum';
+import { RolesGuard } from '../../common/guards/roles.guard';
 import { CreateFeedbackDto } from './dto/create-feedback.dto';
 import { ListFeedbacksQueryDto } from './dto/list-feedbacks-query.dto';
+import { UpdateFeedbackStatusDto } from './dto/update-feedback-status.dto';
 import { UpdateMyFeedbackDto } from './dto/update-my-feedback.dto';
 import { FeedbacksService } from './feedbacks.service';
 import { FeedbackResponseDto, FeedbackStatsResponseDto, PaginatedFeedbacksResponseDto } from './dto/feedback-response.dto';
@@ -32,6 +36,31 @@ export class FeedbacksController {
   @ApiOkResponse({ description: 'Feedback mis à jour', type: FeedbackResponseDto })
   updateMyFeedback(@Req() req: any, @Param('entityId') entityId: string, @Body() dto: UpdateMyFeedbackDto) {
     return this.service.updateMyFeedback(req.user.sub, entityId, dto);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Patch(':id/status')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Activer ou désactiver un feedback (admin)' })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiBody({ type: UpdateFeedbackStatusDto })
+  @ApiOkResponse({ description: 'Statut du feedback mis à jour', type: FeedbackResponseDto })
+  updateStatus(@Param('id') id: string, @Body() dto: UpdateFeedbackStatusDto) {
+    return this.service.updateFeedbackStatus(id, dto.status);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Get('admin/entity/:entityId')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Lister tous les feedbacks d’une entité, actifs et désactivés (admin)' })
+  @ApiParam({ name: 'entityId', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 10 })
+  @ApiOkResponse({ description: 'Liste paginée complète des feedbacks', type: PaginatedFeedbacksResponseDto })
+  listByEntityForAdmin(@Param('entityId') entityId: string, @Query() query: ListFeedbacksQueryDto) {
+    return this.service.listByEntity(entityId, query.page, query.limit, true);
   }
 
   @Get('entity/:entityId/stats')

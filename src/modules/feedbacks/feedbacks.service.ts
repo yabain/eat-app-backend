@@ -26,7 +26,7 @@ export class FeedbacksService {
         entityId: new Types.ObjectId(dto.entityId),
         rating: dto.rating,
         comment: dto.comment,
-        status: dto.status ?? true,
+        status: true,
       });
     } catch (error: any) {
       if (error?.code === 11000) {
@@ -50,13 +50,14 @@ export class FeedbacksService {
     return feedback;
   }
 
-  async listByEntity(entityId: string, page?: number, limit?: number) {
+  async listByEntity(entityId: string, page?: number, limit?: number, includeInactive = false) {
     if (!Types.ObjectId.isValid(entityId)) {
       throw new BadRequestException('entityId must be a mongodb id');
     }
 
     const pagination = normalizePagination(page, limit ?? 10);
-    const filter = { entityId: new Types.ObjectId(entityId), status: true };
+    const filter: any = { entityId: new Types.ObjectId(entityId) };
+    if (!includeInactive) filter.status = true;
     const [data, total] = await Promise.all([
       this.feedbackModel
         .find(filter)
@@ -74,6 +75,23 @@ export class FeedbacksService {
       data,
       meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     };
+  }
+
+  async updateFeedbackStatus(feedbackId: string, status: boolean) {
+    if (!Types.ObjectId.isValid(feedbackId)) {
+      throw new BadRequestException('feedbackId must be a mongodb id');
+    }
+
+    const feedback = await this.feedbackModel.findByIdAndUpdate(
+      feedbackId,
+      { status },
+      { new: true },
+    ).populate({
+      path: 'userId',
+      select: 'firstName lastName email phone profileImage role restaurantId isActive',
+    });
+    if (!feedback) throw new NotFoundException('Feedback not found');
+    return feedback;
   }
 
   async getEntityStats(entityId: string) {

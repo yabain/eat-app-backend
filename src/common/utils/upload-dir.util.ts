@@ -6,6 +6,7 @@ function isProductionEnv() {
   return ['production', 'prod'].includes((process.env.NODE_ENV || '').toLowerCase());
 }
 
+
 export function resolveUploadDir(folder?: string) {
   const baseDir = isProductionEnv()
     ? process.env.UPLOAD_DIR || HOSTINGER_UPLOAD_DIR

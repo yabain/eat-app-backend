@@ -735,11 +735,11 @@ export class PaymentsService implements OnModuleInit {
           restaurantId: order.restaurantId,
           role: { $in: [UserRole.MANAGER, UserRole.EMPLOYEE] },
           isActive: { $ne: false },
-        }).select('email'),
+        }).select('email phone'),
       ]);
 
       await this.notifications.sendRestaurantOrderConfirmed(
-        staff.map((user) => user.email),
+        staff.map((user) => ({ email: user.email, phone: user.phone })),
         {
           orderId: String(order._id),
           orderNumber: order.orderNumber,

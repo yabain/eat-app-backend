@@ -5,12 +5,6 @@ import { JwtService } from '@nestjs/jwt';
 import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
-import * as nodemailer from 'nodemailer';
-import {
-  accountCreatedTemplate,
-  passwordChangedTemplate,
-  resetPasswordTemplate,
-} from '../../common/email/templates';
 import { deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
 import { RevokedToken, RevokedTokenDocument } from '../../database/schemas/revoked-token.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
@@ -21,6 +15,8 @@ import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { UserRole } from '../../common/enums/roles.enum';
+import { ProspectsService } from '../prospects/prospects.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 type GoogleTokenInfo = {
   aud: string;
@@ -44,6 +40,8 @@ export class AuthService {
     @InjectModel(RevokedToken.name) private revokedTokenModel: Model<RevokedTokenDocument>,
     private jwtService: JwtService,
     private configService: ConfigService,
+    private prospectsService: ProspectsService,
+    private notificationsService: NotificationsService,
   ) {}
 
   async logout(token: string | undefined) {
@@ -63,8 +61,9 @@ export class AuthService {
       authProvider: 'local',
       isProfileComplete: true,
     });
-    this.sendAccountCreatedEmail(user).catch((error) => {
-      this.logger.warn(`Unable to send account created email to ${user.email}: ${error?.message || error}`);
+    this.notifyAccountCreated(user);
+    this.prospectsService.removeMatchingUser(user.email, user.phone).catch((error) => {
+      this.logger.warn(`Unable to remove matching prospect for ${user.email}: ${error?.message || error}`);
     });
     return this.buildAuthResponse(user);
   }
@@ -98,7 +97,11 @@ export class AuthService {
       passwordResetExpiresAt: expiresAt,
     });
 
-    await this.sendResetPasswordEmail(user.email, rawToken);
+    this.notificationsService.sendResetPassword(user.email, user.phone, {
+      resetLink: this.buildResetPasswordLink(rawToken),
+      expiresIn: '1 heure',
+      firstName: user.firstName,
+    });
     return { ok: true };
   }
 
@@ -123,8 +126,9 @@ export class AuthService {
       $inc: { refreshTokenVersion: 1 },
     });
 
-    this.sendPasswordChangedEmail(user).catch((error) => {
-      this.logger.warn(`Unable to send password changed email to ${user.email}: ${error?.message || error}`);
+    this.notificationsService.sendPasswordChanged(user.email, user.phone, {
+      firstName: user.firstName,
+      loginUrl: this.getFrontendUrl(),
     });
 
     return { ok: true };
@@ -178,8 +182,9 @@ export class AuthService {
     userPayload.isProfileComplete = this.getMissingProfileFields(userPayload).length === 0;
 
     const created = await this.userModel.create(userPayload);
-    this.sendAccountCreatedEmail(created).catch((error) => {
-      this.logger.warn(`Unable to send Google account created email to ${created.email}: ${error?.message || error}`);
+    this.notifyAccountCreated(created);
+    this.prospectsService.removeMatchingUser(created.email, created.phone).catch((error) => {
+      this.logger.warn(`Unable to remove matching prospect for ${created.email}: ${error?.message || error}`);
     });
     return this.buildAuthResponse(created);
   }
@@ -216,6 +221,9 @@ export class AuthService {
     payload.isProfileComplete = true;
     const updated = await this.userModel.findByIdAndUpdate(user._id, payload, { new: true });
     if (payload.profileImage !== undefined) await deleteReplacedLocalUpload(user.profileImage, payload.profileImage);
+    this.prospectsService.removeMatchingUser(updated.email, updated.phone).catch((error) => {
+      this.logger.warn(`Unable to remove matching prospect for ${updated.email}: ${error?.message || error}`);
+    });
     return this.buildAuthResponse(updated);
   }
 
@@ -268,80 +276,28 @@ export class AuthService {
   }
 
   private buildResetPasswordLink(token: string) {
-    const frontendUrl = this.configService.get<string>('FRONTEND_URL');
+    const frontendUrl = this.normalizeUrl(this.configService.get<string>('FRONTEND_URL'));
     if (!frontendUrl) throw new InternalServerErrorException('Reset password frontend URL is not configured');
 
     const resetPath = this.configService.get<string>('RESET_PASSWORD_PATH') || '/reset-password';
-    const normalizedBase = frontendUrl.replace(/\/+$/, '');
     const normalizedPath = resetPath.startsWith('/') ? resetPath : `/${resetPath}`;
-    return `${normalizedBase}${normalizedPath}?token=${encodeURIComponent(token)}`;
-  }
-
-  private createMailTransporter() {
-    const smtpHost = this.configService.get<string>('SMTP_HOST');
-    const smtpPort = Number(this.configService.get<string>('SMTP_PORT'));
-    const smtpUser = this.configService.get<string>('SMTP_USER');
-    const smtpPass = this.configService.get<string>('SMTP_PASS');
-
-    if (!smtpHost || !smtpPort || !smtpUser || !smtpPass) {
-      throw new InternalServerErrorException('SMTP configuration is incomplete');
-    }
-
-    return {
-      from: smtpUser,
-      transporter: nodemailer.createTransport({
-        host: smtpHost,
-        port: smtpPort,
-        secure: smtpPort === 465,
-        auth: { user: smtpUser, pass: smtpPass },
-      }),
-    };
+    return `${frontendUrl}${normalizedPath}?token=${encodeURIComponent(token)}`;
   }
 
   private getFrontendUrl() {
-    return this.configService.get<string>('FRONTEND_URL')?.replace(/\/+$/, '');
+    return this.normalizeUrl(this.configService.get<string>('FRONTEND_URL'));
   }
 
-  private async sendResetPasswordEmail(email: string, token: string) {
-    const { transporter, from } = this.createMailTransporter();
-    const resetLink = this.buildResetPasswordLink(token);
-    const template = resetPasswordTemplate({ resetLink, expiresIn: '1 heure' });
-
-    await transporter.sendMail({
-      from,
-      to: email,
-      subject: template.subject,
-      html: template.html,
-    });
+  private normalizeUrl(url?: string) {
+    const value = String(url || '').trim().replace(/\/+$/, '');
+    if (!value) return undefined;
+    return /^https?:\/\//i.test(value) ? value : `https://${value}`;
   }
 
-  private async sendAccountCreatedEmail(user: UserDocument) {
-    const { transporter, from } = this.createMailTransporter();
-    const template = accountCreatedTemplate({
+  private notifyAccountCreated(user: UserDocument) {
+    this.notificationsService.sendAccountCreated(user.email, user.phone, {
       firstName: user.firstName,
       loginUrl: this.getFrontendUrl(),
-    });
-
-    await transporter.sendMail({
-      from,
-      to: user.email,
-      subject: template.subject,
-      html: template.html,
-    });
-  }
-
-  private async sendPasswordChangedEmail(user: UserDocument) {
-    const { transporter, from } = this.createMailTransporter();
-    const template = passwordChangedTemplate({
-      firstName: user.firstName,
-      loginUrl: this.getFrontendUrl(),
-    });
-
-    await transporter.sendMail({
-      from,
-      to: user.email,
-      subject: template.subject,
-      html: template.html,
     });
   }
 

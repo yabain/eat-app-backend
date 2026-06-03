@@ -19,6 +19,10 @@ import { FeedbacksModule } from './modules/feedbacks/feedbacks.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { BalancesModule } from './modules/balances/balances.module';
 import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
+import { PlatformSettingsModule } from './modules/platform-settings/platform-settings.module';
+import { AnnouncementsModule } from './modules/announcements/announcements.module';
+import { WhatsappModule } from './modules/whatsapp/whatsapp.module';
+import { ProspectsModule } from './modules/prospects/prospects.module';
 
 @Module({
   imports: [
@@ -47,6 +51,10 @@ import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
     DashboardModule,
     BalancesModule,
     AuditLogsModule,
+    PlatformSettingsModule,
+    AnnouncementsModule,
+    WhatsappModule,
+    ProspectsModule,
   ],
 })
 export class AppModule {}

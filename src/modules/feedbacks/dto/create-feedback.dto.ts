@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsInt, IsMongoId, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsInt, IsMongoId, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class CreateFeedbackDto {
   @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
@@ -16,9 +16,4 @@ export class CreateFeedbackDto {
   @IsOptional()
   @IsString()
   comment?: string;
-
-  @ApiPropertyOptional({ example: true, default: true })
-  @IsOptional()
-  @IsBoolean()
-  status?: boolean;
 }

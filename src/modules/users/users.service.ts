@@ -33,6 +33,13 @@ export class UsersService {
     return bcrypt.hash(password, 10);
   }
 
+  private disableDriverAvailabilityWhenInactive(payload: any, currentRole?: UserRole) {
+    const nextRole = payload.role ?? currentRole;
+    if (nextRole === UserRole.DRIVER && payload.isActive === false) {
+      payload.isDriverAvailable = false;
+    }
+  }
+
   async create(dto: CreateUserDto) {
     const payload = {
       ...dto,
@@ -40,6 +47,7 @@ export class UsersService {
       passwordHash: await this.hashPassword(dto.password),
     };
     delete (payload as any).password;
+    this.disableDriverAvailabilityWhenInactive(payload);
     const created = await this.userModel.create(payload);
     return this.userModel.findById(created._id).select('-passwordHash');
   }
@@ -98,6 +106,7 @@ export class UsersService {
     if (dto.email) payload.email = dto.email.toLowerCase();
     if (dto.password) payload.passwordHash = await this.hashPassword(dto.password);
     delete payload.password;
+    this.disableDriverAvailabilityWhenInactive(payload, existing.role);
     const user = await this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash');
     if (!user) throw new NotFoundException('User not found');
     if (payload.profileImage !== undefined) await deleteReplacedLocalUpload(existing.profileImage, payload.profileImage);
@@ -161,7 +170,7 @@ export class UsersService {
       role,
       restaurantId: manager.restaurantId,
       isActive: dto.isActive ?? true,
-      isDriverAvailable: dto.isDriverAvailable ?? true,
+      isDriverAvailable: role === UserRole.DRIVER && dto.isActive === false ? false : dto.isDriverAvailable ?? true,
       passwordHash,
     });
     return this.userModel.findById(created._id).select('-passwordHash');
@@ -218,6 +227,7 @@ export class UsersService {
     if (dto.password) payload.passwordHash = await this.hashPassword(dto.password);
     if (dto.role) payload.role = this.sanitizeRoleForManager(dto.role);
     delete payload.password;
+    this.disableDriverAvailabilityWhenInactive(payload, employee.role);
 
     const updated = await this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash');
     if (!updated) throw new NotFoundException('User not found');
@@ -277,9 +287,13 @@ export class UsersService {
   }
 
   async deactivateUser(id: string) {
+    const existing = await this.userModel.findById(id).select('role');
+    if (!existing) throw new NotFoundException('User not found');
+    const payload: any = { isActive: false };
+    this.disableDriverAvailabilityWhenInactive(payload, existing.role);
     const user = await this.userModel.findByIdAndUpdate(
       id,
-      { isActive: false },
+      payload,
       { new: true },
     ).select('-passwordHash');
     if (!user) throw new NotFoundException('User not found');
