@@ -22,6 +22,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly configService: ConfigService) {}
 
   async onModuleInit() {
+    if (this.useGateway()) {
+      this.logger.log(`WhatsApp gateway enabled: ${this.gatewayBaseUrl()}`);
+      return;
+    }
     if (this.configService.get<string>('WHATSAPP_AUTO_INIT', 'true') === 'false') return;
     void this.initialize().catch((error) => {
       this.status = 'failed';
@@ -35,6 +39,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getStatus() {
+    if (this.useGateway()) return this.safeGatewayStatus('status');
     await this.refreshRuntimeState();
     return {
       status: this.status,
@@ -46,6 +51,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getQr() {
+    if (this.useGateway()) return this.safeGatewayStatus('qr');
     if (!this.client && !this.initializing) await this.initialize();
     await this.refreshRuntimeState();
     return {
@@ -59,6 +65,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async reset() {
+    if (this.useGateway()) return this.safeGatewayStatus('reset', { method: 'POST' });
     await this.destroyClient();
     const authPath = this.getAuthDataPath();
     const removed = this.removeAuthData(authPath);
@@ -78,6 +85,12 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async sendText(phone: string, message: string) {
+    if (this.useGateway()) {
+      return this.gatewayRequest('send-text', {
+        method: 'POST',
+        body: JSON.stringify({ phone, message }),
+      });
+    }
     if (!this.client || this.status !== 'ready') {
       throw new BadRequestException(`WhatsApp is not ready${this.status ? ` (current status: ${this.status})` : ''}`);
     }
@@ -140,6 +153,76 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.initializing = false;
     }
+  }
+
+  private useGateway() {
+    return !!this.gatewayBaseUrl() && this.configService.get<string>('WHATSAPP_LOCAL_ENABLED', 'false') !== 'true';
+  }
+
+  private gatewayBaseUrl() {
+    return this.normalizeUrl(this.configService.get<string>('WHATSAPP_GATEWAY_URL'));
+  }
+
+  private gatewayPassword() {
+    return this.configService.get<string>('WHATSAPP_GATEWAY_PASSWORD') || '123Whatsapp?';
+  }
+
+  private async gatewayRequest(path: string, init: RequestInit = {}) {
+    const baseUrl = this.gatewayBaseUrl();
+    if (!baseUrl) throw new BadRequestException('WhatsApp gateway URL is not configured');
+
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/${path.replace(/^\/+/, '')}`, {
+        ...init,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-whatsapp-password': this.gatewayPassword(),
+          ...(init.headers || {}),
+        },
+      });
+    } catch (error: any) {
+      throw new BadRequestException(`WhatsApp gateway unreachable: ${error?.message || error}`);
+    }
+    const text = await response.text();
+    const data = text ? this.parseGatewayJson(text) : {};
+
+    if (!response.ok) {
+      throw new BadRequestException(data?.message || data?.error || `WhatsApp gateway error (${response.status})`);
+    }
+    return data;
+  }
+
+  private async safeGatewayStatus(path: string, init: RequestInit = {}) {
+    try {
+      return await this.gatewayRequest(path, init);
+    } catch (error: any) {
+      const message = error?.response?.message || error?.message || String(error);
+      this.logger.warn(message);
+      return {
+        status: 'failed',
+        connected: false,
+        hasQr: false,
+        qr: null,
+        qrDataUrl: null,
+        connectedNumber: null,
+        lastError: message,
+      };
+    }
+  }
+
+  private parseGatewayJson(text: string) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { message: text };
+    }
+  }
+
+  private normalizeUrl(url?: string) {
+    const value = String(url || '').trim().replace(/\/+$/, '');
+    if (!value) return '';
+    return /^https?:\/\//i.test(value) ? value : `https://${value}`;
   }
 
   private registerEvents(client: Client) {

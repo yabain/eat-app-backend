@@ -417,7 +417,7 @@ export class AnnouncementsService {
   }
 
   private withWhatsappFooter(message: string) {
-    const footer = '> Ceci est un message automatique de Eat';
+    const footer = '> Ceci est un message automatique de Eat App';
     const content = String(message || '').trim();
     if (!content) return footer;
     if (content.includes(footer)) return content;
