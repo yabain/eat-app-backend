@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsOptional, IsString } from 'class-validator';
+import { IsCmPhone, NormalizeOptionalCmPhone } from '../../../common/validators/cm-phone.validator';
 
 export class CompleteProfileDto {
   @ApiPropertyOptional({ example: 'Jean' })
@@ -12,9 +13,11 @@ export class CompleteProfileDto {
   @IsString()
   lastName?: string;
 
-  @ApiPropertyOptional({ example: '+237612345678' })
+  @ApiPropertyOptional({ example: '691224472' })
+  @NormalizeOptionalCmPhone()
   @IsOptional()
   @IsString()
+  @IsCmPhone()
   phone?: string;
 
   @ApiPropertyOptional({ example: '/uploads/profiles/avatar.png' })

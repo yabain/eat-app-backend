@@ -15,6 +15,7 @@ export enum AnnouncementRecipientGroup {
 export enum AnnouncementStatus {
   DRAFT = 'draft',
   SCHEDULED = 'scheduled',
+  SENDING = 'sending',
   SENT = 'sent',
   FAILED = 'failed',
 }

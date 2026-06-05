@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { IsEmail, IsOptional, IsString } from 'class-validator';
+import { IsCmPhone, NormalizeOptionalCmPhone } from '../../../common/validators/cm-phone.validator';
 
 const emptyToUndefined = ({ value }: { value: unknown }) => {
   const normalized = String(value ?? '').trim();
@@ -21,9 +22,10 @@ export class CreateProspectDto {
   email?: string;
 
   @ApiPropertyOptional({ example: '691224472', description: 'Numéro sans indicatif pays' })
-  @Transform(emptyToUndefined)
+  @NormalizeOptionalCmPhone()
   @IsOptional()
   @IsString()
+  @IsCmPhone()
   phone?: string;
 }
 

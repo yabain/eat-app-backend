@@ -1,7 +1,12 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectModel } from '@nestjs/mongoose';
-import { FilterQuery, Model } from 'mongoose';
+import { FilterQuery, Model, Types } from 'mongoose';
+import {
+  AnnouncementDelivery,
+  AnnouncementDeliveryDocument,
+  AnnouncementDeliveryStatus,
+} from '../../database/schemas/announcement-delivery.schema';
 import {
   Announcement,
   AnnouncementChannel,
@@ -20,9 +25,11 @@ import { CreateAnnouncementDto, UpdateAnnouncementDto } from './dto/announcement
 @Injectable()
 export class AnnouncementsService {
   private readonly logger = new Logger(AnnouncementsService.name);
+  private processingDeliveries = false;
 
   constructor(
     @InjectModel(Announcement.name) private readonly announcementModel: Model<AnnouncementDocument>,
+    @InjectModel(AnnouncementDelivery.name) private readonly deliveryModel: Model<AnnouncementDeliveryDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly notificationsService: NotificationsService,
     private readonly prospectsService: ProspectsService,
@@ -119,8 +126,8 @@ export class AnnouncementsService {
   async sendAnnouncement(id: string) {
     const announcement = await this.announcementModel.findById(id);
     if (!announcement) throw new NotFoundException('Announcement not found');
-    if ([AnnouncementStatus.SENT].includes(announcement.status)) {
-      throw new BadRequestException('Announcement already sent');
+    if ([AnnouncementStatus.SENT, AnnouncementStatus.SENDING].includes(announcement.status)) {
+      throw new BadRequestException('Announcement already sent or sending');
     }
 
     const channel = announcement.channel || AnnouncementChannel.EMAIL;
@@ -140,32 +147,14 @@ export class AnnouncementsService {
       return announcement;
     }
 
-    let successCount = 0;
-    let failureCount = 0;
-    const failures: string[] = [];
-
-    for (const recipient of recipients) {
-      try {
-        const content = this.renderContent(announcement.html, recipient);
-        if (channel === AnnouncementChannel.WHATSAPP) {
-          await this.whatsappService.sendText(recipient.phone, this.withWhatsappFooter(this.stripHtml(content)));
-        } else {
-          await this.notificationsService.sendRawHtml(recipient.email, announcement.subject, content);
-        }
-        successCount += 1;
-      } catch (error) {
-        failureCount += 1;
-        failures.push(`${recipient.email || recipient.phone}: ${error?.message || error}`);
-      }
-    }
-
-    announcement.status = failureCount > 0 && successCount === 0 ? AnnouncementStatus.FAILED : AnnouncementStatus.SENT;
-    announcement.sentAt = new Date();
-    announcement.failureReason = failures.slice(0, 10).join('\n') || null;
+    await this.enqueueDeliveries(announcement, channel, recipients);
+    announcement.status = AnnouncementStatus.SENDING;
+    announcement.sentAt = null;
+    announcement.failureReason = null;
     announcement.recipientCount = recipients.length;
-    announcement.successCount = successCount;
-    announcement.failureCount = failureCount;
-    announcement.recipientsSnapshot = recipients as any[];
+    announcement.successCount = 0;
+    announcement.failureCount = 0;
+    announcement.recipientsSnapshot = recipients.slice(0, 100) as any[];
     return announcement.save();
   }
 
@@ -193,6 +182,181 @@ export class AnnouncementsService {
     }
   }
 
+  @Cron('*/15 * * * * *')
+  async processPendingDeliveries() {
+    if (this.processingDeliveries) return;
+    this.processingDeliveries = true;
+    try {
+      await this.releaseStaleProcessingDeliveries();
+      await this.processDeliveryBatch(AnnouncementChannel.EMAIL, Number(process.env.ANNOUNCEMENT_EMAIL_BATCH_SIZE || 100));
+      await this.processDeliveryBatch(AnnouncementChannel.WHATSAPP, Number(process.env.ANNOUNCEMENT_WHATSAPP_BATCH_SIZE || 10));
+    } catch (error) {
+      this.logger.warn(`Unable to process announcement deliveries: ${error?.message || error}`);
+    } finally {
+      this.processingDeliveries = false;
+    }
+  }
+
+  private async releaseStaleProcessingDeliveries() {
+    const staleAfterMinutes = Number(process.env.ANNOUNCEMENT_DELIVERY_LOCK_TIMEOUT_MINUTES || 10);
+    const staleBefore = new Date(Date.now() - Math.max(1, staleAfterMinutes) * 60_000);
+    await this.deliveryModel.updateMany(
+      {
+        status: AnnouncementDeliveryStatus.PROCESSING,
+        lockedAt: { $lte: staleBefore },
+      },
+      {
+        $set: {
+          status: AnnouncementDeliveryStatus.PENDING,
+          lockedAt: null,
+          lastError: 'Traitement interrompu, reprise automatique',
+        },
+      },
+    );
+  }
+
+  private async enqueueDeliveries(announcement: AnnouncementDocument, channel: AnnouncementChannel, recipients: any[]) {
+    const announcementId = announcement._id as Types.ObjectId;
+    await this.deliveryModel.deleteMany({
+      announcementId,
+      status: { $in: [AnnouncementDeliveryStatus.PENDING, AnnouncementDeliveryStatus.PROCESSING, AnnouncementDeliveryStatus.FAILED] },
+    });
+
+    const deliveries = recipients.map((recipient) => {
+      const email = recipient.email ? String(recipient.email).toLowerCase() : '';
+      const phone = recipient.phone ? String(recipient.phone).replace(/\D/g, '') : '';
+      const recipientKey = channel === AnnouncementChannel.WHATSAPP ? phone : email;
+      return {
+        announcementId,
+        channel,
+        recipientKey,
+        email,
+        phone,
+        userId: recipient.userId || '',
+        userName: recipient.userName || '',
+        userFirstName: recipient.userFirstName || '',
+        userLastName: recipient.userLastName || '',
+        userPhone: recipient.userPhone || '',
+        status: AnnouncementDeliveryStatus.PENDING,
+        attempts: 0,
+      };
+    }).filter((delivery) => delivery.recipientKey);
+
+    if (deliveries.length) {
+      await this.deliveryModel.insertMany(deliveries, { ordered: false }).catch((error) => {
+        if (error?.code !== 11000) throw error;
+      });
+    }
+  }
+
+  private async processDeliveryBatch(channel: AnnouncementChannel, limit: number) {
+    const batchSize = Math.max(1, Math.min(500, Number(limit || 1)));
+    const deliveries = await this.deliveryModel
+      .find({
+        channel,
+        status: AnnouncementDeliveryStatus.PENDING,
+      })
+      .sort({ createdAt: 1 })
+      .limit(batchSize);
+
+    for (const delivery of deliveries) {
+      const locked = await this.deliveryModel.findOneAndUpdate(
+        { _id: delivery._id, status: AnnouncementDeliveryStatus.PENDING },
+        {
+          $set: { status: AnnouncementDeliveryStatus.PROCESSING, lockedAt: new Date() },
+          $inc: { attempts: 1 },
+        },
+        { new: true },
+      );
+      if (!locked) continue;
+      await this.processOneDelivery(locked);
+    }
+  }
+
+  private async processOneDelivery(delivery: AnnouncementDeliveryDocument) {
+    const announcement = await this.announcementModel.findById(delivery.announcementId);
+    if (!announcement) {
+      await this.markDeliveryFailed(delivery, 'Announcement not found');
+      return;
+    }
+
+    try {
+      const content = this.renderContent(announcement.html, delivery);
+      if (delivery.channel === AnnouncementChannel.WHATSAPP) {
+        await this.whatsappService.sendText(delivery.phone, this.withWhatsappFooter(this.stripHtml(content)));
+      } else {
+        await this.notificationsService.sendRawHtml(delivery.email, announcement.subject, content);
+      }
+
+      await this.deliveryModel.updateOne(
+        { _id: delivery._id },
+        {
+          $set: {
+            status: AnnouncementDeliveryStatus.SENT,
+            sentAt: new Date(),
+            lastError: null,
+          },
+        },
+      );
+    } catch (error) {
+      await this.markDeliveryFailed(delivery, error?.message || String(error));
+    }
+
+    await this.refreshAnnouncementProgress(String(delivery.announcementId));
+  }
+
+  private async markDeliveryFailed(delivery: AnnouncementDeliveryDocument, message: string) {
+    const maxAttempts = Number(process.env.ANNOUNCEMENT_DELIVERY_MAX_ATTEMPTS || 3);
+    const nextStatus = delivery.attempts >= maxAttempts
+      ? AnnouncementDeliveryStatus.FAILED
+      : AnnouncementDeliveryStatus.PENDING;
+    await this.deliveryModel.updateOne(
+      { _id: delivery._id },
+      {
+        $set: {
+          status: nextStatus,
+          lastError: message.slice(0, 500),
+          lockedAt: null,
+        },
+      },
+    );
+  }
+
+  private async refreshAnnouncementProgress(announcementId: string) {
+    const id = new Types.ObjectId(announcementId);
+    const [successCount, failureCount, pendingCount, processingCount, failures] = await Promise.all([
+      this.deliveryModel.countDocuments({ announcementId: id, status: AnnouncementDeliveryStatus.SENT }),
+      this.deliveryModel.countDocuments({ announcementId: id, status: AnnouncementDeliveryStatus.FAILED }),
+      this.deliveryModel.countDocuments({ announcementId: id, status: AnnouncementDeliveryStatus.PENDING }),
+      this.deliveryModel.countDocuments({ announcementId: id, status: AnnouncementDeliveryStatus.PROCESSING }),
+      this.deliveryModel
+        .find({ announcementId: id, status: AnnouncementDeliveryStatus.FAILED })
+        .sort({ updatedAt: -1 })
+        .limit(10)
+        .select('email phone lastError'),
+    ]);
+
+    const remaining = pendingCount + processingCount;
+    const status = remaining > 0
+      ? AnnouncementStatus.SENDING
+      : successCount > 0
+        ? AnnouncementStatus.SENT
+        : AnnouncementStatus.FAILED;
+
+    await this.announcementModel.updateOne(
+      { _id: id },
+      {
+        $set: {
+          status,
+          sentAt: remaining > 0 ? null : new Date(),
+          successCount,
+          failureCount,
+          failureReason: failures.map((item) => `${item.email || item.phone}: ${item.lastError}`).join('\n') || null,
+        },
+      },
+    );
+  }
+
   private parseEmails(raw?: string) {
     return [...new Set((raw || '')
       .split(/[;,]/)
@@ -204,7 +368,7 @@ export class AnnouncementsService {
     return [...new Set((raw || '')
       .split(/[;,]/)
       .map((phone) => phone.replace(/\D/g, ''))
-      .filter((phone) => phone.length >= 8))];
+      .filter((phone) => /^6\d{8}$/.test(phone)))];
   }
 
   private hasRecipientTarget(

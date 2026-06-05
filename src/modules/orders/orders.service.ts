@@ -18,6 +18,7 @@ import { OrderStatus } from '../../common/enums/order-status.enum';
 import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
+import { buildTimeSeriesStats } from '../../common/stats/time-series-stats';
 
 @Injectable()
 export class OrdersService {
@@ -306,6 +307,16 @@ export class OrdersService {
       data,
       meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     };
+  }
+
+  stats(user: any, period?: string, date?: string) {
+    let filter: any = {};
+    if ([UserRole.MANAGER, UserRole.EMPLOYEE].includes(user.role)) {
+      filter.restaurantId = user.restaurantId;
+    } else if (user.role === UserRole.DRIVER) {
+      filter.assignedDriverId = user.sub;
+    }
+    return buildTimeSeriesStats(this.orderModel, period, date, filter);
   }
 
   async readyForDelivery(

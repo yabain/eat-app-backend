@@ -23,6 +23,7 @@ import { PlatformSettingsModule } from './modules/platform-settings/platform-set
 import { AnnouncementsModule } from './modules/announcements/announcements.module';
 import { WhatsappModule } from './modules/whatsapp/whatsapp.module';
 import { ProspectsModule } from './modules/prospects/prospects.module';
+import { TrackingModule } from './modules/tracking/tracking.module';
 
 @Module({
   imports: [
@@ -55,6 +56,7 @@ import { ProspectsModule } from './modules/prospects/prospects.module';
     AnnouncementsModule,
     WhatsappModule,
     ProspectsModule,
+    TrackingModule,
   ],
 })
 export class AppModule {}

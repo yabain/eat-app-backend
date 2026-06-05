@@ -17,6 +17,7 @@ import { UserRole } from '../../common/enums/roles.enum';
 import { MenuInventoryService } from '../menu/menu-inventory.service';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
+import { buildTimeSeriesStats } from '../../common/stats/time-series-stats';
 
 @Injectable()
 export class PaymentsService implements OnModuleInit {
@@ -163,6 +164,15 @@ export class PaymentsService implements OnModuleInit {
       data,
       meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     };
+  }
+
+  async stats(actor: any, period?: string, date?: string) {
+    let filter: any = {};
+    if ([UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role)) {
+      const restaurantOrders = await this.orderModel.find({ restaurantId: actor.restaurantId }).select('_id');
+      filter.orderId = { $in: restaurantOrders.map((order) => order._id) };
+    }
+    return buildTimeSeriesStats(this.paymentModel, period, date, filter);
   }
 
   private refId(ref: any): string {

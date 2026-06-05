@@ -1,10 +1,12 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model } from 'mongoose';
+import * as XLSX from 'xlsx';
 import { Prospect, ProspectDocument } from '../../database/schemas/prospect.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
+import { buildTimeSeriesStats } from '../../common/stats/time-series-stats';
 import { CreateProspectDto, UpdateProspectDto } from './dto/prospect.dto';
 
 @Injectable()
@@ -30,6 +32,10 @@ export class ProspectsService {
       data,
       meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     };
+  }
+
+  stats(period?: string, date?: string) {
+    return buildTimeSeriesStats(this.prospectModel, period, date);
   }
 
   async create(dto: CreateProspectDto) {
@@ -66,6 +72,72 @@ export class ProspectsService {
     return deleted;
   }
 
+  async importExcel(buffer: Buffer) {
+    if (!buffer?.length) throw new BadRequestException('Import file is required');
+
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    const firstSheetName = workbook.SheetNames[0];
+    if (!firstSheetName) throw new BadRequestException('Excel file has no sheet');
+
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[firstSheetName], {
+      defval: '',
+      raw: false,
+    });
+
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    let ignored = 0;
+
+    for (const row of rows) {
+      const payload = this.normalizeImportRow(row);
+      if (!payload.email && !payload.phone) {
+        ignored += 1;
+        continue;
+      }
+
+      const existingUser = await this.findMatchingUser(payload.email, payload.phone);
+      if (existingUser) {
+        skipped += 1;
+        continue;
+      }
+
+      const existingByEmail = payload.email ? await this.prospectModel.findOne({ email: payload.email }) : null;
+      const existingByPhone = payload.phone ? await this.prospectModel.findOne({ phone: payload.phone }) : null;
+      if (existingByEmail && existingByPhone && String(existingByEmail._id) !== String(existingByPhone._id)) {
+        skipped += 1;
+        continue;
+      }
+
+      const existing = existingByEmail || existingByPhone;
+      if (existing) {
+        const patch: Partial<Prospect> = {};
+        if (!existing.name && payload.name) patch.name = payload.name;
+        if (!existing.email && payload.email) patch.email = payload.email;
+        if (!existing.phone && payload.phone) patch.phone = payload.phone;
+
+        if (Object.keys(patch).length) {
+          await this.prospectModel.updateOne({ _id: existing._id }, { $set: patch });
+          updated += 1;
+        } else {
+          skipped += 1;
+        }
+        continue;
+      }
+
+      await this.prospectModel.create(payload);
+      created += 1;
+    }
+
+    return {
+      totalRows: rows.length,
+      created,
+      updated,
+      skipped,
+      ignored,
+    };
+  }
+
   async removeMatchingUser(email?: string, phone?: string) {
     const normalizedEmail = this.normalizeEmail(email);
     const normalizedPhone = this.normalizePhone(phone);
@@ -89,6 +161,14 @@ export class ProspectsService {
     return digits;
   }
 
+  normalizeImportedPhone(phone?: string) {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (!digits) return '';
+    const withoutCountry = digits.startsWith('237') ? digits.slice(3) : digits;
+    const candidate = withoutCountry.length === 8 ? `6${withoutCountry}` : withoutCountry;
+    return /^6\d{8}$/.test(candidate) ? candidate : '';
+  }
+
   private normalizePayload(dto: CreateProspectDto | UpdateProspectDto) {
     return {
       name: String(dto.name || '').trim(),
@@ -101,6 +181,19 @@ export class ProspectsService {
     return String(email || '').trim().toLowerCase();
   }
 
+  private normalizeImportRow(row: Record<string, unknown>) {
+    return {
+      name: this.cell(row, 'name'),
+      email: this.normalizeEmail(this.cell(row, 'email')),
+      phone: this.normalizeImportedPhone(this.cell(row, 'phone')),
+    };
+  }
+
+  private cell(row: Record<string, unknown>, column: string) {
+    const key = Object.keys(row).find((item) => item.trim().toLowerCase() === column);
+    return key ? String(row[key] || '').trim() : '';
+  }
+
   private async ensureNoMatchingUser(email?: string, phone?: string) {
     const filters: any[] = [];
     if (email) filters.push({ email });
@@ -109,7 +202,7 @@ export class ProspectsService {
       filters.push({ phone: { $in: phoneVariants } });
     }
     if (!filters.length) return;
-    const existingUser = await this.userModel.exists({ $or: filters });
+    const existingUser = await this.findMatchingUser(email, phone);
     if (existingUser) throw new BadRequestException('A user already exists with this email or phone');
   }
 
@@ -124,4 +217,13 @@ export class ProspectsService {
     });
     if (duplicate) throw new BadRequestException('A prospect already exists with this email or phone');
   }
+
+  private async findMatchingUser(email?: string, phone?: string) {
+    const filters: any[] = [];
+    if (email) filters.push({ email });
+    if (phone) filters.push({ phone: { $in: [phone, `237${phone}`] } });
+    if (!filters.length) return null;
+    return this.userModel.exists({ $or: filters });
+  }
+
 }

@@ -69,8 +69,22 @@ export class AuthService {
   }
 
   async login(dto: LoginDto) {
+    const identifier = String(dto.identifier || dto.email || '').trim();
+    const phone = identifier.replace(/\D/g, '');
+    const phoneVariants = phone
+      ? [
+          phone,
+          phone.startsWith('237') ? phone.slice(3) : `237${phone}`,
+        ].filter(Boolean)
+      : [];
+
     const user = await this.userModel
-      .findOne({ email: dto.email.toLowerCase() })
+      .findOne({
+        $or: [
+          { email: identifier.toLowerCase() },
+          ...(phoneVariants.length ? [{ phone: { $in: [...new Set(phoneVariants)] } }] : []),
+        ],
+      })
       .select('+passwordHash');
     if (!user) throw new UnauthorizedException('Invalid credentials');
     if (!user.isActive) throw new UnauthorizedException('Account is disabled');

@@ -1,5 +1,6 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -26,12 +27,43 @@ export class ProspectsController {
     return this.prospectsService.list(query.page, query.limit, q);
   }
 
+  @Get('stats/overview')
+  @ApiOperation({ summary: 'Statistiques d’évolution des prospects (admin)' })
+  @ApiQuery({ name: 'period', required: false, enum: ['day', 'month', 'year'] })
+  @ApiQuery({ name: 'date', required: false, type: String })
+  @ApiOkResponse({ description: 'Statistiques prospects' })
+  stats(@Query('period') period?: string, @Query('date') date?: string) {
+    return this.prospectsService.stats(period, date);
+  }
+
   @Post()
   @ApiOperation({ summary: 'Ajouter un prospect (admin)' })
   @ApiBody({ type: CreateProspectDto })
   @ApiOkResponse({ description: 'Prospect ajouté' })
   create(@Body() dto: CreateProspectDto) {
     return this.prospectsService.create(dto);
+  }
+
+  @Post('import')
+  @UseInterceptors(FileInterceptor('file'))
+  @ApiOperation({ summary: 'Importer des prospects depuis un fichier Excel (admin)' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: {
+          type: 'string',
+          format: 'binary',
+          description: 'Fichier .xlsx, .xls ou .csv avec les colonnes name, email, phone',
+        },
+      },
+      required: ['file'],
+    },
+  })
+  @ApiOkResponse({ description: 'Résumé de l’import' })
+  import(@UploadedFile() file: Express.Multer.File) {
+    return this.prospectsService.importExcel(file?.buffer);
   }
 
   @Patch(':id')

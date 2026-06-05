@@ -1,6 +1,7 @@
 import { IsBoolean, IsEmail, IsEnum, IsMongoId, IsOptional, IsString, MinLength } from 'class-validator';
 import { UserRole } from '../../../common/enums/roles.enum';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsCmPhone, NormalizeRequiredCmPhone } from '../../../common/validators/cm-phone.validator';
 
 export class CreateUserDto {
   @ApiProperty({ example: 'Jean' })
@@ -11,8 +12,11 @@ export class CreateUserDto {
   @IsEmail() email: string;
   @ApiProperty({ example: 'StrongPwd@123', minLength: 6 })
   @IsString() @MinLength(6) password: string;
-  @ApiProperty({ example: '+237612345678' })
-  @IsString() phone: string;
+  @ApiProperty({ example: '691224472' })
+  @NormalizeRequiredCmPhone()
+  @IsString()
+  @IsCmPhone()
+  phone: string;
   @ApiPropertyOptional({ example: '/uploads/profiles/avatar.png' })
   @IsOptional() @IsString() profileImage?: string;
   @ApiProperty({ enum: UserRole, example: UserRole.EMPLOYEE })

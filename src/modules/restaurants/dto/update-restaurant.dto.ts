@@ -1,5 +1,6 @@
 import { IsBoolean, IsEmail, IsMongoId, IsOptional, IsString } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
+import { IsCmPhone, NormalizeOptionalCmPhone } from '../../../common/validators/cm-phone.validator';
 export class UpdateRestaurantDto {
   @ApiPropertyOptional({ example: 'Chez Maman' })
   @IsOptional() @IsString() name?: string;
@@ -9,10 +10,12 @@ export class UpdateRestaurantDto {
   @IsOptional() @IsBoolean() top?: boolean;
   @ApiPropertyOptional({ example: 'Cuisine locale camerounaise' })
   @IsOptional() @IsString() description?: string;
-  @ApiPropertyOptional({ example: '+237612345678' })
-  @IsOptional() @IsString() phone1?: string;
-  @ApiPropertyOptional({ example: '+237698765432' })
-  @IsOptional() @IsString() phone2?: string;
+  @ApiPropertyOptional({ example: '691224472' })
+  @NormalizeOptionalCmPhone()
+  @IsOptional() @IsString() @IsCmPhone() phone1?: string;
+  @ApiPropertyOptional({ example: '690909090' })
+  @NormalizeOptionalCmPhone()
+  @IsOptional() @IsString() @IsCmPhone() phone2?: string;
   @ApiPropertyOptional({ example: 'contact@chezmaman.com' })
   @IsOptional() @IsEmail() email?: string;
   @ApiPropertyOptional({ example: 'Le goût qui rassemble' })
@@ -27,8 +30,9 @@ export class UpdateRestaurantDto {
   @IsOptional() @IsString() bannerImage?: string;
   @ApiPropertyOptional({ example: '/uploads/covers/cover.png' })
   @IsOptional() @IsString() coverImage?: string;
-  @ApiPropertyOptional({ example: '+237612345678' })
-  @IsOptional() @IsString() phone?: string;
+  @ApiPropertyOptional({ example: '691224472' })
+  @NormalizeOptionalCmPhone()
+  @IsOptional() @IsString() @IsCmPhone() phone?: string;
   @ApiPropertyOptional({ enum: ['active', 'inactive'], example: 'active' })
   @IsOptional() @IsString() status?: 'active' | 'inactive';
   @ApiPropertyOptional({ example: '665d58e63d7bfeb8f7f61999' })

@@ -2,6 +2,7 @@ import { IsBoolean, IsEmail, IsEnum, IsMongoId, IsOptional, IsString, MinLength 
 import { UserRole } from '../../../common/enums/roles.enum';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
+import { IsCmPhone, NormalizeOptionalCmPhone } from '../../../common/validators/cm-phone.validator';
 
 export class UpdateUserDto {
   @ApiPropertyOptional({ example: 'Jean' })
@@ -12,8 +13,9 @@ export class UpdateUserDto {
   @IsOptional() @IsEmail() email?: string;
   @ApiPropertyOptional({ example: 'StrongPwd@123', minLength: 6 })
   @IsOptional() @IsString() @MinLength(6) password?: string;
-  @ApiPropertyOptional({ example: '+237612345678' })
-  @IsOptional() @IsString() phone?: string;
+  @ApiPropertyOptional({ example: '691224472' })
+  @NormalizeOptionalCmPhone()
+  @IsOptional() @IsString() @IsCmPhone() phone?: string;
   @ApiPropertyOptional({ example: '/uploads/profiles/avatar.png' })
   @IsOptional() @IsString() profileImage?: string;
   @ApiPropertyOptional({ enum: UserRole, example: UserRole.MANAGER })

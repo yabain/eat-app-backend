@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { AnnouncementDelivery, AnnouncementDeliverySchema } from '../../database/schemas/announcement-delivery.schema';
 import { Announcement, AnnouncementSchema } from '../../database/schemas/announcement.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -12,6 +13,7 @@ import { AnnouncementsService } from './announcements.service';
   imports: [
     MongooseModule.forFeature([
       { name: Announcement.name, schema: AnnouncementSchema },
+      { name: AnnouncementDelivery.name, schema: AnnouncementDeliverySchema },
       { name: User.name, schema: UserSchema },
     ]),
     NotificationsModule,

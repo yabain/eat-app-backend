@@ -7,6 +7,7 @@ import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.sche
 import { UserRole } from '../../common/enums/roles.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search.util';
+import { buildTimeSeriesStats } from '../../common/stats/time-series-stats';
 import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
 import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -90,6 +91,10 @@ export class UsersService {
       data,
       meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     };
+  }
+
+  stats(period?: string, date?: string) {
+    return buildTimeSeriesStats(this.userModel, period, date);
   }
 
   findOne(id: string) {

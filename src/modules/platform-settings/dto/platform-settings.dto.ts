@@ -1,16 +1,21 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsArray, IsBoolean, IsEmail, IsNumber, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { IsCmPhone, NormalizeOptionalCmPhone } from '../../../common/validators/cm-phone.validator';
 
 export class PlatformContactSettingsDto {
-  @ApiPropertyOptional({ example: '+237 620 803 178' })
+  @ApiPropertyOptional({ example: '691224472' })
+  @NormalizeOptionalCmPhone()
   @IsOptional()
   @IsString()
+  @IsCmPhone()
   supportPhone?: string;
 
-  @ApiPropertyOptional({ example: '+237 620 803 178' })
+  @ApiPropertyOptional({ example: '691224472' })
+  @NormalizeOptionalCmPhone()
   @IsOptional()
   @IsString()
+  @IsCmPhone()
   supportWhatsapp?: string;
 
   @ApiPropertyOptional({ example: 'support@eat.yaba-in.com' })

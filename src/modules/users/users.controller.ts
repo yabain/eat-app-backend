@@ -93,6 +93,15 @@ export class UsersController {
   }
 
   @Roles(UserRole.ADMIN)
+  @Get('stats/overview')
+  @ApiOperation({ summary: 'Statistiques d’évolution des utilisateurs (admin)' })
+  @ApiQuery({ name: 'period', required: false, enum: ['day', 'month', 'year'] })
+  @ApiQuery({ name: 'date', required: false, type: String })
+  stats(@Query('period') period?: string, @Query('date') date?: string) {
+    return this.usersService.stats(period, date);
+  }
+
+  @Roles(UserRole.ADMIN)
   @Post()
   @ApiOperation({ summary: 'Créer un utilisateur (admin)' })
   @ApiBody({ type: CreateUserDto })

@@ -127,6 +127,16 @@ export class OrdersController {
       to,
     });
   }
+
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER)
+  @UseGuards(RolesGuard)
+  @Get('stats/overview')
+  @ApiOperation({ summary: 'Statistiques d’évolution des commandes selon rôle' })
+  @ApiQuery({ name: 'period', required: false, enum: ['day', 'month', 'year'] })
+  @ApiQuery({ name: 'date', required: false, type: String })
+  stats(@Req() req: any, @Query('period') period?: string, @Query('date') date?: string) {
+    return this.service.stats(req.user, period, date);
+  }
   
   @Roles(UserRole.ADMIN, UserRole.DRIVER)
   @UseGuards(RolesGuard)

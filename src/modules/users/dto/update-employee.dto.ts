@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsBoolean, IsEmail, IsEnum, IsOptional, IsString, MinLength } from 'class-validator';
 import { UserRole } from '../../../common/enums/roles.enum';
+import { IsCmPhone, NormalizeOptionalCmPhone } from '../../../common/validators/cm-phone.validator';
 
 export class UpdateEmployeeDto {
   @ApiPropertyOptional({ example: 'Paul' })
@@ -24,9 +25,11 @@ export class UpdateEmployeeDto {
   @MinLength(6)
   password?: string;
 
-  @ApiPropertyOptional({ example: '+237612345679' })
+  @ApiPropertyOptional({ example: '691224472' })
+  @NormalizeOptionalCmPhone()
   @IsOptional()
   @IsString()
+  @IsCmPhone()
   phone?: string;
 
   @ApiPropertyOptional({ enum: [UserRole.EMPLOYEE, UserRole.DRIVER], example: UserRole.EMPLOYEE })

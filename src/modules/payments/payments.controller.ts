@@ -60,6 +60,17 @@ export class PaymentsController {
     return this.service.list(req.user, query.page, query.limit, { q, status, provider, from, to });
   }
 
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
+  @Get('stats/overview')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Statistiques d’évolution des transactions' })
+  @ApiQuery({ name: 'period', required: false, enum: ['day', 'month', 'year'] })
+  @ApiQuery({ name: 'date', required: false, type: String })
+  stats(@Req() req: any, @Query('period') period?: string, @Query('date') date?: string) {
+    return this.service.stats(req.user, period, date);
+  }
+
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT)
