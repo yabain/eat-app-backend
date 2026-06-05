@@ -50,7 +50,7 @@ export class MenuService {
     restaurantId?: string,
     page?: number,
     limit?: number,
-    filters?: { q?: string; categoryId?: string; isAvailable?: string; isActive?: string },
+    filters?: { q?: string; categoryId?: string; isAvailable?: string; isActive?: string; sortBy?: string; sortDir?: string },
   ) {
     const pagination = normalizePagination(page, limit);
     let filter: any = {};
@@ -71,7 +71,7 @@ export class MenuService {
     const [data, total] = await Promise.all([
       this.model
         .find(filter)
-        .sort({ createdAt: -1 })
+        .sort(this.buildSort(filters?.sortBy, filters?.sortDir))
         .skip(pagination.skip)
         .limit(pagination.limit),
       this.model.countDocuments(filter),
@@ -81,6 +81,12 @@ export class MenuService {
       data,
       meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     };
+  }
+
+  private buildSort(sortBy?: string, sortDir?: string) {
+    const direction = sortDir === 'asc' ? 1 : -1;
+    if (sortBy === 'name') return { name: direction, createdAt: -1 };
+    return { createdAt: direction };
   }
 
   async findOneForActor(actor: any, id: string) {

@@ -69,6 +69,8 @@ export class MenuController {
   @ApiQuery({ name: 'categoryId', required: false, type: String, example: '665d58e63d7bfeb8f7f6172e' })
   @ApiQuery({ name: 'isAvailable', required: false, type: Boolean, example: true })
   @ApiQuery({ name: 'isActive', required: false, type: Boolean, example: true })
+  @ApiQuery({ name: 'sortBy', required: false, enum: ['name', 'createdAt'] })
+  @ApiQuery({ name: 'sortDir', required: false, enum: ['asc', 'desc'] })
   @ApiOkResponse({
     description: 'Liste paginée des menus (plus récent au plus ancien)',
     type: PaginatedMenuItemsResponseDto,
@@ -80,6 +82,8 @@ export class MenuController {
     @Query('categoryId') categoryId?: string,
     @Query('isAvailable') isAvailable?: string,
     @Query('isActive') isActive?: string,
+    @Query('sortBy') sortBy?: string,
+    @Query('sortDir') sortDir?: string,
     @Req() req?: any,
   ) {
     return this.service.findAllForActor(req.user, restaurantId, query?.page, query?.limit, {
@@ -87,6 +91,8 @@ export class MenuController {
       categoryId,
       isAvailable,
       isActive,
+      sortBy,
+      sortDir,
     });
   }
   @Get(':id')

@@ -16,7 +16,7 @@ export class ProspectsService {
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
   ) {}
 
-  async list(page?: number, limit?: number, q?: string) {
+  async list(page?: number, limit?: number, q?: string, sorting?: { sortBy?: string; sortDir?: string }) {
     const pagination = normalizePagination(page, limit);
     const qRegex = buildContainsRegex(q);
     const filter: FilterQuery<ProspectDocument> = qRegex
@@ -24,7 +24,7 @@ export class ProspectsService {
       : {};
 
     const [data, total] = await Promise.all([
-      this.prospectModel.find(filter).sort({ createdAt: -1 }).skip(pagination.skip).limit(pagination.limit),
+      this.prospectModel.find(filter).sort(this.buildSort(sorting?.sortBy, sorting?.sortDir)).skip(pagination.skip).limit(pagination.limit),
       this.prospectModel.countDocuments(filter),
     ]);
 
@@ -32,6 +32,12 @@ export class ProspectsService {
       data,
       meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     };
+  }
+
+  private buildSort(sortBy?: string, sortDir?: string) {
+    const direction = sortDir === 'asc' ? 1 : -1;
+    if (sortBy === 'name') return { name: direction, email: direction, phone: direction, createdAt: -1 };
+    return { createdAt: direction };
   }
 
   stats(period?: string, date?: string) {

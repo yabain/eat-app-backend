@@ -77,6 +77,8 @@ export class UsersController {
   @ApiQuery({ name: 'isActive', required: false, type: Boolean, example: true })
   @ApiQuery({ name: 'isDriverAvailable', required: false, type: Boolean, example: true })
   @ApiQuery({ name: 'restaurantId', required: false, type: String, example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiQuery({ name: 'sortBy', required: false, enum: ['name', 'createdAt'] })
+  @ApiQuery({ name: 'sortDir', required: false, enum: ['asc', 'desc'] })
   @ApiOkResponse({
     description: 'Liste paginée des utilisateurs (plus récent au plus ancien)',
     type: PaginatedUsersResponseDto,
@@ -88,8 +90,10 @@ export class UsersController {
     @Query('isActive') isActive?: string,
     @Query('isDriverAvailable') isDriverAvailable?: string,
     @Query('restaurantId') restaurantId?: string,
+    @Query('sortBy') sortBy?: string,
+    @Query('sortDir') sortDir?: string,
   ) {
-    return this.usersService.findAll(query.page, query.limit, { q, role, isActive, isDriverAvailable, restaurantId });
+    return this.usersService.findAll(query.page, query.limit, { q, role, isActive, isDriverAvailable, restaurantId, sortBy, sortDir });
   }
 
   @Roles(UserRole.ADMIN)

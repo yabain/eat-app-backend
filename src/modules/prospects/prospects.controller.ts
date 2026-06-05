@@ -22,9 +22,11 @@ export class ProspectsController {
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
   @ApiQuery({ name: 'q', required: false, type: String })
+  @ApiQuery({ name: 'sortBy', required: false, enum: ['name', 'createdAt'] })
+  @ApiQuery({ name: 'sortDir', required: false, enum: ['asc', 'desc'] })
   @ApiOkResponse({ description: 'Liste paginée des prospects' })
-  list(@Query() query: PaginationQueryDto, @Query('q') q?: string) {
-    return this.prospectsService.list(query.page, query.limit, q);
+  list(@Query() query: PaginationQueryDto, @Query('q') q?: string, @Query('sortBy') sortBy?: string, @Query('sortDir') sortDir?: string) {
+    return this.prospectsService.list(query.page, query.limit, q, { sortBy, sortDir });
   }
 
   @Get('stats/overview')

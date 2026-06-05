@@ -56,7 +56,15 @@ export class UsersService {
   async findAll(
     page?: number,
     limit?: number,
-    filters?: { q?: string; role?: UserRole; isActive?: string; isDriverAvailable?: string; restaurantId?: string },
+    filters?: {
+      q?: string;
+      role?: UserRole;
+      isActive?: string;
+      isDriverAvailable?: string;
+      restaurantId?: string;
+      sortBy?: string;
+      sortDir?: string;
+    },
   ) {
     const pagination = normalizePagination(page, limit);
     const qRegex = buildContainsRegex(filters?.q);
@@ -81,7 +89,7 @@ export class UsersService {
       this.userModel
         .find(filter)
         .select('-passwordHash')
-        .sort({ createdAt: -1 })
+        .sort(this.buildSort(filters?.sortBy, filters?.sortDir))
         .skip(pagination.skip)
         .limit(pagination.limit),
       this.userModel.countDocuments(filter),
@@ -91,6 +99,12 @@ export class UsersService {
       data,
       meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     };
+  }
+
+  private buildSort(sortBy?: string, sortDir?: string) {
+    const direction = sortDir === 'asc' ? 1 : -1;
+    if (sortBy === 'name') return { firstName: direction, lastName: direction, email: direction, createdAt: -1 };
+    return { createdAt: direction };
   }
 
   stats(period?: string, date?: string) {
