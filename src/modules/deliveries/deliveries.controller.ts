@@ -9,6 +9,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { DeliveryResponseDto, PaginatedDeliveriesResponseDto } from './dto/delivery-response.dto';
+import { UpdateAutoDispatchDto } from './dto/update-auto-dispatch.dto';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @ApiTags('deliveries')
@@ -22,6 +23,24 @@ export class DeliveriesController {
   @ApiBody({ type: AssignDeliveryDto })
   @ApiOkResponse({ description: 'Livraison assignée', type: DeliveryResponseDto })
   assign(@Body() dto: AssignDeliveryDto, @Req() req: any) { return this.service.assign(dto, req.user); }
+
+  @Roles(UserRole.ADMIN)
+  @Get('auto-dispatch')
+  @ApiOperation({ summary: 'Consulter la configuration du dispatch automatique' })
+  @ApiOkResponse({ description: 'Configuration du dispatch automatique' })
+  autoDispatchSettings() {
+    return this.service.getAutoDispatchSettings();
+  }
+
+  @Roles(UserRole.ADMIN)
+  @Patch('auto-dispatch')
+  @ApiOperation({ summary: 'Activer ou désactiver le dispatch automatique' })
+  @ApiBody({ type: UpdateAutoDispatchDto })
+  @ApiOkResponse({ description: 'Configuration du dispatch automatique mise à jour' })
+  updateAutoDispatchSettings(@Body() dto: UpdateAutoDispatchDto) {
+    return this.service.updateAutoDispatchSettings(dto.enabled);
+  }
+
   @Roles(UserRole.DRIVER)
   @Get('my')
   @ApiOperation({

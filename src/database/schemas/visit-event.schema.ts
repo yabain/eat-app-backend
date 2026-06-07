@@ -10,6 +10,9 @@ export enum VisitActorType {
 
 @Schema({ timestamps: true })
 export class VisitEvent {
+  @Prop({ unique: true, sparse: true })
+  eventId?: string;
+
   @Prop({ required: true, trim: true })
   path: string;
 

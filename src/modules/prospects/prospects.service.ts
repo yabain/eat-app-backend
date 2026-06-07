@@ -1,12 +1,13 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { FilterQuery, Model } from 'mongoose';
+import { FilterQuery, Model, SortOrder } from 'mongoose';
 import * as XLSX from 'xlsx';
 import { Prospect, ProspectDocument } from '../../database/schemas/prospect.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
 import { buildTimeSeriesStats } from '../../common/stats/time-series-stats';
+import { buildExcelExport } from '../../common/utils/excel-export.util';
 import { CreateProspectDto, UpdateProspectDto } from './dto/prospect.dto';
 
 @Injectable()
@@ -34,14 +35,22 @@ export class ProspectsService {
     };
   }
 
-  private buildSort(sortBy?: string, sortDir?: string) {
-    const direction = sortDir === 'asc' ? 1 : -1;
+  private buildSort(sortBy?: string, sortDir?: string): Record<string, SortOrder> {
+    const direction: SortOrder = sortDir === 'asc' ? 1 : -1;
     if (sortBy === 'name') return { name: direction, email: direction, phone: direction, createdAt: -1 };
     return { createdAt: direction };
   }
 
   stats(period?: string, date?: string) {
     return buildTimeSeriesStats(this.prospectModel, period, date);
+  }
+
+  async exportExcel() {
+    const prospects = await this.prospectModel.find().sort({ createdAt: -1 }).lean();
+    return buildExcelExport(
+      prospects as unknown as Record<string, unknown>[],
+      'Prospects',
+    );
   }
 
   async create(dto: CreateProspectDto) {

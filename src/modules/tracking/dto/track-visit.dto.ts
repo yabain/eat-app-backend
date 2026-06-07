@@ -2,6 +2,12 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class TrackVisitDto {
+  @ApiPropertyOptional({ example: 'visit-event-1780000000000-abcd' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  eventId?: string;
+
   @ApiPropertyOptional({ example: '/restaurants/665d58e63d7bfeb8f7f6172e' })
   @IsString()
   @MaxLength(300)

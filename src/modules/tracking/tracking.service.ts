@@ -23,7 +23,8 @@ export class TrackingService {
     const path = this.normalizePath(dto.path);
     if (!path || this.isExcludedPath(path)) return { tracked: false };
 
-    await this.visitModel.create({
+    const visit = {
+      eventId: String(dto.eventId || '').trim() || undefined,
       path,
       title: String(dto.title || '').trim(),
       sessionId: String(dto.sessionId || '').trim(),
@@ -31,7 +32,17 @@ export class TrackingService {
       userId: user?.sub && Types.ObjectId.isValid(user.sub) ? new Types.ObjectId(user.sub) : null,
       ip: this.ipFromRequest(req),
       userAgent: String(req.headers?.['user-agent'] || '').slice(0, 500),
-    });
+    };
+
+    if (visit.eventId) {
+      await this.visitModel.updateOne(
+        { eventId: visit.eventId },
+        { $setOnInsert: visit },
+        { upsert: true },
+      );
+    } else {
+      await this.visitModel.create(visit);
+    }
 
     return { tracked: true };
   }
@@ -108,7 +119,6 @@ export class TrackingService {
         },
       },
       { $sort: { visits: -1, path: 1 } },
-      { $limit: 100 },
     ]);
   }
 

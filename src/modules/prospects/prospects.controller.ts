@@ -1,6 +1,7 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Res, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOkResponse, ApiOperation, ApiParam, ApiProduces, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { Response } from 'express';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -36,6 +37,18 @@ export class ProspectsController {
   @ApiOkResponse({ description: 'Statistiques prospects' })
   stats(@Query('period') period?: string, @Query('date') date?: string) {
     return this.prospectsService.stats(period, date);
+  }
+
+  @Get('export')
+  @ApiOperation({ summary: 'Exporter tous les prospects au format Excel (admin)' })
+  @ApiProduces('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  async export(@Res() response: Response) {
+    const buffer = await this.prospectsService.exportExcel();
+    const date = new Date().toISOString().slice(0, 10);
+    response.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    response.setHeader('Content-Disposition', `attachment; filename="prospects-${date}.xlsx"`);
+    response.setHeader('Content-Length', buffer.length);
+    response.end(buffer);
   }
 
   @Post()

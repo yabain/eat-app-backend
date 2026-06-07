@@ -14,6 +14,8 @@ import { OrderStatus } from '../../common/enums/order-status.enum';
 import { orderStatusForDeliveryStatus } from '../../common/utils/delivery-order-status.util';
 import { AssignDeliveryDto } from './dto/assign-delivery.dto';
 import { UpdateDeliveryStatusDto } from './dto/update-delivery-status.dto';
+import { Cron } from '@nestjs/schedule';
+import { DispatchSettings, DispatchSettingsDocument } from '../../database/schemas/dispatch-settings.schema';
 
 @Injectable()
 export class DeliveriesService {
@@ -24,10 +26,13 @@ export class DeliveriesService {
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
+    @InjectModel(DispatchSettings.name) private dispatchSettingsModel: Model<DispatchSettingsDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly paymentsService: PaymentsService,
     private readonly notifications: NotificationsService,
   ) {}
+
+  private readonly autoDispatchKey = 'auto-dispatch';
 
   private displayName(user: any) {
     return `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || user?.phone || '';
@@ -122,6 +127,117 @@ export class DeliveriesService {
     } finally {
       await session.endSession();
     }
+  }
+
+  async getAutoDispatchSettings() {
+    const settings = await this.getOrCreateAutoDispatchSettings();
+    return {
+      enabled: settings.enabled,
+      intervalMinutes: 3,
+      lastRunAt: settings.lastRunAt || null,
+      lastAssignedCount: settings.lastAssignedCount || 0,
+    };
+  }
+
+  async updateAutoDispatchSettings(enabled: boolean) {
+    const settings = await this.dispatchSettingsModel.findOneAndUpdate(
+      { key: this.autoDispatchKey },
+      { $set: { enabled }, $setOnInsert: { key: this.autoDispatchKey } },
+      { new: true, upsert: true, setDefaultsOnInsert: true },
+    );
+    this.logger.log(`Automatic delivery dispatch ${enabled ? 'enabled' : 'disabled'}`);
+    return {
+      enabled: settings.enabled,
+      intervalMinutes: 3,
+      lastRunAt: settings.lastRunAt || null,
+      lastAssignedCount: settings.lastAssignedCount || 0,
+    };
+  }
+
+  @Cron('*/3 * * * *')
+  async runAutomaticDispatch() {
+    const settings = await this.getOrCreateAutoDispatchSettings();
+    if (!settings.enabled) return;
+
+    let assignedCount = 0;
+    try {
+      const drivers = await this.userModel
+        .find({
+          role: UserRole.DRIVER,
+          isActive: { $ne: false },
+          isDriverAvailable: { $ne: false },
+        })
+        .select('_id')
+        .lean();
+
+      const shuffledDrivers = this.shuffle(drivers);
+      if (shuffledDrivers.length) {
+        const orders = await this.orderModel
+          .find({
+            orderStatus: OrderStatus.READY,
+            $or: [
+              { assignedDriverId: null },
+              { assignedDriverId: { $exists: false } },
+            ],
+          })
+          .sort({ createdAt: 1 })
+          .limit(shuffledDrivers.length)
+          .select('_id')
+          .lean();
+
+        for (let index = 0; index < orders.length; index += 1) {
+          try {
+            await this.assign(
+              {
+                orderId: String(orders[index]._id),
+                driverId: String(shuffledDrivers[index]._id),
+              },
+              { role: UserRole.ADMIN },
+            );
+            assignedCount += 1;
+          } catch (error: any) {
+            this.logger.warn(
+              `Automatic dispatch skipped order ${orders[index]._id}: ${error?.message || error}`,
+            );
+          }
+        }
+      }
+    } catch (error: any) {
+      this.logger.error(`Automatic dispatch failed: ${error?.message || error}`, error?.stack);
+    } finally {
+      await this.dispatchSettingsModel.updateOne(
+        { key: this.autoDispatchKey },
+        {
+          $set: {
+            lastRunAt: new Date(),
+            lastAssignedCount: assignedCount,
+          },
+        },
+      );
+    }
+
+    if (assignedCount) {
+      this.logger.log(`Automatic dispatch assigned ${assignedCount} order(s)`);
+    }
+  }
+
+  private async getOrCreateAutoDispatchSettings() {
+    const existing = await this.dispatchSettingsModel.findOne({ key: this.autoDispatchKey });
+    if (existing) return existing;
+    return this.dispatchSettingsModel.create({
+      key: this.autoDispatchKey,
+      enabled: false,
+      lastAssignedCount: 0,
+    });
+  }
+
+  private shuffle<T>(items: T[]): T[] {
+    const shuffled = [...items];
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      const randomIndex = Math.floor(Math.random() * (index + 1));
+      [shuffled[index], shuffled[randomIndex]] = [shuffled[randomIndex], shuffled[index]];
+    }
+    return shuffled;
   }
 
   async my(driverId: string, page?: number, limit?: number, filters?: { q?: string; status?: string; orderId?: string }) {

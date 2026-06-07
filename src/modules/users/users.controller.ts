@@ -9,11 +9,13 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiConsumes, ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiConsumes, ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiParam, ApiProduces, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { mkdirSync } from 'fs';
@@ -103,6 +105,19 @@ export class UsersController {
   @ApiQuery({ name: 'date', required: false, type: String })
   stats(@Query('period') period?: string, @Query('date') date?: string) {
     return this.usersService.stats(period, date);
+  }
+
+  @Roles(UserRole.ADMIN)
+  @Get('export')
+  @ApiOperation({ summary: 'Exporter tous les utilisateurs au format Excel (admin)' })
+  @ApiProduces('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  async export(@Res() response: Response) {
+    const buffer = await this.usersService.exportExcel();
+    const date = new Date().toISOString().slice(0, 10);
+    response.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    response.setHeader('Content-Disposition', `attachment; filename="utilisateurs-${date}.xlsx"`);
+    response.setHeader('Content-Length', buffer.length);
+    response.end(buffer);
   }
 
   @Roles(UserRole.ADMIN)

@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, SortOrder } from 'mongoose';
 import { UserRole } from '../../common/enums/roles.enum';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
@@ -83,8 +83,8 @@ export class MenuService {
     };
   }
 
-  private buildSort(sortBy?: string, sortDir?: string) {
-    const direction = sortDir === 'asc' ? 1 : -1;
+  private buildSort(sortBy?: string, sortDir?: string): Record<string, SortOrder> {
+    const direction: SortOrder = sortDir === 'asc' ? 1 : -1;
     if (sortBy === 'name') return { name: direction, createdAt: -1 };
     return { createdAt: direction };
   }

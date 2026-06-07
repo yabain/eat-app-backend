@@ -8,6 +8,7 @@ import { DeliveriesController } from './deliveries.controller';
 import { DeliveriesService } from './deliveries.service';
 import { PaymentsModule } from '../payments/payments.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { DispatchSettings, DispatchSettingsSchema } from '../../database/schemas/dispatch-settings.schema';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
       { name: Order.name, schema: OrderSchema },
       { name: User.name, schema: UserSchema },
       { name: Restaurant.name, schema: RestaurantSchema },
+      { name: DispatchSettings.name, schema: DispatchSettingsSchema },
     ]),
     PaymentsModule,
     NotificationsModule,

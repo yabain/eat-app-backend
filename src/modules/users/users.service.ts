@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, SortOrder } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.schema';
@@ -8,6 +8,7 @@ import { UserRole } from '../../common/enums/roles.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search.util';
 import { buildTimeSeriesStats } from '../../common/stats/time-series-stats';
+import { buildExcelExport } from '../../common/utils/excel-export.util';
 import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
 import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -101,14 +102,33 @@ export class UsersService {
     };
   }
 
-  private buildSort(sortBy?: string, sortDir?: string) {
-    const direction = sortDir === 'asc' ? 1 : -1;
+  private buildSort(sortBy?: string, sortDir?: string): Record<string, SortOrder> {
+    const direction: SortOrder = sortDir === 'asc' ? 1 : -1;
     if (sortBy === 'name') return { firstName: direction, lastName: direction, email: direction, createdAt: -1 };
     return { createdAt: direction };
   }
 
   stats(period?: string, date?: string) {
     return buildTimeSeriesStats(this.userModel, period, date);
+  }
+
+  async exportExcel() {
+    const users = await this.userModel
+      .find()
+      .select('+googleId')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return buildExcelExport(
+      users as unknown as Record<string, unknown>[],
+      'Utilisateurs',
+      [
+        'passwordHash',
+        'passwordResetTokenHash',
+        'passwordResetExpiresAt',
+        'refreshTokenVersion',
+      ],
+    );
   }
 
   findOne(id: string) {
