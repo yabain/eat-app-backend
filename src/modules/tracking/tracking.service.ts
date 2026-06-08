@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model, Types } from 'mongoose';
 import { VisitActorType, VisitEvent, VisitEventDocument } from '../../database/schemas/visit-event.schema';
-import { UserRole } from '../../common/enums/roles.enum';
 import { TrackVisitDto } from './dto/track-visit.dto';
 
 type TrackingPeriod = 'day' | 'month' | 'year';
@@ -15,10 +14,6 @@ export class TrackingService {
 
   async track(dto: TrackVisitDto, req: any) {
     const user = req.user;
-    const role = user?.role;
-    if ([UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER].includes(role)) {
-      return { tracked: false };
-    }
 
     const path = this.normalizePath(dto.path);
     if (!path || this.isExcludedPath(path)) return { tracked: false };
@@ -53,9 +48,14 @@ export class TrackingService {
       createdAt: { $gte: range.start, $lt: range.end },
     };
 
-    const [totalVisits, periodVisits, rawSeries, pageStats] = await Promise.all([
+    const [totalVisits, periodVisits, totalVisitorSessions, periodVisitorSessions, rawSeries, pageStats] = await Promise.all([
       this.visitModel.countDocuments({}),
       this.visitModel.countDocuments(filter),
+      this.visitModel.distinct('sessionId', { sessionId: { $nin: ['', null] } }),
+      this.visitModel.distinct('sessionId', {
+        ...filter,
+        sessionId: { $nin: ['', null] },
+      }),
       this.aggregateSeries(period, filter),
       this.aggregatePages(filter),
     ]);
@@ -65,6 +65,8 @@ export class TrackingService {
       selectedDate: range.selectedDate,
       totalVisits,
       periodVisits,
+      totalVisitors: totalVisitorSessions.length,
+      periodVisitors: periodVisitorSessions.length,
       series: this.fillSeries(period, range, rawSeries),
       pages: pageStats,
       refreshedAt: new Date(),

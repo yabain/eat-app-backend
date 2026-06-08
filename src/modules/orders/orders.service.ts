@@ -139,7 +139,7 @@ export class OrdersService {
     const menuIds = dto.items.map((i) => new Types.ObjectId(i.menuItemId));
     const menuItems = await this.menuModel
       .find({ _id: { $in: menuIds }, restaurantId, isActive: true })
-      .populate({ path: 'categoryId', select: 'systemFeePerItem' })
+      .populate({ path: 'categoryId', select: 'name systemFeePerItem maxItemsPerOrder' })
       .session(session || null);
     if (menuItems.length !== dto.items.length) throw new BadRequestException('Some menu items are invalid');
     const zone = await this.zoneModel
@@ -165,6 +165,28 @@ export class OrdersService {
         subtotal: menu.price * input.quantity,
       };
     });
+
+    const categoryQuantities = new Map<string, { name: string; limit: number; quantity: number }>();
+    dto.items.forEach((input) => {
+      const menu = menuItems.find((candidate) => candidate._id.toString() === input.menuItemId);
+      const category = menu?.categoryId as any;
+      if (!category?._id) return;
+      const categoryId = String(category._id);
+      const current = categoryQuantities.get(categoryId) || {
+        name: String(category.name || 'Cette catégorie'),
+        limit: Math.max(0, Math.floor(Number(category.maxItemsPerOrder || 0))),
+        quantity: 0,
+      };
+      current.quantity += input.quantity;
+      categoryQuantities.set(categoryId, current);
+    });
+    for (const category of categoryQuantities.values()) {
+      if (category.limit > 0 && category.quantity > category.limit) {
+        throw new BadRequestException(
+          `La catégorie "${category.name}" est limitée à ${category.limit} article(s) par commande`,
+        );
+      }
+    }
 
     const itemsSubtotal = items.reduce((sum, i) => sum + i.subtotal, 0);
     const packagingTotal = items.reduce((sum, i) => sum + i.packagingCost * i.quantity, 0);

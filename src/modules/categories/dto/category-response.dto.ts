@@ -23,6 +23,12 @@ export class CategoryResponseDto {
   @ApiProperty({ example: 100, description: 'Prélèvement système par unité vendue dans cette catégorie' })
   systemFeePerItem: number;
 
+  @ApiProperty({
+    example: 5,
+    description: 'Quantité maximale cumulée dans une commande. 0 signifie aucune limite.',
+  })
+  maxItemsPerOrder: number;
+
   @ApiPropertyOptional({ example: '2026-04-25T12:00:00.000Z' })
   createdAt?: string;
 

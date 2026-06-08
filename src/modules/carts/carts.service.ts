@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Cart, CartDocument } from '../../database/schemas/cart.schema';
+import { Category, CategoryDocument } from '../../database/schemas/category.schema';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
@@ -14,6 +15,7 @@ export class CartsService {
   // disponibilité côté lecture pour donner un feedback utilisateur immédiat.
   constructor(
     @InjectModel(Cart.name) private cartModel: Model<CartDocument>,
+    @InjectModel(Category.name) private categoryModel: Model<CategoryDocument>,
     @InjectModel(MenuItem.name) private menuModel: Model<MenuItemDocument>,
   ) {}
 
@@ -40,7 +42,54 @@ export class CartsService {
   }
 
   private populateCart(id: any) {
-    return this.cartModel.findById(id).populate('items.menuItemId').populate('restaurantId');
+    return this.cartModel
+      .findById(id)
+      .populate({
+        path: 'items.menuItemId',
+        populate: {
+          path: 'categoryId',
+          select: 'name maxItemsPerOrder',
+        },
+      })
+      .populate('restaurantId');
+  }
+
+  private async assertCategoryLimit(
+    cart: CartDocument,
+    targetMenuItem: MenuItemDocument,
+    targetQuantity: number,
+  ) {
+    if (!targetMenuItem.categoryId) return;
+
+    const category = await this.categoryModel
+      .findById(targetMenuItem.categoryId)
+      .select('name maxItemsPerOrder');
+    const limit = Math.max(0, Math.floor(Number(category?.maxItemsPerOrder || 0)));
+    if (!category || limit === 0) return;
+
+    const otherCartItems = cart.items.filter(
+      (item) => String(item.menuItemId) !== String(targetMenuItem._id),
+    );
+    const otherMenuIds = otherCartItems.map((item) => item.menuItemId);
+    const otherMenuItems = otherMenuIds.length
+      ? await this.menuModel.find({ _id: { $in: otherMenuIds } }).select('_id categoryId')
+      : [];
+    const categoryId = String(targetMenuItem.categoryId);
+    const menuCategoryById = new Map(
+      otherMenuItems.map((menuItem) => [String(menuItem._id), String(menuItem.categoryId || '')]),
+    );
+    const otherQuantity = otherCartItems.reduce((total, item) => {
+      return menuCategoryById.get(String(item.menuItemId)) === categoryId
+        ? total + Number(item.quantity || 0)
+        : total;
+    }, 0);
+    const requestedTotal = otherQuantity + targetQuantity;
+
+    if (requestedTotal > limit) {
+      throw new BadRequestException(
+        `La catégorie "${category.name}" est limitée à ${limit} article(s) par commande`,
+      );
+    }
   }
 
   async getMyCart(userId: string) {
@@ -63,8 +112,10 @@ export class CartsService {
     if (existing) {
       const nextQty = existing.quantity + dto.quantity;
       if (nextQty > menuItem.stock) throw new BadRequestException('Requested quantity exceeds available stock');
+      await this.assertCategoryLimit(cart, menuItem, nextQty);
       existing.quantity = nextQty;
     } else {
+      await this.assertCategoryLimit(cart, menuItem, dto.quantity);
       cart.items.push({ menuItemId: new Types.ObjectId(dto.menuItemId), quantity: dto.quantity } as any);
     }
     cart.restaurantId = menuItem.restaurantId;
@@ -81,6 +132,7 @@ export class CartsService {
     if (dto.quantity > menuItem.stock) {
       throw new BadRequestException('Requested quantity exceeds available stock');
     }
+    await this.assertCategoryLimit(cart, menuItem, dto.quantity);
 
     const updated = await this.cartModel.findOneAndUpdate(
       { _id: cart._id, 'items.menuItemId': new Types.ObjectId(menuItemId) },

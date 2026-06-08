@@ -11,5 +11,6 @@ export class Category {
   @Prop({ default: false }) isDefault: boolean;
   @Prop({ default: false }) resetStockAtMidnight: boolean;
   @Prop({ type: Number, default: 0, min: 0 }) systemFeePerItem: number;
+  @Prop({ type: Number, default: 0, min: 0 }) maxItemsPerOrder: number;
 }
 export const CategorySchema = SchemaFactory.createForClass(Category);

@@ -22,4 +22,10 @@ export class UpdateCategoryDto {
     description: 'Prélèvement forfaitaire système appliqué à chaque unité vendue dans cette catégorie.',
   })
   @IsOptional() @IsInt() @Min(0) systemFeePerItem?: number;
+  @ApiPropertyOptional({
+    example: 5,
+    minimum: 0,
+    description: 'Quantité maximale cumulée des articles de cette catégorie dans une commande. 0 désactive la limite.',
+  })
+  @IsOptional() @IsInt() @Min(0) maxItemsPerOrder?: number;
 }
