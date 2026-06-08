@@ -11,6 +11,7 @@ import { AssignManagerDto } from './dto/assign-manager.dto';
 import { CreateRestaurantDto } from './dto/create-restaurant.dto';
 import { UpdateRestaurantMediaDto } from './dto/update-restaurant-media.dto';
 import { UpdateRestaurantDto } from './dto/update-restaurant.dto';
+import { AssignEmployeeDto } from './dto/assign-employee.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -203,6 +204,60 @@ export class RestaurantsController {
   @ApiBody({ type: AssignManagerDto })
   @ApiOkResponse({ description: 'Manager assigné au restaurant', type: RestaurantResponseDto })
   assignManager(@Param('id') id: string, @Body() dto: AssignManagerDto) { return this.service.assignManager(id, dto); }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @Get(':id/employees')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Lister les employés d’un restaurant' })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'q', required: false, type: String })
+  listEmployees(
+    @Param('id') id: string,
+    @Req() req: any,
+    @Query() query: PaginationQueryDto,
+    @Query('q') q?: string,
+  ) {
+    return this.service.listEmployees(id, req.user, query.page, query.limit, q);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @Get(':id/staff-candidates')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Rechercher des utilisateurs à affecter au restaurant' })
+  @ApiQuery({ name: 'kind', required: true, enum: ['employee', 'manager'] })
+  @ApiQuery({ name: 'q', required: false, type: String })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  searchStaffCandidates(
+    @Param('id') id: string,
+    @Req() req: any,
+    @Query('kind') kind: 'employee' | 'manager',
+    @Query('q') q?: string,
+    @Query('limit') limit?: number,
+  ) {
+    return this.service.searchStaffCandidates(id, req.user, kind, q, limit);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @Post(':id/employees')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Affecter un utilisateur existant comme employé du restaurant' })
+  @ApiBody({ type: AssignEmployeeDto })
+  assignEmployee(@Param('id') id: string, @Body() dto: AssignEmployeeDto, @Req() req: any) {
+    return this.service.assignEmployee(id, dto.userId, req.user);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @Delete(':id/employees/:userId')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Retirer un employé du restaurant sans supprimer son compte' })
+  removeEmployee(@Param('id') id: string, @Param('userId') userId: string, @Req() req: any) {
+    return this.service.removeEmployee(id, userId, req.user);
+  }
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Delete(':id')

@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { UserRole } from '../../common/enums/roles.enum';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
@@ -31,6 +31,16 @@ export class RestaurantsService {
       path: 'managerId',
       select: 'firstName lastName email phone role isActive profileImage restaurantId',
     });
+  }
+
+  private async assertCanManageTeam(restaurantId: string, actor: any) {
+    const restaurant = await this.model.findById(restaurantId);
+    if (!restaurant) throw new NotFoundException('Restaurant not found');
+    if (actor.role === UserRole.ADMIN) return restaurant;
+    if (actor.role !== UserRole.MANAGER || String(actor.restaurantId || '') !== restaurantId) {
+      throw new ForbiddenException('You can only manage employees from your restaurant');
+    }
+    return restaurant;
   }
 
   async create(dto: CreateRestaurantDto) {
@@ -142,10 +152,146 @@ export class RestaurantsService {
   }
 
   async assignManager(id: string, dto: AssignManagerDto) {
+    const restaurant = await this.model.findById(id);
+    if (!restaurant) throw new NotFoundException('Restaurant not found');
     await this.validateManager(dto.managerId);
-    const item = await this.model.findByIdAndUpdate(id, { managerId: dto.managerId }, { new: true });
-    if (!item) throw new NotFoundException('Restaurant not found');
-    return item;
+
+    const nextManager = await this.userModel.findById(dto.managerId);
+    if (!nextManager) throw new BadRequestException('Manager user not found');
+    const previousManagerId = restaurant.managerId ? String(restaurant.managerId) : '';
+
+    if (nextManager.restaurantId && String(nextManager.restaurantId) !== id) {
+      await this.model.updateOne(
+        { managerId: nextManager._id },
+        { $set: { managerId: null } },
+      );
+    }
+
+    restaurant.managerId = new Types.ObjectId(dto.managerId);
+    nextManager.restaurantId = new Types.ObjectId(id);
+    await Promise.all([
+      restaurant.save(),
+      nextManager.save(),
+      previousManagerId && previousManagerId !== dto.managerId
+        ? this.userModel.updateOne(
+            { _id: previousManagerId, role: UserRole.MANAGER, restaurantId: restaurant._id },
+            { $set: { restaurantId: null } },
+          )
+        : Promise.resolve(),
+    ]);
+
+    return this.populateManager(this.model.findById(id));
+  }
+
+  async listEmployees(id: string, actor: any, page?: number, limit?: number, q?: string) {
+    await this.assertCanManageTeam(id, actor);
+    const pagination = normalizePagination(page, limit);
+    const qRegex = buildContainsRegex(q);
+    const filter: any = {
+      restaurantId: new Types.ObjectId(id),
+      role: UserRole.EMPLOYEE,
+    };
+    if (qRegex) {
+      filter.$or = [
+        { firstName: qRegex },
+        { lastName: qRegex },
+        { email: qRegex },
+        { phone: qRegex },
+      ];
+    }
+    const [data, total] = await Promise.all([
+      this.userModel
+        .find(filter)
+        .select('-passwordHash -passwordResetTokenHash -passwordResetExpiresAt -refreshTokenVersion')
+        .sort({ firstName: 1, lastName: 1, email: 1 })
+        .skip(pagination.skip)
+        .limit(pagination.limit),
+      this.userModel.countDocuments(filter),
+    ]);
+    return { data, meta: buildPaginationMeta(pagination.page, pagination.limit, total) };
+  }
+
+  async searchStaffCandidates(
+    id: string,
+    actor: any,
+    kind: 'employee' | 'manager',
+    q?: string,
+    limit = 20,
+  ) {
+    await this.assertCanManageTeam(id, actor);
+    if (!['employee', 'manager'].includes(kind)) {
+      throw new BadRequestException('kind must be employee or manager');
+    }
+    if (kind === 'manager' && actor.role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Only admin can change the restaurant manager');
+    }
+    const qRegex = buildContainsRegex(q);
+    const filter: any = kind === 'manager'
+      ? { role: UserRole.MANAGER, isActive: { $ne: false } }
+      : {
+          role: { $in: [UserRole.CLIENT, UserRole.EMPLOYEE] },
+          isActive: { $ne: false },
+          $or: [
+            { restaurantId: null },
+            { restaurantId: { $exists: false } },
+          ],
+        };
+
+    if (qRegex) {
+      const search = [
+        { firstName: qRegex },
+        { lastName: qRegex },
+        { email: qRegex },
+        { phone: qRegex },
+      ];
+      if (filter.$or) {
+        const availability = filter.$or;
+        delete filter.$or;
+        filter.$and = [{ $or: availability }, { $or: search }];
+      } else {
+        filter.$or = search;
+      }
+    }
+
+    return this.userModel
+      .find(filter)
+      .select('firstName lastName email phone profileImage role restaurantId isActive')
+      .sort({ firstName: 1, lastName: 1, email: 1 })
+      .limit(Math.min(Math.max(Number(limit || 20), 1), 50));
+  }
+
+  async assignEmployee(id: string, userId: string, actor: any) {
+    await this.assertCanManageTeam(id, actor);
+    const user = await this.userModel.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+    if (![UserRole.CLIENT, UserRole.EMPLOYEE].includes(user.role)) {
+      throw new BadRequestException('Only a client or employee account can be assigned as restaurant employee');
+    }
+    if (user.restaurantId && String(user.restaurantId) !== id) {
+      throw new BadRequestException('User is already assigned to another restaurant');
+    }
+    user.role = UserRole.EMPLOYEE;
+    user.restaurantId = new Types.ObjectId(id);
+    user.refreshTokenVersion = Number(user.refreshTokenVersion || 0) + 1;
+    await user.save();
+    return this.userModel
+      .findById(user._id)
+      .select('-passwordHash -passwordResetTokenHash -passwordResetExpiresAt -refreshTokenVersion');
+  }
+
+  async removeEmployee(id: string, userId: string, actor: any) {
+    await this.assertCanManageTeam(id, actor);
+    const user = await this.userModel.findOne({
+      _id: userId,
+      restaurantId: new Types.ObjectId(id),
+      role: UserRole.EMPLOYEE,
+    });
+    if (!user) throw new NotFoundException('Restaurant employee not found');
+    user.restaurantId = null as any;
+    user.role = UserRole.CLIENT;
+    user.refreshTokenVersion = Number(user.refreshTokenVersion || 0) + 1;
+    await user.save();
+    return { removed: true, userId: String(user._id) };
   }
 
   async updateMedia(id: string, dto: UpdateRestaurantMediaDto) {

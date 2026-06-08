@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, SortOrder } from 'mongoose';
+import { Model, SortOrder, Types } from 'mongoose';
 import { UserRole } from '../../common/enums/roles.enum';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
@@ -17,6 +17,12 @@ export class MenuService {
     private readonly inventory: MenuInventoryService,
   ) {}
 
+  private restaurantFilter(restaurantId: unknown) {
+    const value = String(restaurantId || '');
+    if (!Types.ObjectId.isValid(value)) return value;
+    return { $in: [value, new Types.ObjectId(value)] };
+  }
+
   async findPublicByRestaurant(
     restaurantId: string,
     page?: number,
@@ -25,7 +31,11 @@ export class MenuService {
   ) {
     const pagination = normalizePagination(page, limit);
     const qRegex = buildContainsRegex(filters?.q);
-    const filter: any = { restaurantId, isActive: true, isAvailable: true };
+    const filter: any = {
+      restaurantId: this.restaurantFilter(restaurantId),
+      isActive: true,
+      isAvailable: true,
+    };
     if (filters?.categoryId) filter.categoryId = filters.categoryId;
     if (qRegex) {
       filter.$or = [{ name: qRegex }, { description: qRegex }];
@@ -56,10 +66,10 @@ export class MenuService {
     let filter: any = {};
     const qRegex = buildContainsRegex(filters?.q);
     if (actor.role === UserRole.ADMIN) {
-      filter = restaurantId ? { restaurantId } : {};
+      filter = restaurantId ? { restaurantId: this.restaurantFilter(restaurantId) } : {};
     } else {
       if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
-      filter = { restaurantId: actor.restaurantId };
+      filter = { restaurantId: this.restaurantFilter(actor.restaurantId) };
     }
     if (filters?.categoryId) filter.categoryId = filters.categoryId;
     const isAvailable = parseBooleanQuery(filters?.isAvailable);
@@ -93,7 +103,7 @@ export class MenuService {
     const filter: any = { _id: id };
     if (actor.role !== UserRole.ADMIN) {
       if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
-      filter.restaurantId = actor.restaurantId;
+      filter.restaurantId = this.restaurantFilter(actor.restaurantId);
     }
     const item = await this.model.findOne(filter).populate('restaurantId').populate('categoryId');
     if (!item) throw new NotFoundException('Menu item not found');
@@ -116,7 +126,11 @@ export class MenuService {
       return this.model.create(payload);
     }
     if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
-    return this.model.create({ ...payload, restaurantId: actor.restaurantId });
+    return this.model.create({
+      ...payload,
+      restaurantId: actor.restaurantId,
+      isActive: actor.role === UserRole.EMPLOYEE ? false : payload.isActive,
+    });
   }
 
   async updateForActor(actor: any, id: string, dto: UpdateMenuItemDto) {
@@ -124,8 +138,11 @@ export class MenuService {
     let filter: any = { _id: id };
     if (actor.role !== UserRole.ADMIN) {
       if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
-      filter = { _id: id, restaurantId: actor.restaurantId };
+      filter = { _id: id, restaurantId: this.restaurantFilter(actor.restaurantId) };
       delete (payload as any).restaurantId;
+    }
+    if (actor.role === UserRole.EMPLOYEE) {
+      delete (payload as any).isActive;
     }
     const existing = await this.model.findOne(filter);
     if (!existing) {
@@ -142,7 +159,7 @@ export class MenuService {
     let filter: any = { _id: id };
     if (actor.role !== UserRole.ADMIN) {
       if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
-      filter = { _id: id, restaurantId: actor.restaurantId };
+      filter = { _id: id, restaurantId: this.restaurantFilter(actor.restaurantId) };
     }
     const item = await this.model.findOneAndDelete(filter);
     if (!item) throw new NotFoundException('Menu item not found');

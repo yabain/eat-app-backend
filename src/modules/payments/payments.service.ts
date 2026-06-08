@@ -589,13 +589,39 @@ export class PaymentsService implements OnModuleInit {
     const paymentAmount = this.orderPaymentAmount(order);
     const deliveryFee = this.money(pricing.deliveryFee);
     const packagingTotal = this.money(pricing.packagingTotal);
+    const distributionVersion = Number(pricing.balanceDistributionVersion || 1);
+
+    if (distributionVersion >= 2) {
+      const itemsSubtotal = this.money(pricing.itemsSubtotal);
+      const promoDiscount = this.money(pricing.promoDiscount);
+      const categorySystemFeeTotal = this.money(
+        pricing.categorySystemFeeTotal ??
+        (order.items || []).reduce(
+          (sum: number, item: any) =>
+            sum + Number(item.systemFeeTotal ?? Number(item.systemFeePerItem || 0) * Number(item.quantity || 0)),
+          0,
+        ),
+      );
+      const driverAmount = this.money(deliveryFee * 0.85);
+      const systemDeliveryShare = this.money(deliveryFee * 0.15);
+
+      return {
+        systemAmount: this.money(categorySystemFeeTotal + systemDeliveryShare),
+        restaurantAmount: this.money(
+          itemsSubtotal + packagingTotal - promoDiscount - categorySystemFeeTotal,
+        ),
+        driverAmount,
+        distributionVersion,
+      };
+    }
+
     const driverAmount = this.money(deliveryFee * 0.75);
     const systemDeliveryShare = Math.max(0, deliveryFee - driverAmount);
-
     return {
       systemAmount: this.money(packagingTotal + systemDeliveryShare),
       restaurantAmount: this.money(paymentAmount - deliveryFee - packagingTotal),
       driverAmount,
+      distributionVersion,
     };
   }
 
@@ -670,7 +696,7 @@ export class PaymentsService implements OnModuleInit {
 
   private async creditOrderBalances(order: any, payment: any, driverId?: any) {
     if (!payment?._id) return;
-    const { systemAmount, restaurantAmount, driverAmount } = this.orderBalanceDistribution(order);
+    const { systemAmount, restaurantAmount, driverAmount, distributionVersion } = this.orderBalanceDistribution(order);
     const currency = payment.currency || 'XAF';
     const operations: Promise<any>[] = [];
 
@@ -684,7 +710,9 @@ export class PaymentsService implements OnModuleInit {
           amount: systemAmount,
           type: 'credit',
           reason: 'order_system_share',
-          note: 'packaging fees + 25% delivery fee, excluding DigiKuntz platform fees',
+          note: distributionVersion >= 2
+            ? 'Category flat fees + 15% delivery fee, excluding DigiKuntz platform fees'
+            : 'packaging fees + 25% delivery fee, excluding DigiKuntz platform fees',
           currency,
         },
       ));
@@ -701,7 +729,9 @@ export class PaymentsService implements OnModuleInit {
           amount: restaurantAmount,
           type: 'credit',
           reason: 'order_restaurant_share',
-          note: 'Payment amount minus delivery and packaging fees',
+          note: distributionVersion >= 2
+            ? 'Items + packaging - promotion - category flat fees'
+            : 'Payment amount minus delivery and packaging fees',
           currency,
         },
       ));
@@ -718,7 +748,7 @@ export class PaymentsService implements OnModuleInit {
           amount: driverAmount,
           type: 'credit',
           reason: 'order_delivery_share',
-          note: '75% delivery fee',
+          note: distributionVersion >= 2 ? '85% delivery fee' : '75% delivery fee',
           currency,
         },
       ));

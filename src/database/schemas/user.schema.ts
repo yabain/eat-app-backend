@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument, Types } from 'mongoose';
+import { HydratedDocument, Schema as MongooseSchema, Types } from 'mongoose';
 import { UserRole } from '../../common/enums/roles.enum';
 
 export type UserDocument = HydratedDocument<User>;
@@ -13,7 +13,7 @@ export class User {
   @Prop() phone?: string;
   @Prop() profileImage?: string;
   @Prop({ enum: Object.values(UserRole), default: UserRole.CLIENT }) role: UserRole;
-  @Prop({ type: Types.ObjectId, ref: 'Restaurant', default: null }) restaurantId?: Types.ObjectId;
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Restaurant', default: null }) restaurantId?: Types.ObjectId;
   @Prop({ default: true }) isActive: boolean;
   @Prop({ default: true }) isDriverAvailable: boolean;
   @Prop({ enum: ['local', 'google'], default: 'local' }) authProvider: 'local' | 'google';

@@ -1,4 +1,4 @@
-import { IsBoolean, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, Min } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 export class UpdateCategoryDto {
   @ApiPropertyOptional({ example: 'Grillades' })
@@ -16,4 +16,10 @@ export class UpdateCategoryDto {
     description: 'Remet le stock des menu items de cette categorie a 0 chaque jour a minuit, heure du Cameroun.',
   })
   @IsOptional() @IsBoolean() resetStockAtMidnight?: boolean;
+  @ApiPropertyOptional({
+    example: 100,
+    minimum: 0,
+    description: 'Prélèvement forfaitaire système appliqué à chaque unité vendue dans cette catégorie.',
+  })
+  @IsOptional() @IsInt() @Min(0) systemFeePerItem?: number;
 }

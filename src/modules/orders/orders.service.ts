@@ -139,6 +139,7 @@ export class OrdersService {
     const menuIds = dto.items.map((i) => new Types.ObjectId(i.menuItemId));
     const menuItems = await this.menuModel
       .find({ _id: { $in: menuIds }, restaurantId, isActive: true })
+      .populate({ path: 'categoryId', select: 'systemFeePerItem' })
       .session(session || null);
     if (menuItems.length !== dto.items.length) throw new BadRequestException('Some menu items are invalid');
     const zone = await this.zoneModel
@@ -150,11 +151,16 @@ export class OrdersService {
       const menu = menuItems.find((m) => m._id.toString() === input.menuItemId);
       if (!menu) throw new BadRequestException('Invalid menu item');
       if (menu.stock < input.quantity) throw new BadRequestException(`Insufficient stock for ${menu.name}`);
+      const category = menu.categoryId as any;
+      const systemFeePerItem = Math.max(0, Math.floor(Number(category?.systemFeePerItem || 0)));
       return {
         menuItemId: menu._id,
+        categoryId: category?._id || null,
         name: menu.name,
         unitPrice: menu.price,
         packagingCost: menu.packagingCost || 0,
+        systemFeePerItem,
+        systemFeeTotal: systemFeePerItem * input.quantity,
         quantity: input.quantity,
         subtotal: menu.price * input.quantity,
       };
@@ -162,6 +168,7 @@ export class OrdersService {
 
     const itemsSubtotal = items.reduce((sum, i) => sum + i.subtotal, 0);
     const packagingTotal = items.reduce((sum, i) => sum + i.packagingCost * i.quantity, 0);
+    const categorySystemFeeTotal = items.reduce((sum, i) => sum + i.systemFeeTotal, 0);
     const deliveryFee = zone.deliveryFee;
     const deliveryEstimateMinutes = Number(zone.time || 0);
     const feeType = process.env.PLATFORM_FEE_TYPE || 'fixed'; // if fixed, PLATFORM_FEE_VALUE=value. if percentage, PLATFORM_FEE_VALUE=percentage
@@ -181,6 +188,12 @@ export class OrdersService {
       if (promo.minOrderAmount && itemsSubtotal < promo.minOrderAmount) throw new BadRequestException('Order below minimum promo amount');
       promoDiscount = Math.min(promo.amount, payableBeforePlatformFee);
     }
+    const restaurantNetBeforeDelivery = itemsSubtotal + packagingTotal - promoDiscount;
+    if (categorySystemFeeTotal > restaurantNetBeforeDelivery) {
+      throw new BadRequestException(
+        'Category system fees cannot exceed the items and packaging amount after discount',
+      );
+    }
     const paymentAmount = Math.max(0, payableBeforePlatformFee - promoDiscount);
 
     return {
@@ -193,6 +206,8 @@ export class OrdersService {
         promoDiscount,
         paymentAmount,
         grandTotal: paymentAmount + platformFee,
+        categorySystemFeeTotal,
+        balanceDistributionVersion: 2,
       },
       deliveryEstimateMinutes,
       deliveryMapLink: zone.mapLink || '',

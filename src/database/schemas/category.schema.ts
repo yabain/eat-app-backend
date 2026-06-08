@@ -10,5 +10,6 @@ export class Category {
   @Prop({ default: true }) isActive: boolean;
   @Prop({ default: false }) isDefault: boolean;
   @Prop({ default: false }) resetStockAtMidnight: boolean;
+  @Prop({ type: Number, default: 0, min: 0 }) systemFeePerItem: number;
 }
 export const CategorySchema = SchemaFactory.createForClass(Category);

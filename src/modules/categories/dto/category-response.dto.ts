@@ -20,6 +20,9 @@ export class CategoryResponseDto {
   @ApiProperty({ example: false })
   resetStockAtMidnight: boolean;
 
+  @ApiProperty({ example: 100, description: 'Prélèvement système par unité vendue dans cette catégorie' })
+  systemFeePerItem: number;
+
   @ApiPropertyOptional({ example: '2026-04-25T12:00:00.000Z' })
   createdAt?: string;
 

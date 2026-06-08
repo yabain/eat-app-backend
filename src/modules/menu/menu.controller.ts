@@ -95,6 +95,18 @@ export class MenuController {
       sortDir,
     });
   }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
+  @Get('manage/:id')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Détail d’un menu item pour gestion, y compris un item en revue' })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiOkResponse({ description: 'Menu item trouvé', type: MenuItemResponseDto })
+  findOneForActor(@Param('id') id: string, @Req() req: any) {
+    return this.service.findOneForActor(req.user, id);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Détail public d’un menu item actif' })
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
@@ -126,20 +138,20 @@ export class MenuController {
     return this.service.updateForActor(req.user, id, dto);
   }
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Patch(':id/activate')
   @ApiBearerAuth('bearer')
-  @ApiOperation({ summary: 'Activer un menu item (admin/manager/employé)' })
+  @ApiOperation({ summary: 'Valider et activer un menu item (admin/manager)' })
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiOkResponse({ description: 'Menu item activé', type: MenuItemResponseDto })
   activate(@Param('id') id: string, @Req() req: any) {
     return this.service.activateForActor(req.user, id);
   }
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Patch(':id/deactivate')
   @ApiBearerAuth('bearer')
-  @ApiOperation({ summary: 'Désactiver un menu item (admin/manager/employé)' })
+  @ApiOperation({ summary: 'Désactiver un menu item (admin/manager)' })
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiOkResponse({ description: 'Menu item désactivé', type: MenuItemResponseDto })
   deactivate(@Param('id') id: string, @Req() req: any) {

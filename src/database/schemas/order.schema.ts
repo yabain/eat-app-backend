@@ -6,9 +6,12 @@ export type OrderDocument = HydratedDocument<Order>;
 
 class OrderItem {
   @Prop({ type: Types.ObjectId, ref: 'MenuItem', required: true }) menuItemId: Types.ObjectId;
+  @Prop({ type: Types.ObjectId, ref: 'Category', default: null }) categoryId?: Types.ObjectId;
   @Prop({ required: true }) name: string;
   @Prop({ required: true }) unitPrice: number;
   @Prop({ required: true }) packagingCost: number;
+  @Prop({ type: Number, default: 0 }) systemFeePerItem: number;
+  @Prop({ type: Number, default: 0 }) systemFeeTotal: number;
   @Prop({ required: true }) quantity: number;
   @Prop({ required: true }) subtotal: number;
 }
@@ -26,6 +29,8 @@ class PricingSnapshot {
   @Prop({ required: true }) promoDiscount: number;
   @Prop({ required: true }) paymentAmount: number;
   @Prop({ required: true }) grandTotal: number;
+  @Prop({ type: Number, default: 0 }) categorySystemFeeTotal: number;
+  @Prop({ type: Number, default: 1 }) balanceDistributionVersion: number;
 }
 
 @Schema({ timestamps: true })

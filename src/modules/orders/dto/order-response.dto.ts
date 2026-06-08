@@ -77,6 +77,15 @@ export class OrderItemResponseDto {
   @ApiProperty({ example: 200 })
   packagingCost: number;
 
+  @ApiPropertyOptional({ example: '665d58e63d7bfeb8f7f6172e' })
+  categoryId?: string;
+
+  @ApiProperty({ example: 100 })
+  systemFeePerItem: number;
+
+  @ApiProperty({ example: 200 })
+  systemFeeTotal: number;
+
   @ApiProperty({ example: 2 })
   quantity: number;
 
@@ -119,6 +128,12 @@ export class PricingSnapshotResponseDto {
 
   @ApiProperty({ example: 6900 })
   grandTotal: number;
+
+  @ApiProperty({ example: 300 })
+  categorySystemFeeTotal: number;
+
+  @ApiProperty({ example: 2 })
+  balanceDistributionVersion: number;
 }
 
 export class OrderPreviewResponseDto {
