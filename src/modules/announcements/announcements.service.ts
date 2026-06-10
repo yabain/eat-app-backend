@@ -21,6 +21,9 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { ProspectsService } from '../prospects/prospects.service';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
 import { CreateAnnouncementDto, UpdateAnnouncementDto } from './dto/announcement.dto';
+import { basename, join } from 'path';
+import { resolveUploadDir } from '../../common/utils/upload-dir.util';
+import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
 
 @Injectable()
 export class AnnouncementsService {
@@ -64,6 +67,7 @@ export class AnnouncementsService {
 
   async create(actor: any, dto: CreateAnnouncementDto, sendNow = false) {
     const channel = dto.channel || AnnouncementChannel.EMAIL;
+    this.validateAttachmentForChannel(channel, dto.attachmentMimeType);
     const recipientEmails = this.parseEmails(dto.recipientEmails);
     const recipientPhones = this.parsePhones(dto.recipientPhones);
     if (!this.hasRecipientTarget(channel, recipientEmails, recipientPhones, dto.recipientGroup)) {
@@ -81,6 +85,11 @@ export class AnnouncementsService {
       channel,
       subject: dto.subject,
       html: dto.html,
+      attachmentUrl: dto.attachmentUrl || null,
+      attachmentPath: dto.attachmentPath || null,
+      attachmentName: dto.attachmentName || null,
+      attachmentMimeType: dto.attachmentMimeType || null,
+      attachmentSize: Number(dto.attachmentSize || 0),
       recipientGroup: dto.recipientGroup || null,
       recipientEmails,
       recipientPhones,
@@ -100,10 +109,16 @@ export class AnnouncementsService {
     if ([AnnouncementStatus.SENT, AnnouncementStatus.FAILED].includes(announcement.status)) {
       throw new BadRequestException('Only draft or scheduled announcements can be edited');
     }
+    const previousAttachmentPath = announcement.attachmentPath;
 
     if (dto.subject !== undefined) announcement.subject = dto.subject;
     if (dto.html !== undefined) announcement.html = dto.html;
     if (dto.channel !== undefined) announcement.channel = dto.channel;
+    if (dto.attachmentUrl !== undefined) announcement.attachmentUrl = dto.attachmentUrl;
+    if (dto.attachmentPath !== undefined) announcement.attachmentPath = dto.attachmentPath;
+    if (dto.attachmentName !== undefined) announcement.attachmentName = dto.attachmentName;
+    if (dto.attachmentMimeType !== undefined) announcement.attachmentMimeType = dto.attachmentMimeType;
+    if (dto.attachmentSize !== undefined) announcement.attachmentSize = dto.attachmentSize;
     if (dto.recipientGroup !== undefined) announcement.recipientGroup = dto.recipientGroup;
     if (dto.recipientEmails !== undefined) announcement.recipientEmails = this.parseEmails(dto.recipientEmails);
     if (dto.recipientPhones !== undefined) announcement.recipientPhones = this.parsePhones(dto.recipientPhones);
@@ -112,6 +127,7 @@ export class AnnouncementsService {
     if (!this.hasRecipientTarget(announcement.channel, announcement.recipientEmails, announcement.recipientPhones, announcement.recipientGroup)) {
       throw new BadRequestException('At least one recipient or recipient group is required');
     }
+    this.validateAttachmentForChannel(announcement.channel, announcement.attachmentMimeType);
 
     announcement.recipientLabel = this.buildRecipientLabel(
       announcement.channel,
@@ -120,7 +136,9 @@ export class AnnouncementsService {
       announcement.recipientPhones,
     );
     announcement.status = announcement.scheduledAt ? AnnouncementStatus.SCHEDULED : AnnouncementStatus.DRAFT;
-    return announcement.save();
+    const saved = await announcement.save();
+    await deleteReplacedLocalUpload(previousAttachmentPath, saved.attachmentPath);
+    return saved;
   }
 
   async sendAnnouncement(id: string) {
@@ -158,10 +176,67 @@ export class AnnouncementsService {
     return announcement.save();
   }
 
+  async retryFailedDeliveries(id: string) {
+    const announcement = await this.announcementModel.findById(id);
+    if (!announcement) throw new NotFoundException('Announcement not found');
+    if (announcement.status === AnnouncementStatus.SENDING) {
+      throw new BadRequestException('Announcement delivery is still in progress');
+    }
+
+    const announcementId = announcement._id as Types.ObjectId;
+    const failedCount = await this.deliveryModel.countDocuments({
+      announcementId,
+      status: AnnouncementDeliveryStatus.FAILED,
+    });
+    if (!failedCount) {
+      throw new BadRequestException('No failed recipient to retry');
+    }
+
+    await this.deliveryModel.updateMany(
+      {
+        announcementId,
+        status: AnnouncementDeliveryStatus.FAILED,
+      },
+      {
+        $set: {
+          status: AnnouncementDeliveryStatus.PENDING,
+          attempts: 0,
+          lastError: null,
+          lockedAt: null,
+          sentAt: null,
+        },
+      },
+    );
+
+    announcement.status = AnnouncementStatus.SENDING;
+    announcement.sentAt = null;
+    announcement.failureReason = null;
+    await announcement.save();
+
+    this.logger.log(
+      `Retrying ${failedCount} failed ${announcement.channel} delivery(ies) for announcement ${announcement._id}`,
+    );
+    return announcement;
+  }
+
   async delete(id: string) {
     const announcement = await this.announcementModel.findByIdAndDelete(id);
     if (!announcement) throw new NotFoundException('Announcement not found');
+    if (announcement.attachmentPath) await deleteLocalUpload(announcement.attachmentPath);
     return announcement;
+  }
+
+  buildAttachmentMetadata(file?: Express.Multer.File) {
+    if (!file) throw new BadRequestException('Attachment file is required');
+    const relativePath = `/uploads/announcements/${file.filename}`;
+    const appUrl = String(process.env.APP_URL || '').replace(/\/+$/, '');
+    return {
+      attachmentUrl: appUrl ? `${appUrl}${relativePath}` : relativePath,
+      attachmentPath: relativePath,
+      attachmentName: file.originalname,
+      attachmentMimeType: file.mimetype,
+      attachmentSize: file.size,
+    };
   }
 
   @Cron(CronExpression.EVERY_MINUTE)
@@ -282,10 +357,16 @@ export class AnnouncementsService {
 
     try {
       const content = this.renderContent(announcement.html, delivery);
+      const attachment = this.resolveAttachment(announcement);
       if (delivery.channel === AnnouncementChannel.WHATSAPP) {
-        await this.whatsappService.sendText(delivery.phone, this.withWhatsappFooter(this.stripHtml(content)));
+        const message = this.withWhatsappFooter(this.stripHtml(content));
+        if (attachment) {
+          await this.whatsappService.sendMedia(delivery.phone, message, attachment);
+        } else {
+          await this.whatsappService.sendText(delivery.phone, message);
+        }
       } else {
-        await this.notificationsService.sendRawHtml(delivery.email, announcement.subject, content);
+        await this.notificationsService.sendRawHtml(delivery.email, announcement.subject, content, attachment || undefined);
       }
 
       await this.deliveryModel.updateOne(
@@ -586,5 +667,21 @@ export class AnnouncementsService {
     if (!content) return footer;
     if (content.includes(footer)) return content;
     return `${content}\n\n${footer}`;
+  }
+
+  private validateAttachmentForChannel(channel: AnnouncementChannel, mimeType?: string | null) {
+    if (!mimeType) return;
+    if (channel === AnnouncementChannel.WHATSAPP && !mimeType.startsWith('image/')) {
+      throw new BadRequestException('WhatsApp announcements only support image attachments');
+    }
+  }
+
+  private resolveAttachment(announcement: AnnouncementDocument) {
+    if (!announcement.attachmentPath) return null;
+    return {
+      path: join(resolveUploadDir('announcements'), basename(announcement.attachmentPath)),
+      filename: announcement.attachmentName || basename(announcement.attachmentPath),
+      contentType: announcement.attachmentMimeType || undefined,
+    };
   }
 }

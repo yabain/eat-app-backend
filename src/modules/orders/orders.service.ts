@@ -463,6 +463,16 @@ export class OrdersService {
 
     const user = await this.userModel.findById(order.userId);
     if (user) await this.notifications.sendStatusChanged(user.email, user.phone, order.orderNumber, order.orderStatus);
+    if (
+      user
+      && dto.orderStatus === OrderStatus.OUT_FOR_DELIVERY
+      && !order.deliveryStartedWhatsappSentAt
+    ) {
+      await this.orderModel.findOneAndUpdate(
+        { _id: order._id, deliveryStartedWhatsappSentAt: { $exists: false } },
+        { $set: { deliveryStartedWhatsappSentAt: new Date() } },
+      );
+    }
     return order;
   }
 }

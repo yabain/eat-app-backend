@@ -7,6 +7,7 @@ export class Restaurant {
   @Prop({ required: true }) name: string;
   @Prop({ required: true, unique: true }) slug: string;
   @Prop({ default: false }) top: boolean;
+  @Prop({ type: Number, default: 9999, min: 0 }) order: number;
   @Prop() description?: string;
   @Prop() phone1?: string;
   @Prop() phone2?: string;
@@ -22,3 +23,4 @@ export class Restaurant {
   @Prop({ type: Types.ObjectId, ref: 'User', default: null }) managerId?: Types.ObjectId;
 }
 export const RestaurantSchema = SchemaFactory.createForClass(Restaurant);
+RestaurantSchema.index({ status: 1, order: 1, createdAt: -1 });

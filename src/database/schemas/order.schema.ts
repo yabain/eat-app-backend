@@ -50,5 +50,8 @@ export class Order {
   @Prop() notes?: string;
   @Prop({ type: Types.ObjectId, ref: 'User', default: null }) assignedDriverId?: Types.ObjectId;
   @Prop() outForDeliveryAt?: Date;
+  @Prop() paymentConfirmedAt?: Date;
+  @Prop() preparationReminderSentAt?: Date;
+  @Prop() deliveryStartedWhatsappSentAt?: Date;
 }
 export const OrderSchema = SchemaFactory.createForClass(Order);

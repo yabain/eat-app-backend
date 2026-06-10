@@ -95,6 +95,24 @@ export function restaurantOrderConfirmedWhatsappTemplate(input: {
   ]);
 }
 
+export function restaurantPreparationReminderWhatsappTemplate(input: {
+  orderNumber: string;
+  restaurantName?: string;
+  elapsedMinutes?: number;
+  orderUrl?: string;
+}) {
+  return lines([
+    '*Rappel de préparation*',
+    '\n',
+    `La commande *${input.orderNumber}* attend toujours d’être marquée comme prête.`,
+    input.restaurantName ? `Restaurant: *${input.restaurantName}*` : undefined,
+    input.elapsedMinutes ? `Temps écoulé: plus de *${input.elapsedMinutes} minutes*` : undefined,
+    '\n',
+    '`Merci d’accélérer sa préparation et de mettre son statut à jour.`',
+    link('Voir la commande:', input.orderUrl),
+  ]);
+}
+
 export function deliveryAssignedWhatsappTemplate(input: {
   orderNumber: string;
   driverName?: string;
@@ -116,6 +134,41 @@ export function deliveryAssignedWhatsappTemplate(input: {
     `Livreur en charge: *${input.driverName || 'Driver'}*,`.trim(),
     `\n`,
     link('Voir la livraison:', input.orderUrl),
+  ]);
+}
+
+export function deliveryStartReminderWhatsappTemplate(input: {
+  orderNumber: string;
+  driverName?: string;
+  restaurantName?: string;
+  address?: string;
+  elapsedMinutes?: number;
+  orderUrl?: string;
+}) {
+  return lines([
+    '*Rappel de livraison*',
+    '\n',
+    `${input.driverName || 'Livreur'}, la commande *${input.orderNumber}* vous est assignée, mais la course n’a pas encore démarré.`,
+    input.restaurantName ? `Restaurant: ${input.restaurantName}` : undefined,
+    input.address ? `Destination: _${input.address}_` : undefined,
+    input.elapsedMinutes ? `Temps écoulé: plus de *${input.elapsedMinutes} minutes*` : undefined,
+    '\n',
+    '`Merci de prendre en charge la livraison et de mettre son statut à jour.`',
+    link('Voir la livraison:', input.orderUrl),
+  ]);
+}
+
+export function deliveryStartedWhatsappTemplate(input: {
+  orderNumber: string;
+  orderUrl?: string;
+}) {
+  return lines([
+    '*Votre livraison est en route*',
+    '\n',
+    `Le livreur vient de démarrer la course pour votre commande *${input.orderNumber}*.`,
+    'Vous pouvez suivre son évolution depuis votre espace client.',
+    '\n',
+    link('Suivre ma commande:', input.orderUrl),
   ]);
 }
 

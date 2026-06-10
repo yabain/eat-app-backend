@@ -14,7 +14,7 @@ import { OrderStatus } from '../../common/enums/order-status.enum';
 import { orderStatusForDeliveryStatus } from '../../common/utils/delivery-order-status.util';
 import { AssignDeliveryDto } from './dto/assign-delivery.dto';
 import { UpdateDeliveryStatusDto } from './dto/update-delivery-status.dto';
-import { Cron } from '@nestjs/schedule';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { DispatchSettings, DispatchSettingsDocument } from '../../database/schemas/dispatch-settings.schema';
 
 @Injectable()
@@ -79,6 +79,22 @@ export class DeliveriesService {
     }).catch((error: any) => {
       this.logger.warn(`Unable to notify delivered order ${order._id}: ${error?.message || error}`);
     });
+  }
+
+  private async notifyDeliveryStarted(order: OrderDocument) {
+    const client = await this.userModel.findById(order.userId).select('phone');
+    if (!client?.phone) return;
+
+    const claimedOrder = await this.orderModel.findOneAndUpdate(
+      {
+        _id: order._id,
+        deliveryStartedWhatsappSentAt: { $exists: false },
+      },
+      { $set: { deliveryStartedWhatsappSentAt: new Date() } },
+      { new: true },
+    );
+    if (!claimedOrder) return;
+    this.notifications.sendDeliveryStartedWhatsapp(client.phone, order.orderNumber);
   }
 
   async assign(dto: AssignDeliveryDto, actor: any) {
@@ -346,6 +362,9 @@ export class DeliveriesService {
       if (dto.status === 'out_for_delivery' && !order.outForDeliveryAt) order.outForDeliveryAt = new Date();
       await order.save();
     }
+    if (dto.status === 'out_for_delivery' && previousStatus !== 'out_for_delivery') {
+      await this.notifyDeliveryStarted(order);
+    }
     if (dto.status === 'delivered') {
       await this.userModel.updateOne(
         { _id: delivery.driverId, role: UserRole.DRIVER },
@@ -369,5 +388,127 @@ export class DeliveriesService {
       );
     }
     return delivery;
+  }
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async sendOperationalReminders() {
+    const reminderMinutes = 10;
+    const cutoff = new Date(Date.now() - reminderMinutes * 60_000);
+
+    await Promise.all([
+      this.sendRestaurantPreparationReminders(cutoff, reminderMinutes),
+      this.sendDriverStartReminders(cutoff, reminderMinutes),
+    ]);
+  }
+
+  private async sendRestaurantPreparationReminders(cutoff: Date, elapsedMinutes: number) {
+    const candidates = await this.orderModel.find({
+      paymentStatus: 'paid',
+      orderStatus: {
+        $in: [OrderStatus.PAID, OrderStatus.CONFIRMED, OrderStatus.PREPARING],
+      },
+      preparationReminderSentAt: { $exists: false },
+      $or: [
+        { paymentConfirmedAt: { $lte: cutoff } },
+        { paymentConfirmedAt: { $exists: false }, createdAt: { $lte: cutoff } },
+      ],
+    }).select('_id').limit(100).lean();
+
+    for (const candidate of candidates) {
+      try {
+        const order = await this.orderModel.findById(candidate._id);
+        if (!order) continue;
+
+        const restaurant = await this.restaurantModel
+          .findById(order.restaurantId)
+          .select('name managerId');
+        const staffFilter: any = {
+          isActive: { $ne: false },
+          $or: [{
+            restaurantId: order.restaurantId,
+            role: { $in: [UserRole.MANAGER, UserRole.EMPLOYEE] },
+          }],
+        };
+        if (restaurant?.managerId) staffFilter.$or.push({ _id: restaurant.managerId });
+
+        const staff = await this.userModel.find(staffFilter).select('phone');
+        const recipients = staff.filter((member) => Boolean(member.phone));
+        if (!recipients.length) continue;
+
+        const claimedOrder = await this.orderModel.findOneAndUpdate(
+          {
+            _id: order._id,
+            paymentStatus: 'paid',
+            orderStatus: {
+              $in: [OrderStatus.PAID, OrderStatus.CONFIRMED, OrderStatus.PREPARING],
+            },
+            preparationReminderSentAt: { $exists: false },
+          },
+          { $set: { preparationReminderSentAt: new Date() } },
+          { new: true },
+        );
+        if (!claimedOrder) continue;
+
+        this.notifications.sendRestaurantPreparationReminder(
+          recipients.map((member) => ({ phone: member.phone })),
+          {
+            orderId: String(order._id),
+            orderNumber: order.orderNumber,
+            restaurantName: restaurant?.name,
+            elapsedMinutes,
+          },
+        );
+      } catch (error: any) {
+        this.logger.warn(
+          `Unable to send preparation reminder for order ${candidate._id}: ${error?.message || error}`,
+        );
+      }
+    }
+  }
+
+  private async sendDriverStartReminders(cutoff: Date, elapsedMinutes: number) {
+    const candidates = await this.deliveryModel.find({
+      status: { $in: ['assigned', 'picked_up'] },
+      assignedAt: { $lte: cutoff },
+      startReminderSentAt: { $exists: false },
+    }).select('_id').limit(100).lean();
+
+    for (const candidate of candidates) {
+      try {
+        const delivery = await this.deliveryModel.findById(candidate._id);
+        if (!delivery) continue;
+
+        const [order, driver] = await Promise.all([
+          this.orderModel.findById(delivery.orderId).populate('restaurantId'),
+          this.userModel.findById(delivery.driverId).select('firstName lastName phone'),
+        ]);
+        if (!order || !driver?.phone) continue;
+
+        const claimedDelivery = await this.deliveryModel.findOneAndUpdate(
+          {
+            _id: delivery._id,
+            status: { $in: ['assigned', 'picked_up'] },
+            assignedAt: { $lte: cutoff },
+            startReminderSentAt: { $exists: false },
+          },
+          { $set: { startReminderSentAt: new Date() } },
+          { new: true },
+        );
+        if (!claimedDelivery) continue;
+
+        const restaurant = order.restaurantId as any;
+        this.notifications.sendDeliveryStartReminder(driver.phone, {
+          orderNumber: order.orderNumber,
+          driverName: this.displayName(driver),
+          restaurantName: restaurant?.name,
+          address: this.orderAddress(order),
+          elapsedMinutes,
+        });
+      } catch (error: any) {
+        this.logger.warn(
+          `Unable to send delivery start reminder for delivery ${candidate._id}: ${error?.message || error}`,
+        );
+      }
+    }
   }
 }

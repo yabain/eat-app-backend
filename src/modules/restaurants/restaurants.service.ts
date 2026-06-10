@@ -93,11 +93,39 @@ export class RestaurantsService {
       ];
     }
     const [data, total] = await Promise.all([
-      this.model
-        .find(filter)
-        .sort({ createdAt: -1 })
-        .skip(pagination.skip)
-        .limit(pagination.limit),
+      this.model.aggregate([
+        { $match: filter },
+        { $addFields: { displayOrder: { $ifNull: ['$order', 9999] } } },
+        { $sort: { displayOrder: 1, createdAt: -1 } },
+        { $skip: pagination.skip },
+        { $limit: pagination.limit },
+        {
+          $lookup: {
+            from: 'menuitems',
+            let: { restaurantId: '$_id' },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $eq: [
+                      { $toString: '$restaurantId' },
+                      { $toString: '$$restaurantId' },
+                    ],
+                  },
+                  isActive: true,
+                  isAvailable: true,
+                  stock: { $gt: 0 },
+                },
+              },
+              { $limit: 1 },
+              { $project: { _id: 1 } },
+            ],
+            as: 'availableMenuItems',
+          },
+        },
+        { $addFields: { hasAvailableItems: { $gt: [{ $size: '$availableMenuItems' }, 0] } } },
+        { $project: { displayOrder: 0, availableMenuItems: 0 } },
+      ]),
       this.model.countDocuments(filter),
     ]);
 
@@ -132,6 +160,8 @@ export class RestaurantsService {
       if (actor.restaurantId?.toString() !== id) throw new ForbiddenException('You can only edit your own restaurant');
       delete dto.managerId;
       delete dto.status;
+      delete dto.order;
+      delete dto.top;
     } else {
       await this.validateManager(dto.managerId);
     }
@@ -154,32 +184,59 @@ export class RestaurantsService {
   async assignManager(id: string, dto: AssignManagerDto) {
     const restaurant = await this.model.findById(id);
     if (!restaurant) throw new NotFoundException('Restaurant not found');
-    await this.validateManager(dto.managerId);
 
     const nextManager = await this.userModel.findById(dto.managerId);
     if (!nextManager) throw new BadRequestException('Manager user not found');
+    if (![UserRole.CLIENT, UserRole.MANAGER].includes(nextManager.role)) {
+      throw new BadRequestException('Only a client or manager account can become restaurant manager');
+    }
+    if (nextManager.isActive === false) {
+      throw new BadRequestException('The selected user account is inactive');
+    }
     const previousManagerId = restaurant.managerId ? String(restaurant.managerId) : '';
 
     if (nextManager.restaurantId && String(nextManager.restaurantId) !== id) {
-      await this.model.updateOne(
-        { managerId: nextManager._id },
-        { $set: { managerId: null } },
-      );
+      throw new BadRequestException('User is already assigned to another restaurant');
     }
 
     restaurant.managerId = new Types.ObjectId(dto.managerId);
+    nextManager.role = UserRole.MANAGER;
     nextManager.restaurantId = new Types.ObjectId(id);
+    nextManager.refreshTokenVersion = Number(nextManager.refreshTokenVersion || 0) + 1;
     await Promise.all([
       restaurant.save(),
       nextManager.save(),
       previousManagerId && previousManagerId !== dto.managerId
         ? this.userModel.updateOne(
-            { _id: previousManagerId, role: UserRole.MANAGER, restaurantId: restaurant._id },
-            { $set: { restaurantId: null } },
+            { _id: previousManagerId, restaurantId: restaurant._id },
+            {
+              $set: { restaurantId: null, role: UserRole.CLIENT },
+              $inc: { refreshTokenVersion: 1 },
+            },
           )
         : Promise.resolve(),
     ]);
 
+    return this.populateManager(this.model.findById(id));
+  }
+
+  async removeManager(id: string) {
+    const restaurant = await this.model.findById(id);
+    if (!restaurant) throw new NotFoundException('Restaurant not found');
+    const managerId = restaurant.managerId ? String(restaurant.managerId) : '';
+    if (!managerId) throw new BadRequestException('Restaurant has no assigned manager');
+
+    restaurant.managerId = null as any;
+    await Promise.all([
+      restaurant.save(),
+      this.userModel.updateOne(
+        { _id: managerId, restaurantId: restaurant._id },
+        {
+          $set: { restaurantId: null, role: UserRole.CLIENT },
+          $inc: { refreshTokenVersion: 1 },
+        },
+      ),
+    ]);
     return this.populateManager(this.model.findById(id));
   }
 
@@ -227,7 +284,14 @@ export class RestaurantsService {
     }
     const qRegex = buildContainsRegex(q);
     const filter: any = kind === 'manager'
-      ? { role: UserRole.MANAGER, isActive: { $ne: false } }
+      ? {
+          role: UserRole.CLIENT,
+          isActive: { $ne: false },
+          $or: [
+            { restaurantId: null },
+            { restaurantId: { $exists: false } },
+          ],
+        }
       : {
           role: { $in: [UserRole.CLIENT, UserRole.EMPLOYEE] },
           isActive: { $ne: false },

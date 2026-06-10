@@ -35,6 +35,29 @@ export class UsersService {
     return bcrypt.hash(password, 10);
   }
 
+  private async assertPhoneAvailable(phone?: string, excludedUserId?: string) {
+    if (!phone) return;
+
+    const localPhone = phone.startsWith('237') ? phone.slice(3) : phone;
+    const filter: any = { phone: { $in: [localPhone, `237${localPhone}`] } };
+    if (excludedUserId) filter._id = { $ne: excludedUserId };
+
+    if (await this.userModel.exists(filter)) {
+      throw new BadRequestException('Ce numéro de téléphone est déjà utilisé');
+    }
+  }
+
+  private async withPhoneConflictHandling<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error: any) {
+      if (error?.code === 11000 && (error?.keyPattern?.phone || error?.keyValue?.phone)) {
+        throw new BadRequestException('Ce numéro de téléphone est déjà utilisé');
+      }
+      throw error;
+    }
+  }
+
   private disableDriverAvailabilityWhenInactive(payload: any, currentRole?: UserRole) {
     const nextRole = payload.role ?? currentRole;
     if (nextRole === UserRole.DRIVER && payload.isActive === false) {
@@ -43,6 +66,7 @@ export class UsersService {
   }
 
   async create(dto: CreateUserDto) {
+    await this.assertPhoneAvailable(dto.phone);
     const payload = {
       ...dto,
       email: dto.email.toLowerCase(),
@@ -50,7 +74,7 @@ export class UsersService {
     };
     delete (payload as any).password;
     this.disableDriverAvailabilityWhenInactive(payload);
-    const created = await this.userModel.create(payload);
+    const created = await this.withPhoneConflictHandling(() => this.userModel.create(payload));
     return this.userModel.findById(created._id).select('-passwordHash');
   }
 
@@ -141,12 +165,15 @@ export class UsersService {
       await deleteLocalUpload(dto.profileImage);
       throw new NotFoundException('User not found');
     }
+    await this.assertPhoneAvailable(dto.phone, id);
     const payload: any = { ...dto };
     if (dto.email) payload.email = dto.email.toLowerCase();
     if (dto.password) payload.passwordHash = await this.hashPassword(dto.password);
     delete payload.password;
     this.disableDriverAvailabilityWhenInactive(payload, existing.role);
-    const user = await this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash');
+    const user = await this.withPhoneConflictHandling(() =>
+      this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash').exec(),
+    );
     if (!user) throw new NotFoundException('User not found');
     if (payload.profileImage !== undefined) await deleteReplacedLocalUpload(existing.profileImage, payload.profileImage);
     return user;
@@ -185,7 +212,10 @@ export class UsersService {
       await deleteLocalUpload(payload.profileImage);
       throw new NotFoundException('User not found');
     }
-    const user = await this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash');
+    await this.assertPhoneAvailable(payload.phone, id);
+    const user = await this.withPhoneConflictHandling(() =>
+      this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash').exec(),
+    );
     if (!user) throw new NotFoundException('User not found');
     if (payload.profileImage !== undefined) await deleteReplacedLocalUpload(existing.profileImage, payload.profileImage);
     return user;
@@ -198,20 +228,23 @@ export class UsersService {
   async createEmployee(manager: any, dto: CreateEmployeeDto) {
     if (!manager.restaurantId) throw new BadRequestException('Manager must be assigned to a restaurant');
 
+    await this.assertPhoneAvailable(dto.phone);
     const role = this.sanitizeRoleForManager(dto.role);
     const passwordHash = await this.hashPassword(dto.password);
 
-    const created = await this.userModel.create({
-      firstName: dto.firstName,
-      lastName: dto.lastName,
-      email: dto.email.toLowerCase(),
-      phone: dto.phone,
-      role,
-      restaurantId: manager.restaurantId,
-      isActive: dto.isActive ?? true,
-      isDriverAvailable: role === UserRole.DRIVER && dto.isActive === false ? false : dto.isDriverAvailable ?? true,
-      passwordHash,
-    });
+    const created = await this.withPhoneConflictHandling(() =>
+      this.userModel.create({
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        email: dto.email.toLowerCase(),
+        phone: dto.phone,
+        role,
+        restaurantId: manager.restaurantId,
+        isActive: dto.isActive ?? true,
+        isDriverAvailable: role === UserRole.DRIVER && dto.isActive === false ? false : dto.isDriverAvailable ?? true,
+        passwordHash,
+      }),
+    );
     return this.userModel.findById(created._id).select('-passwordHash');
   }
 
@@ -261,6 +294,7 @@ export class UsersService {
       throw new ForbiddenException('You can only manage employees from your restaurant');
     }
 
+    await this.assertPhoneAvailable(dto.phone, id);
     const payload: any = { ...dto };
     if (dto.email) payload.email = dto.email.toLowerCase();
     if (dto.password) payload.passwordHash = await this.hashPassword(dto.password);
@@ -268,7 +302,9 @@ export class UsersService {
     delete payload.password;
     this.disableDriverAvailabilityWhenInactive(payload, employee.role);
 
-    const updated = await this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash');
+    const updated = await this.withPhoneConflictHandling(() =>
+      this.userModel.findByIdAndUpdate(id, payload, { new: true }).select('-passwordHash').exec(),
+    );
     if (!updated) throw new NotFoundException('User not found');
     return updated;
   }

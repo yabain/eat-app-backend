@@ -1,5 +1,6 @@
-import { IsBoolean, IsEmail, IsMongoId, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsEmail, IsInt, IsMongoId, IsOptional, IsString, Min } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import { IsCmPhone, NormalizeOptionalCmPhone } from '../../../common/validators/cm-phone.validator';
 export class CreateRestaurantDto {
   @ApiProperty({ example: 'Chez Maman' })
@@ -8,6 +9,9 @@ export class CreateRestaurantDto {
   @IsString() slug: string;
   @ApiPropertyOptional({ example: false })
   @IsOptional() @IsBoolean() top?: boolean;
+  @ApiPropertyOptional({ example: 1, default: 9999, description: 'Priorité d’affichage publique, du plus petit au plus grand' })
+  @Type(() => Number)
+  @IsOptional() @IsInt() @Min(0) order?: number;
   @ApiPropertyOptional({ example: 'Cuisine locale camerounaise' })
   @IsOptional() @IsString() description?: string;
   @ApiPropertyOptional({ example: '691224472' })

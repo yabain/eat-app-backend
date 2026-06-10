@@ -12,6 +12,7 @@ export class WithdrawalRequest {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true }) requestedBy: Types.ObjectId;
   @Prop({ required: true }) amount: number;
   @Prop({ required: true }) phone: string;
+  @Prop({ enum: ['MTN', 'ORANGEMONEY'], default: 'MTN' }) accountBankCode: 'MTN' | 'ORANGEMONEY';
   @Prop({ default: 'XAF' }) currency: string;
   @Prop({ enum: ['pending', 'approved', 'rejected', 'failed', 'paid'], default: 'pending' }) status: WithdrawalStatus;
   @Prop({ default: 'digikuntz' }) provider?: string;

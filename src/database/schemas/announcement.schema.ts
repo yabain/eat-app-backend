@@ -45,6 +45,11 @@ export class Announcement {
 
   @Prop({ required: true, trim: true }) subject: string;
   @Prop({ required: true }) html: string;
+  @Prop({ default: null }) attachmentUrl?: string;
+  @Prop({ default: null }) attachmentPath?: string;
+  @Prop({ default: null }) attachmentName?: string;
+  @Prop({ default: null }) attachmentMimeType?: string;
+  @Prop({ default: 0 }) attachmentSize?: number;
   @Prop({ enum: Object.values(AnnouncementRecipientGroup), default: null }) recipientGroup?: AnnouncementRecipientGroup;
   @Prop({ type: [String], default: [] }) recipientEmails: string[];
   @Prop({ type: [String], default: [] }) recipientPhones: string[];

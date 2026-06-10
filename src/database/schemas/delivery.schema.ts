@@ -10,5 +10,6 @@ export class Delivery {
   @Prop() assignedAt?: Date;
   @Prop() outForDeliveryAt?: Date;
   @Prop() deliveredAt?: Date;
+  @Prop() startReminderSentAt?: Date;
 }
 export const DeliverySchema = SchemaFactory.createForClass(Delivery);

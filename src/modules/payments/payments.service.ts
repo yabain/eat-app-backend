@@ -770,13 +770,26 @@ export class PaymentsService implements OnModuleInit {
     try {
       const [client, restaurant, staff] = await Promise.all([
         this.userModel.findById(order.userId).select('firstName lastName email phone'),
-        this.restaurantModel.findById(order.restaurantId).select('name'),
+        this.restaurantModel.findById(order.restaurantId).select('name managerId'),
         this.userModel.find({
-          restaurantId: order.restaurantId,
-          role: { $in: [UserRole.MANAGER, UserRole.EMPLOYEE] },
+          $or: [
+            {
+              restaurantId: order.restaurantId,
+              role: { $in: [UserRole.MANAGER, UserRole.EMPLOYEE] },
+            },
+          ],
           isActive: { $ne: false },
         }).select('email phone'),
       ]);
+
+      if (restaurant?.managerId) {
+        const manager = await this.userModel
+          .findOne({ _id: restaurant.managerId, isActive: { $ne: false } })
+          .select('email phone');
+        if (manager && !staff.some((member) => String(member._id) === String(manager._id))) {
+          staff.push(manager);
+        }
+      }
 
       await this.notifications.sendRestaurantOrderConfirmed(
         staff.map((user) => ({ email: user.email, phone: user.phone })),
@@ -843,6 +856,7 @@ export class PaymentsService implements OnModuleInit {
       : success
         ? OrderStatus.PAID
         : OrderStatus.PAYMENT_FAILED;
+    if (success && !order.paymentConfirmedAt) order.paymentConfirmedAt = new Date();
     await order.save();
 
     if (success && !wasAlreadyPaid) {

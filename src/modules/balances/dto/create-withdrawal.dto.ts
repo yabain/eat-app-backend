@@ -1,5 +1,6 @@
 import { Transform } from 'class-transformer';
 import { IsNumber, IsString, Min, Matches } from 'class-validator';
+import { normalizeCameroonPhone } from '../../../common/utils/cameroon-mobile-money.util';
 
 export class CreateWithdrawalDto {
   @IsNumber()
@@ -7,9 +8,9 @@ export class CreateWithdrawalDto {
   amount: number;
 
   @IsString()
-  @Transform(({ value }) => String(value ?? '').replace(/\D/g, ''))
-  @Matches(/^(?:67\d{7}|65[0-4]\d{6}|68[0-3]\d{6})$/, {
-    message: 'Le retrait est uniquement disponible vers un numéro MTN Cameroun de 9 chiffres commençant par 6',
+  @Transform(({ value }) => normalizeCameroonPhone(String(value ?? '')))
+  @Matches(/^(?:(?:67\d{7}|65[0-4]\d{6}|68[0-3]\d{6})|(?:69\d{7}|65[5-9]\d{6}|68[5-9]\d{6}))$/, {
+    message: 'Utilisez un numéro MTN Mobile Money ou Orange Money Cameroun valide de 9 chiffres',
   })
   phone: string;
 }

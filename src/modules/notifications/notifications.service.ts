@@ -15,10 +15,13 @@ import { MailTemplate } from '../../common/email/mail-layout';
 import {
   accountCreatedWhatsappTemplate,
   deliveryAssignedWhatsappTemplate,
+  deliveryStartedWhatsappTemplate,
+  deliveryStartReminderWhatsappTemplate,
   orderConfirmedWhatsappTemplate,
   orderDeliveredWhatsappTemplate,
   orderStatusChangedWhatsappTemplate,
   passwordChangedWhatsappTemplate,
+  restaurantPreparationReminderWhatsappTemplate,
   restaurantOrderConfirmedWhatsappTemplate,
   resetPasswordWhatsappTemplate,
 } from '../../common/whatsapp/templates';
@@ -116,6 +119,50 @@ export class NotificationsService {
     this.logger.log(`Notify delivery assignment ${order.orderNumber} to ${email || phone}`);
   }
 
+  sendRestaurantPreparationReminder(
+    recipients: Array<{ phone?: string }>,
+    order: { orderId: string; orderNumber: string; restaurantName?: string; elapsedMinutes?: number },
+  ) {
+    const contacts = this.normalizeContacts(recipients);
+    if (!contacts.length) return;
+    const message = restaurantPreparationReminderWhatsappTemplate({
+      ...order,
+      orderUrl: this.buildOpsOrderUrl(order.orderId),
+    });
+    this.dispatch(`restaurant_preparation_reminder:${order.orderNumber}`, () => Promise.all(
+      contacts.map((contact) => this.sendWhatsapp(contact.phone, message)),
+    ));
+  }
+
+  sendDeliveryStartReminder(
+    phone: string | undefined,
+    input: {
+      orderNumber: string;
+      driverName?: string;
+      restaurantName?: string;
+      address?: string;
+      elapsedMinutes?: number;
+    },
+  ) {
+    this.dispatch(`delivery_start_reminder:${input.orderNumber}`, () => this.sendWhatsapp(
+      phone,
+      deliveryStartReminderWhatsappTemplate({
+        ...input,
+        orderUrl: this.buildDriverUrl(),
+      }),
+    ));
+  }
+
+  sendDeliveryStartedWhatsapp(phone: string | undefined, orderNumber: string) {
+    this.dispatch(`delivery_started:${orderNumber}`, () => this.sendWhatsapp(
+      phone,
+      deliveryStartedWhatsappTemplate({
+        orderNumber,
+        orderUrl: this.buildOrderUrl(orderNumber),
+      }),
+    ));
+  }
+
   async sendStatusChanged(email: string, phone: string, orderNumber: string, status: string) {
     const input = {
       orderNumber,
@@ -141,8 +188,13 @@ export class NotificationsService {
     this.logger.log(`Notify delivered order ${orderNumber} to ${email} / ${phone}`);
   }
 
-  async sendRawHtml(email: string | undefined, subject: string, html: string) {
-    await this.sendTemplate(email, { subject, html }, true);
+  async sendRawHtml(
+    email: string | undefined,
+    subject: string,
+    html: string,
+    attachment?: { path: string; filename?: string; contentType?: string },
+  ) {
+    await this.sendTemplate(email, { subject, html }, true, attachment);
   }
 
   private buildOrderUrl(orderNumber: string) {
@@ -190,7 +242,12 @@ export class NotificationsService {
     };
   }
 
-  private async sendTemplate(email: string | undefined, template: MailTemplate, throwOnFailure = false) {
+  private async sendTemplate(
+    email: string | undefined,
+    template: MailTemplate,
+    throwOnFailure = false,
+    attachment?: { path: string; filename?: string; contentType?: string },
+  ) {
     if (!email) return;
     const mailer = this.createTransporter();
     if (!mailer) {
@@ -205,6 +262,13 @@ export class NotificationsService {
         to: email,
         subject: template.subject,
         html: template.html,
+        attachments: attachment
+          ? [{
+              path: attachment.path,
+              filename: attachment.filename,
+              contentType: attachment.contentType,
+            }]
+          : undefined,
       });
     } catch (error) {
       this.logger.warn(`Unable to send email "${template.subject}" to ${email}: ${error?.message || error}`);

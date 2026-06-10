@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsDateString, IsEnum, IsOptional, IsString } from 'class-validator';
+import { IsDateString, IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator';
 import { AnnouncementChannel, AnnouncementRecipientGroup } from '../../../database/schemas/announcement.schema';
 
 export class CreateAnnouncementDto {
@@ -15,6 +15,17 @@ export class CreateAnnouncementDto {
   @ApiProperty({ example: '<p>Bonjour {userFirstName}, découvrez nos nouveautés.</p>' })
   @IsString()
   html: string;
+
+  @ApiPropertyOptional({ example: 'https://backend.example.com/uploads/announcements/offer.jpg' })
+  @IsOptional() @IsString() attachmentUrl?: string;
+  @ApiPropertyOptional({ example: '/uploads/announcements/offer.jpg' })
+  @IsOptional() @IsString() attachmentPath?: string;
+  @ApiPropertyOptional({ example: 'offre.jpg' })
+  @IsOptional() @IsString() attachmentName?: string;
+  @ApiPropertyOptional({ example: 'image/jpeg' })
+  @IsOptional() @IsString() attachmentMimeType?: string;
+  @ApiPropertyOptional({ example: 245678 })
+  @IsOptional() @IsInt() @Min(0) attachmentSize?: number;
 
   @ApiPropertyOptional({
     enum: AnnouncementRecipientGroup,
@@ -55,6 +66,17 @@ export class UpdateAnnouncementDto {
   @IsOptional()
   @IsString()
   html?: string;
+
+  @ApiPropertyOptional({ example: 'https://backend.example.com/uploads/announcements/offer.jpg' })
+  @IsOptional() @IsString() attachmentUrl?: string;
+  @ApiPropertyOptional({ example: '/uploads/announcements/offer.jpg' })
+  @IsOptional() @IsString() attachmentPath?: string;
+  @ApiPropertyOptional({ example: 'offre.jpg' })
+  @IsOptional() @IsString() attachmentName?: string;
+  @ApiPropertyOptional({ example: 'image/jpeg' })
+  @IsOptional() @IsString() attachmentMimeType?: string;
+  @ApiPropertyOptional({ example: 245678 })
+  @IsOptional() @IsInt() @Min(0) attachmentSize?: number;
 
   @ApiPropertyOptional({ enum: AnnouncementRecipientGroup })
   @IsOptional()

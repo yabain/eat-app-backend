@@ -9,12 +9,17 @@ import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { WithdrawalRequest, WithdrawalRequestDocument, WithdrawalStatus } from '../../database/schemas/withdrawal-request.schema';
+import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
 import { UserRole } from '../../common/enums/roles.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { DigikuntzProvider } from '../payments/providers/digikuntz.provider';
 import { AdminBalanceOperationDto } from './dto/admin-balance-operation.dto';
 import { CreateWithdrawalDto } from './dto/create-withdrawal.dto';
 import { UpdateWithdrawalStatusDto } from './dto/update-withdrawal-status.dto';
+import {
+  detectCameroonMobileMoneyOperator,
+  normalizeCameroonPhone,
+} from '../../common/utils/cameroon-mobile-money.util';
 
 @Injectable()
 export class BalancesService {
@@ -29,6 +34,7 @@ export class BalancesService {
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
+    @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly digikuntzProvider: DigikuntzProvider,
   ) {}
@@ -219,6 +225,289 @@ export class BalancesService {
     return { data, meta: buildPaginationMeta(pagination.page, pagination.limit, total) };
   }
 
+  async ledger(
+    actor: any,
+    page?: number,
+    limit?: number,
+    filters?: { q?: string; status?: string; type?: string; from?: string; to?: string },
+  ) {
+    const pagination = normalizePagination(page, limit);
+    const fetchLimit = pagination.page * pagination.limit;
+    const isAdmin = actor.role === UserRole.ADMIN;
+    const isManager = actor.role === UserRole.MANAGER;
+    const isEmployee = actor.role === UserRole.EMPLOYEE;
+    const isDriver = actor.role === UserRole.DRIVER;
+
+    if (!isAdmin && !isManager && !isEmployee && !isDriver) {
+      throw new ForbiddenException('Transactions are not available for this role');
+    }
+    if ((isManager || isEmployee) && !actor.restaurantId) {
+      throw new ForbiddenException('Restaurant context is required');
+    }
+
+    const restaurantId = actor.restaurantId ? this.oid(actor.restaurantId) : null;
+    const driverId = isDriver ? this.oid(actor.sub) : null;
+    const restaurantOrders = restaurantId
+      ? await this.orderModel.find({ restaurantId }).select('_id orderNumber')
+      : [];
+    const restaurantOrderIds = restaurantOrders.map((order) => order._id);
+    const q = String(filters?.q || '').trim();
+    const qRegex = q ? new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
+    const type = String(filters?.type || '').trim();
+    const status = String(filters?.status || '').trim();
+    const range = isEmployee
+      ? this.doualaDayRange(new Date())
+      : this.requestedDateRange(filters?.from, filters?.to);
+
+    const paymentFilter: any = {};
+    const balanceFilter: any = {};
+    const withdrawalFilter: any = {};
+
+    if (isManager || isEmployee) paymentFilter.orderId = { $in: restaurantOrderIds };
+    if (isDriver) paymentFilter._id = { $exists: false };
+    if (isEmployee) {
+      paymentFilter.createdAt = range;
+    } else if (range) {
+      paymentFilter.createdAt = range;
+      balanceFilter.createdAt = range;
+      withdrawalFilter.createdAt = range;
+    }
+
+    if (isManager) {
+      balanceFilter.ownerType = 'restaurant';
+      balanceFilter.restaurantId = restaurantId;
+      withdrawalFilter.ownerType = 'restaurant';
+      withdrawalFilter.restaurantId = restaurantId;
+    } else if (isDriver) {
+      balanceFilter.ownerType = 'user';
+      balanceFilter.userId = driverId;
+      withdrawalFilter.ownerType = 'user';
+      withdrawalFilter.userId = driverId;
+    }
+
+    // Le retrait est représenté par WithdrawalRequest, pas une seconde fois par
+    // son débit/remboursement technique dans BalanceTransaction.
+    balanceFilter.$or = [
+      { withdrawalId: { $exists: false } },
+      { withdrawalId: null },
+    ];
+
+    if (status) {
+      paymentFilter.status = status;
+      withdrawalFilter.status = status;
+      if (status !== 'completed') balanceFilter._id = { $exists: false };
+    }
+
+    if (type === 'payment') {
+      balanceFilter._id = { $exists: false };
+      withdrawalFilter._id = { $exists: false };
+    } else if (type === 'withdrawal') {
+      paymentFilter._id = { $exists: false };
+      balanceFilter._id = { $exists: false };
+    } else if (type === 'credit' || type === 'debit') {
+      paymentFilter._id = { $exists: false };
+      withdrawalFilter._id = { $exists: false };
+      balanceFilter.type = type;
+    }
+
+    if (isEmployee) {
+      balanceFilter._id = { $exists: false };
+      withdrawalFilter._id = { $exists: false };
+    }
+
+    if (qRegex) {
+      const matchingOrders = await this.orderModel.find({
+        ...(restaurantId ? { restaurantId } : {}),
+        orderNumber: qRegex,
+      }).select('_id');
+      paymentFilter.$and = [
+        ...(paymentFilter.$and || []),
+        {
+          $or: [
+            { provider: qRegex },
+            { status: qRegex },
+            { providerRef: qRegex },
+            { transactionRef: qRegex },
+            { orderId: { $in: matchingOrders.map((order) => order._id) } },
+          ],
+        },
+      ];
+      balanceFilter.$and = [
+        ...(balanceFilter.$and || []),
+        { $or: [{ reason: qRegex }, { note: qRegex }, { currency: qRegex }] },
+      ];
+      withdrawalFilter.$and = [
+        ...(withdrawalFilter.$and || []),
+        {
+          $or: [
+            { phone: qRegex },
+            { status: qRegex },
+            { provider: qRegex },
+            { providerRef: qRegex },
+            { transactionRef: qRegex },
+            { note: qRegex },
+          ],
+        },
+      ];
+    }
+
+    const includePayments = !paymentFilter._id || paymentFilter._id.$exists !== false;
+    const includeBalances = !balanceFilter._id || balanceFilter._id.$exists !== false;
+    const includeWithdrawals = !withdrawalFilter._id || withdrawalFilter._id.$exists !== false;
+
+    const [payments, balances, withdrawals, paymentCount, balanceCount, withdrawalCount, paidSummary] = await Promise.all([
+      includePayments
+        ? this.paymentModel.find(paymentFilter)
+            .populate({
+              path: 'orderId',
+              populate: [
+                { path: 'restaurantId', select: 'name slug logo' },
+                { path: 'userId', select: 'firstName lastName email phone' },
+              ],
+            })
+            .sort({ createdAt: -1 }).limit(fetchLimit).lean()
+        : [],
+      includeBalances
+        ? this.transactionModel.find(balanceFilter)
+            .populate('restaurantId', 'name slug logo')
+            .populate('userId', 'firstName lastName email phone role')
+            .populate('orderId', 'orderNumber')
+            .populate('createdBy', 'firstName lastName email role')
+            .sort({ createdAt: -1 }).limit(fetchLimit).lean()
+        : [],
+      includeWithdrawals
+        ? this.withdrawalModel.find(withdrawalFilter)
+            .populate('restaurantId', 'name slug logo')
+            .populate('userId', 'firstName lastName email phone role')
+            .populate('requestedBy', 'firstName lastName email phone role')
+            .sort({ createdAt: -1 }).limit(fetchLimit).lean()
+        : [],
+      includePayments ? this.paymentModel.countDocuments(paymentFilter) : 0,
+      includeBalances ? this.transactionModel.countDocuments(balanceFilter) : 0,
+      includeWithdrawals ? this.withdrawalModel.countDocuments(withdrawalFilter) : 0,
+      includePayments
+        ? this.paymentModel.aggregate([
+            { $match: { ...paymentFilter, status: 'paid' } },
+            { $group: { _id: null, amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+          ])
+        : [],
+    ]);
+
+    const data = [
+      ...payments.map((payment: any) => ({
+        _id: String(payment._id),
+        source: 'payment',
+        type: 'payment',
+        direction: 'credit',
+        label: 'Encaissement commande',
+        amount: Number(payment.amount || 0),
+        currency: payment.currency || 'XAF',
+        status: payment.status,
+        provider: payment.provider,
+        providerRef: payment.providerRef,
+        transactionRef: payment.transactionRef,
+        order: payment.orderId || null,
+        restaurant: payment.orderId?.restaurantId || null,
+        user: payment.orderId?.userId || null,
+        createdAt: payment.createdAt || payment.initiatedAt,
+      })),
+      ...balances.map((transaction: any) => ({
+        _id: String(transaction._id),
+        source: 'balance',
+        type: transaction.type,
+        direction: transaction.type,
+        label: this.balanceReasonLabel(transaction.reason),
+        amount: Math.abs(Number(transaction.amount || 0)),
+        signedAmount: Number(transaction.amount || 0),
+        currency: transaction.currency || 'XAF',
+        status: 'completed',
+        reason: transaction.reason,
+        note: transaction.note,
+        order: transaction.orderId || null,
+        restaurant: transaction.restaurantId || null,
+        user: transaction.userId || null,
+        createdBy: transaction.createdBy || null,
+        createdAt: transaction.createdAt,
+      })),
+      ...withdrawals.map((withdrawal: any) => ({
+        _id: String(withdrawal._id),
+        source: 'withdrawal',
+        type: 'withdrawal',
+        direction: 'debit',
+        label: 'Retrait de solde',
+        amount: Number(withdrawal.amount || 0),
+        currency: withdrawal.currency || 'XAF',
+        status: withdrawal.status,
+        provider: withdrawal.provider,
+        providerRef: withdrawal.providerRef,
+        transactionRef: withdrawal.transactionRef,
+        phone: withdrawal.phone,
+        accountBankCode: withdrawal.accountBankCode,
+        note: withdrawal.note,
+        restaurant: withdrawal.restaurantId || null,
+        user: withdrawal.userId || withdrawal.requestedBy || null,
+        createdAt: withdrawal.createdAt,
+      })),
+    ]
+      .sort((a: any, b: any) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+      .slice(pagination.skip, pagination.skip + pagination.limit);
+
+    const total = paymentCount + balanceCount + withdrawalCount;
+    return {
+      data,
+      meta: buildPaginationMeta(pagination.page, pagination.limit, total),
+      summary: {
+        totalTransactions: total,
+        paidCount: Number(paidSummary[0]?.count || 0),
+        paidAmount: Number(paidSummary[0]?.amount || 0),
+        period: isEmployee ? 'today' : 'filtered',
+      },
+    };
+  }
+
+  private requestedDateRange(from?: string, to?: string) {
+    const range: any = {};
+    if (from) {
+      const start = new Date(`${from}T00:00:00+01:00`);
+      if (!Number.isNaN(start.getTime())) range.$gte = start;
+    }
+    if (to) {
+      const end = new Date(`${to}T23:59:59.999+01:00`);
+      if (!Number.isNaN(end.getTime())) range.$lte = end;
+    }
+    return Object.keys(range).length ? range : null;
+  }
+
+  private doualaDayRange(date: Date) {
+    const key = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Douala',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+    return {
+      $gte: new Date(`${key}T00:00:00+01:00`),
+      $lte: new Date(`${key}T23:59:59.999+01:00`),
+    };
+  }
+
+  private balanceReasonLabel(reason?: string) {
+    const labels: Record<string, string> = {
+      admin_driver_credit: 'Crédit livreur par admin',
+      admin_driver_debit: 'Débit livreur par admin',
+      admin_restaurant_credit: 'Crédit restaurant par admin',
+      admin_restaurant_debit: 'Débit restaurant par admin',
+      driver_funding: 'Financement du solde livreur',
+      restaurant_funding: 'Financement du solde restaurant',
+      order_restaurant_share: 'Part restaurant sur commande',
+      order_delivery_share: 'Part livraison',
+      order_system_share: 'Part système sur commande',
+      withdrawal_request: 'Retrait de solde',
+      withdrawal_refund: 'Remboursement de retrait',
+    };
+    return labels[String(reason || '')] || String(reason || 'Mouvement de solde').replace(/_/g, ' ');
+  }
+
   async withdrawals(actor: any, page?: number, limit?: number) {
     const scope = this.scopeForActor(actor);
     const pagination = normalizePagination(page, limit);
@@ -266,8 +555,7 @@ export class BalancesService {
   }
 
   private normalizeWithdrawalPhone(phone: string) {
-    const digits = String(phone || '').replace(/\D/g, '');
-    return digits.startsWith('237') ? digits : `237${digits}`;
+    return `237${normalizeCameroonPhone(phone)}`;
   }
 
   private localStatusForProviderStatus(status?: string): WithdrawalStatus | null {
@@ -389,6 +677,10 @@ export class BalancesService {
     if (scope.ownerType === 'system') throw new BadRequestException('System balance withdrawals are not available here');
     const amount = Number(dto.amount || 0);
     if (amount <= 0) throw new BadRequestException('Amount must be positive');
+    const accountBankCode = detectCameroonMobileMoneyOperator(dto.phone);
+    if (!accountBankCode) {
+      throw new BadRequestException('Unsupported MTN Mobile Money or Orange Money number');
+    }
 
     const session = await this.connection.startSession();
     try {
@@ -403,6 +695,7 @@ export class BalancesService {
           requestedBy: this.oid(actor.sub),
           amount,
           phone: dto.phone,
+          accountBankCode,
           currency: 'XAF',
           status: 'pending',
         }], { session });
@@ -414,7 +707,7 @@ export class BalancesService {
           type: 'debit',
           reason: 'withdrawal_request',
           currency: 'XAF',
-          note: `Retrait MTN ${dto.phone}`,
+          note: `Retrait ${accountBankCode === 'MTN' ? 'MTN Mobile Money' : 'Orange Money'} ${dto.phone}`,
           createdBy: this.oid(actor.sub),
         }, session);
 
@@ -441,6 +734,9 @@ export class BalancesService {
       .initiatePayout({
         amount: withdrawal.amount,
         phone: this.normalizeWithdrawalPhone(withdrawal.phone),
+        accountBankCode: withdrawal.accountBankCode
+          || detectCameroonMobileMoneyOperator(withdrawal.phone)
+          || 'MTN',
         receiverName: this.userDisplayName(requester),
         narration: `Retrait Eat App ${withdrawal._id}`,
         callbackUrl: this.withdrawalCallbackUrl(String(withdrawal._id)),

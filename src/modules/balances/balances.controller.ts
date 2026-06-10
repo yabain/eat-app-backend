@@ -30,6 +30,23 @@ export class BalancesController {
   }
 
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER)
+  @Get('ledger')
+  @ApiOperation({
+    summary: 'Journal unifié des paiements, mouvements de solde et retraits selon le rôle',
+  })
+  ledger(
+    @Req() req: any,
+    @Query() query: PaginationQueryDto,
+    @Query('q') q?: string,
+    @Query('status') status?: string,
+    @Query('type') type?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.service.ledger(req.user, query.page, query.limit, { q, status, type, from, to });
+  }
+
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER)
   @Get('withdrawals/my')
   @ApiOperation({ summary: 'Demandes de retrait du compte connecté' })
   withdrawals(@Req() req: any, @Query() query: PaginationQueryDto) {
@@ -38,7 +55,7 @@ export class BalancesController {
 
   @Roles(UserRole.MANAGER, UserRole.DRIVER)
   @Post('withdrawals')
-  @ApiOperation({ summary: 'Initier une demande de retrait MTN Cameroun' })
+  @ApiOperation({ summary: 'Initier un retrait MTN Mobile Money ou Orange Money Cameroun' })
   withdraw(@Req() req: any, @Body() dto: CreateWithdrawalDto) { return this.service.createWithdrawal(req.user, dto); }
 
   @Roles(UserRole.ADMIN)

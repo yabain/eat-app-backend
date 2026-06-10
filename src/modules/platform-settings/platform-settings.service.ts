@@ -21,21 +21,29 @@ export class PlatformSettingsService {
   }
 
   async updateSettings(dto: UpdatePlatformSettingsDto) {
-    const settings = await this.getOrCreateSettings();
-    const payload: any = {};
+    await this.getOrCreateSettings();
+    const set: Record<string, unknown> = {};
 
     if (dto.contact) {
-      payload.contact = {
-        ...(settings.contact || {}),
-        ...dto.contact,
-      };
+      if (dto.contact.supportPhone !== undefined) {
+        set['contact.supportPhone'] = dto.contact.supportPhone || '';
+      }
+      if (dto.contact.supportWhatsapp !== undefined) {
+        set['contact.supportWhatsapp'] = dto.contact.supportWhatsapp || '';
+      }
+      if (dto.contact.contactEmail !== undefined) {
+        set['contact.contactEmail'] = dto.contact.contactEmail.trim().toLowerCase();
+      }
+      if (dto.contact.slogan !== undefined) {
+        set['contact.slogan'] = dto.contact.slogan.trim();
+      }
     }
 
     if (dto.socialLinks) {
-      payload.socialLinks = dto.socialLinks.map((link, index) => ({
-        name: link.name || '',
-        icon: link.icon || '',
-        url: link.url || '',
+      set.socialLinks = dto.socialLinks.map((link, index) => ({
+        name: (link.name || '').trim(),
+        icon: (link.icon || '').trim(),
+        url: (link.url || '').trim(),
         isActive: link.isActive ?? true,
         order: link.order ?? index,
       }));
@@ -43,9 +51,10 @@ export class PlatformSettingsService {
 
     const updated = await this.settingsModel.findOneAndUpdate(
       { key: this.settingsKey },
-      { $set: payload },
-      { new: true, upsert: true },
+      { $set: set },
+      { new: true, runValidators: true },
     );
+    if (!updated) throw new NotFoundException('Platform settings not found');
     return this.sortSettings(updated.toObject());
   }
 

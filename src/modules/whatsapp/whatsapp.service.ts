@@ -1,9 +1,9 @@
 import { BadRequestException, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { existsSync, mkdirSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
 import { isAbsolute, join } from 'path';
 import * as QRCode from 'qrcode';
-import { Client, LocalAuth } from 'whatsapp-web.js';
+import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
 
 type WhatsappConnectionStatus = 'initializing' | 'qr' | 'authenticated' | 'ready' | 'disconnected' | 'failed';
 
@@ -113,6 +113,47 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     }
 
     throw new BadRequestException(`Unable to send WhatsApp message. Attempts: ${errors.join(' | ')}`);
+  }
+
+  async sendMedia(
+    phone: string,
+    message: string,
+    attachment: { path: string; filename?: string; contentType?: string },
+  ) {
+    const data = readFileSync(attachment.path).toString('base64');
+    const media = {
+      data,
+      mimetype: attachment.contentType || 'application/octet-stream',
+      filename: attachment.filename || 'attachment',
+    };
+
+    if (this.useGateway()) {
+      return this.gatewayRequest('send-media', {
+        method: 'POST',
+        body: JSON.stringify({ phone, message, ...media }),
+      });
+    }
+    if (!this.client || this.status !== 'ready') {
+      throw new BadRequestException(`WhatsApp is not ready (current status: ${this.status})`);
+    }
+
+    const candidates = this.buildPhoneCandidates(phone);
+    const errors: string[] = [];
+    for (const candidate of candidates) {
+      try {
+        const numberId = await this.client.getNumberId(candidate).catch(() => null);
+        const chatId = numberId?._serialized || `${candidate}@c.us`;
+        await this.client.sendMessage(
+          chatId,
+          new MessageMedia(media.mimetype, media.data, media.filename),
+          { caption: message },
+        );
+        return { sent: true, to: chatId, attemptedNumbers: candidates };
+      } catch (error) {
+        errors.push(`${candidate}: ${error?.message || error}`);
+      }
+    }
+    throw new BadRequestException(`Unable to send WhatsApp media. Attempts: ${errors.join(' | ')}`);
   }
 
   private async initialize() {

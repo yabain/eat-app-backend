@@ -49,18 +49,44 @@ export class AuthService {
     await this.revokedTokenModel.updateOne({ token }, { $setOnInsert: { token } }, { upsert: true });
   }
 
+  private async assertPhoneAvailable(phone?: string, excludedUserId?: string) {
+    if (!phone) return;
+
+    const localPhone = phone.startsWith('237') ? phone.slice(3) : phone;
+    const filter: any = { phone: { $in: [localPhone, `237${localPhone}`] } };
+    if (excludedUserId) filter._id = { $ne: excludedUserId };
+
+    if (await this.userModel.exists(filter)) {
+      throw new BadRequestException('Ce numéro de téléphone est déjà utilisé');
+    }
+  }
+
+  private async withPhoneConflictHandling<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error: any) {
+      if (error?.code === 11000 && (error?.keyPattern?.phone || error?.keyValue?.phone)) {
+        throw new BadRequestException('Ce numéro de téléphone est déjà utilisé');
+      }
+      throw error;
+    }
+  }
+
   async register(dto: RegisterDto) {
     const exists = await this.userModel.findOne({ email: dto.email.toLowerCase() });
     if (exists) throw new BadRequestException('Email already exists');
+    await this.assertPhoneAvailable(dto.phone);
     const passwordHash = await bcrypt.hash(dto.password, 10);
-    const user = await this.userModel.create({
-      ...dto,
-      email: dto.email.toLowerCase(),
-      passwordHash,
-      role: UserRole.CLIENT,
-      authProvider: 'local',
-      isProfileComplete: true,
-    });
+    const user = await this.withPhoneConflictHandling(() =>
+      this.userModel.create({
+        ...dto,
+        email: dto.email.toLowerCase(),
+        passwordHash,
+        role: UserRole.CLIENT,
+        authProvider: 'local',
+        isProfileComplete: true,
+      }),
+    );
     this.notifyAccountCreated(user);
     this.prospectsService.removeMatchingUser(user.email, user.phone).catch((error) => {
       this.logger.warn(`Unable to remove matching prospect for ${user.email}: ${error?.message || error}`);
@@ -232,8 +258,11 @@ export class AuthService {
       });
     }
 
+    await this.assertPhoneAvailable(payload.phone, user._id.toString());
     payload.isProfileComplete = true;
-    const updated = await this.userModel.findByIdAndUpdate(user._id, payload, { new: true });
+    const updated = await this.withPhoneConflictHandling(() =>
+      this.userModel.findByIdAndUpdate(user._id, payload, { new: true }).exec(),
+    );
     if (payload.profileImage !== undefined) await deleteReplacedLocalUpload(user.profileImage, payload.profileImage);
     this.prospectsService.removeMatchingUser(updated.email, updated.phone).catch((error) => {
       this.logger.warn(`Unable to remove matching prospect for ${updated.email}: ${error?.message || error}`);

@@ -40,6 +40,12 @@ export class RestaurantResponseDto {
   @ApiProperty({ example: false })
   top: boolean;
 
+  @ApiProperty({ example: 1, description: 'Priorité d’affichage publique' })
+  order: number;
+
+  @ApiPropertyOptional({ example: true, description: 'Au moins un produit actif, disponible et en stock' })
+  hasAvailableItems?: boolean;
+
   @ApiPropertyOptional({ example: 'Cuisine africaine maison' })
   description?: string;
 

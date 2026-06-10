@@ -63,6 +63,7 @@ export class DigikuntzProvider {
   async initiatePayout(input: {
     amount: number;
     phone: string;
+    accountBankCode: 'MTN' | 'ORANGEMONEY';
     receiverName: string;
     narration: string;
     callbackUrl?: string;
@@ -72,7 +73,7 @@ export class DigikuntzProvider {
       headers: this.headers,
       body: JSON.stringify({
         amount: input.amount,
-        accountBankCode: 'MTN',
+        accountBankCode: input.accountBankCode,
         accountNumber: input.phone,
         receiverName: input.receiverName,
         currency: 'XAF',

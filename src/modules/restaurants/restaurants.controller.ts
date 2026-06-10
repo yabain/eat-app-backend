@@ -206,6 +206,15 @@ export class RestaurantsController {
   assignManager(@Param('id') id: string, @Body() dto: AssignManagerDto) { return this.service.assignManager(id, dto); }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Delete(':id/manager')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Retirer le manager du restaurant sans supprimer son compte' })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiOkResponse({ description: 'Manager retiré et compte repassé en client', type: RestaurantResponseDto })
+  removeManager(@Param('id') id: string) { return this.service.removeManager(id); }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Get(':id/employees')
   @ApiBearerAuth('bearer')

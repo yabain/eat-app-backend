@@ -10,7 +10,7 @@ export class User {
   @Prop() lastName?: string;
   @Prop({ required: true, unique: true, lowercase: true }) email: string;
   @Prop({ select: false }) passwordHash?: string;
-  @Prop() phone?: string;
+  @Prop({ unique: true, sparse: true }) phone?: string;
   @Prop() profileImage?: string;
   @Prop({ enum: Object.values(UserRole), default: UserRole.CLIENT }) role: UserRole;
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Restaurant', default: null }) restaurantId?: Types.ObjectId;
