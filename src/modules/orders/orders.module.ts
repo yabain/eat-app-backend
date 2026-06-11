@@ -6,10 +6,15 @@ import { DeliveryZone, DeliveryZoneSchema } from '../../database/schemas/deliver
 import { PromoCode, PromoCodeSchema } from '../../database/schemas/promo-code.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
 import { Cart, CartSchema } from '../../database/schemas/cart.schema';
+import {
+  PromoCodeRedemption,
+  PromoCodeRedemptionSchema,
+} from '../../database/schemas/promo-code-redemption.schema';
 import { OrdersController } from './orders.controller';
 import { OrdersService } from './orders.service';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MenuModule } from '../menu/menu.module';
+import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 
 @Module({
   imports: [
@@ -20,9 +25,11 @@ import { MenuModule } from '../menu/menu.module';
       { name: PromoCode.name, schema: PromoCodeSchema },
       { name: User.name, schema: UserSchema },
       { name: Cart.name, schema: CartSchema },
+      { name: PromoCodeRedemption.name, schema: PromoCodeRedemptionSchema },
     ]),
     NotificationsModule,
     MenuModule,
+    PlatformSettingsModule,
   ],
   providers: [OrdersService],
   controllers: [OrdersController],

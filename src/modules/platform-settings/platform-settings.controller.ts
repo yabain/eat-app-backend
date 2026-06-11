@@ -4,7 +4,13 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
-import { CreatePartnerDto, UpdatePartnerDto, UpdatePlatformSettingsDto } from './dto/platform-settings.dto';
+import {
+  CreatePartnerDto,
+  CreateTestimonialDto,
+  UpdatePartnerDto,
+  UpdatePlatformSettingsDto,
+  UpdateTestimonialDto,
+} from './dto/platform-settings.dto';
 import { PlatformSettingsService } from './platform-settings.service';
 
 @ApiTags('platform-settings')
@@ -17,6 +23,17 @@ export class PlatformSettingsController {
   @ApiOkResponse({ description: 'Paramètres publics, contacts, réseaux sociaux et partenaires' })
   getPublicSettings() {
     return this.settingsService.getPublicSettings();
+  }
+
+  @Get('ordering-window')
+  @ApiOperation({
+    summary: 'Statut courant de la fenêtre de service (public)',
+    description:
+      "Retourne `{ startHour, endHour, timezone, isCurrentlyOpen, currentHour, checkedAt }`. Utilisé par le frontend pour griser les restaurants et empêcher la commande hors période, et par le backend pour la même vérification.",
+  })
+  @ApiOkResponse({ description: 'Statut ouvert/fermé calculé en temps réel' })
+  getOrderingWindow() {
+    return this.settingsService.getOrderingWindow();
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -72,5 +89,42 @@ export class PlatformSettingsController {
   @ApiOkResponse({ description: 'Partenaire supprimé' })
   deletePartner(@Param('partnerId') partnerId: string) {
     return this.settingsService.deletePartner(partnerId);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth('bearer')
+  @Post('testimonials')
+  @ApiOperation({ summary: 'Ajouter un témoignage (admin)' })
+  @ApiBody({ type: CreateTestimonialDto })
+  @ApiOkResponse({ description: 'Témoignage ajouté' })
+  addTestimonial(@Body() dto: CreateTestimonialDto) {
+    return this.settingsService.addTestimonial(dto);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth('bearer')
+  @Patch('testimonials/:testimonialId')
+  @ApiOperation({ summary: 'Mettre à jour un témoignage (admin)' })
+  @ApiParam({ name: 'testimonialId', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiBody({ type: UpdateTestimonialDto })
+  @ApiOkResponse({ description: 'Témoignage mis à jour' })
+  updateTestimonial(
+    @Param('testimonialId') testimonialId: string,
+    @Body() dto: UpdateTestimonialDto,
+  ) {
+    return this.settingsService.updateTestimonial(testimonialId, dto);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth('bearer')
+  @Delete('testimonials/:testimonialId')
+  @ApiOperation({ summary: 'Supprimer un témoignage (admin)' })
+  @ApiParam({ name: 'testimonialId', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiOkResponse({ description: 'Témoignage supprimé' })
+  deleteTestimonial(@Param('testimonialId') testimonialId: string) {
+    return this.settingsService.deleteTestimonial(testimonialId);
   }
 }

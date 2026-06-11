@@ -27,7 +27,7 @@ export class OrdersController {
     description: 'Détail de calcul',
     type: OrderPreviewResponseDto,
   })
-  preview(@Body() dto: PreviewOrderDto) { return this.service.preview(dto); }
+  preview(@Req() req: any, @Body() dto: PreviewOrderDto) { return this.service.preview(req.user.sub, dto); }
 
   @Roles(UserRole.CLIENT)
   @UseGuards(RolesGuard)
@@ -89,7 +89,7 @@ export class OrdersController {
     });
   }
  
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
   @UseGuards(RolesGuard)
   @Get()
   @ApiOperation({ summary: 'Lister les commandes selon rôle (admin/manager/employé/livreur)' })

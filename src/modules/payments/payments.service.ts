@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -38,6 +38,64 @@ export class PaymentsService implements OnModuleInit {
 
   async onModuleInit() {
     await this.ensureBalanceTransactionIndexes();
+    await this.ensureOpenPaymentIndex();
+  }
+
+  private async ensureOpenPaymentIndex() {
+    const name = 'open_order_payment_unique';
+    try {
+      const duplicates = await this.paymentModel.aggregate([
+        { $match: { status: PaymentStatus.PROCESSING } },
+        { $group: { _id: '$orderId', ids: { $push: '$_id' }, count: { $sum: 1 } } },
+        { $match: { count: { $gt: 1 } } },
+      ]);
+
+      for (const duplicate of duplicates) {
+        const payments = await this.paymentModel
+          .find({ _id: { $in: duplicate.ids } })
+          .sort({ initiatedAt: -1, createdAt: -1 });
+        const keeper = payments.find((payment) => payment.providerRef || payment.paymentLink) || payments[0];
+        const obsoleteIds = payments
+          .filter((payment) => String(payment._id) !== String(keeper?._id))
+          .map((payment) => payment._id);
+        if (obsoleteIds.length) {
+          this.logger.warn(
+            `Reconciling ${obsoleteIds.length} duplicate open payment(s) for order ${duplicate._id}`,
+          );
+          await this.paymentModel.updateMany(
+            { _id: { $in: obsoleteIds }, status: PaymentStatus.PROCESSING },
+            {
+              $set: {
+                status: PaymentStatus.FAILED,
+                completedAt: new Date(),
+                callbackPayload: { reason: 'duplicate_open_payment_reconciled' },
+              },
+            },
+          );
+        }
+      }
+
+      const indexes = await this.paymentModel.collection.indexes();
+      const existing = indexes.find((index: any) => index.name === name);
+      const expectedPartial = JSON.stringify({ status: PaymentStatus.PROCESSING });
+      const currentPartial = JSON.stringify(existing?.partialFilterExpression || null);
+      if (existing && (!existing.unique || currentPartial !== expectedPartial)) {
+        await this.paymentModel.collection.dropIndex(name);
+      }
+      if (!existing || !existing.unique || currentPartial !== expectedPartial) {
+        await this.paymentModel.collection.createIndex(
+          { orderId: 1 },
+          {
+            name,
+            unique: true,
+            partialFilterExpression: { status: PaymentStatus.PROCESSING },
+          },
+        );
+      }
+    } catch (error: any) {
+      this.logger.error(`Unable to ensure open payment index: ${error?.message || error}`);
+      throw error;
+    }
   }
 
   private async ensureBalanceTransactionIndexes() {
@@ -287,53 +345,140 @@ export class PaymentsService implements OnModuleInit {
       .sort({ createdAt: -1 });
 
     if (existingPayment) {
-      const remote = existingPayment.providerRef
-        ? await this.provider.getTransactionStatus(existingPayment.providerRef)
-        : null;
-
-      if (remote && remote.status !== 'payin_pending') {
-        await this.applyPayinStatus(existingPayment, order, remote.status, remote);
-        if (remote.status === 'payin_success') throw new BadRequestException('Order already paid');
-      } else {
-        const checkout = this.buildCheckoutFromPayment(existingPayment, remote);
-        if (checkout.paymentLink) {
-          return {
-            payment: existingPayment,
-            checkout,
-          };
-        }
-      }
+      const reused = await this.reuseProcessingPayment(existingPayment, order);
+      if (reused) return reused;
     }
 
     const user = await this.userModel.findById(order.userId);
     const paymentAmount = this.orderPaymentAmount(order);
     if (paymentAmount <= 0) throw new BadRequestException('Invalid order payment amount');
 
-    const response = await this.provider.initiatePayment(
-      order.orderNumber,
-      paymentAmount,
-      user?.phone,
-      user?.email,
-    );
+    let payment: PaymentDocument;
+    try {
+      payment = await this.paymentModel.create({
+        orderId: order._id,
+        amount: paymentAmount,
+        provider: 'digikuntz',
+        currency: 'XAF',
+        status: PaymentStatus.PROCESSING,
+        initiatedAt: new Date(),
+      });
+    } catch (error: any) {
+      if (error?.code !== 11000) throw error;
+      const concurrentPayment = await this.paymentModel
+        .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
+        .sort({ createdAt: -1 });
+      if (!concurrentPayment) throw new ConflictException('Une initiation de paiement est déjà en cours');
+      const reused = await this.reuseProcessingPayment(concurrentPayment, order, true);
+      if (reused) return reused;
+      throw new ConflictException('Une initiation de paiement est déjà en cours');
+    }
 
-    const payment = await this.paymentModel.create({
-      orderId: order._id,
-      amount: paymentAmount,
-      provider: 'digikuntz',
-      currency: 'XAF',
-      status: PaymentStatus.PROCESSING,
-      providerRef: response.providerRef,
-      transactionRef: response.transactionRef,
-      paymentLink: response.paymentLink,
-      paymentWithTaxes: response.paymentWithTaxes,
-      invoiceTaxes: response.invoiceTaxes,
-      initiatedAt: new Date(),
-    });
+    try {
+      const response = await this.provider.initiatePayment(
+        order.orderNumber,
+        paymentAmount,
+        user?.phone,
+        user?.email,
+      );
 
-    order.paymentStatus = PaymentStatus.PROCESSING;
-    await order.save();
+      payment.providerRef = response.providerRef;
+      payment.transactionRef = response.transactionRef;
+      payment.paymentLink = response.paymentLink;
+      payment.paymentWithTaxes = response.paymentWithTaxes;
+      payment.invoiceTaxes = response.invoiceTaxes;
+      await payment.save();
 
-    return { payment, checkout: response };
+      order.paymentStatus = PaymentStatus.PROCESSING;
+      await order.save();
+
+      return { payment, checkout: response };
+    } catch (error: any) {
+      await this.paymentModel.updateOne(
+        { _id: payment._id, status: PaymentStatus.PROCESSING },
+        {
+          $set: {
+            status: PaymentStatus.FAILED,
+            completedAt: new Date(),
+            callbackPayload: {
+              reason: 'provider_initiation_failed',
+              error: error?.message || String(error),
+            },
+          },
+        },
+      );
+      throw error;
+    }
+  }
+
+  private async reuseProcessingPayment(
+    initialPayment: PaymentDocument,
+    order: OrderDocument,
+    waitForInitialization = false,
+  ) {
+    let payment = initialPayment;
+    if (waitForInitialization && !payment.providerRef && !payment.paymentLink) {
+      payment = await this.waitForPaymentInitialization(payment._id);
+    }
+
+    if (!payment.providerRef && !payment.paymentLink) {
+      const initiatedAt = new Date((payment as any).initiatedAt || (payment as any).createdAt || 0).getTime();
+      const staleAfterMs = Math.max(
+        60,
+        Number(process.env.PAYMENT_INITIATION_LOCK_SECONDS || 300),
+      ) * 1000;
+      if (initiatedAt && Date.now() - initiatedAt >= staleAfterMs) {
+        const released = await this.paymentModel.findOneAndUpdate(
+          {
+            _id: payment._id,
+            status: PaymentStatus.PROCESSING,
+            providerRef: { $exists: false },
+            paymentLink: { $exists: false },
+          },
+          {
+            $set: {
+              status: PaymentStatus.FAILED,
+              completedAt: new Date(),
+              callbackPayload: { reason: 'stale_payment_initiation_lock' },
+            },
+          },
+          { new: true },
+        );
+        if (released) return null;
+      }
+      throw new ConflictException('Une initiation de paiement est déjà en cours. Réessayez dans quelques secondes.');
+    }
+
+    const remote = payment.providerRef
+      ? await this.provider.getTransactionStatus(payment.providerRef)
+      : null;
+
+    if (remote && remote.status !== 'payin_pending') {
+      await this.applyPayinStatus(payment, order, remote.status, remote);
+      if (remote.status === 'payin_success') throw new BadRequestException('Order already paid');
+      return null;
+    }
+
+    const checkout = this.buildCheckoutFromPayment(payment, remote);
+    if (!checkout.paymentLink) {
+      throw new ConflictException('Le lien de paiement est en cours de génération. Réessayez dans quelques secondes.');
+    }
+    return { payment, checkout };
+  }
+
+  private async waitForPaymentInitialization(paymentId: any): Promise<PaymentDocument> {
+    const attempts = 20;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const payment = await this.paymentModel.findById(paymentId);
+      if (!payment) throw new NotFoundException('Payment not found');
+      if (payment.status !== PaymentStatus.PROCESSING || payment.providerRef || payment.paymentLink) {
+        return payment;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    const payment = await this.paymentModel.findById(paymentId);
+    if (!payment) throw new NotFoundException('Payment not found');
+    return payment;
   }
 
   async paymentStatus(orderId: string, actor: any) {
@@ -502,7 +647,7 @@ export class PaymentsService implements OnModuleInit {
 
   private getOrderPaymentTimeoutMs(): number {
     const minutes = Number(process.env.ORDER_PAYMENT_TIMEOUT_MINUTES || process.env.PAYMENT_TIMEOUT_MINUTES);
-    const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 30;
+    const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 10;
     return safeMinutes * 60 * 1000;
   }
 
@@ -521,8 +666,6 @@ export class PaymentsService implements OnModuleInit {
 
     for (const order of staleOrders) {
       try {
-        if (!this.isOrderFromCurrentCameroonDay(order)) continue;
-
         const latestPayment = await this.paymentModel
           .findOne({ orderId: order._id })
           .sort({ createdAt: -1 });
@@ -566,21 +709,39 @@ export class PaymentsService implements OnModuleInit {
       await payment.save();
     }
 
-    await Promise.all(
-      (transitioned.items || []).map((item: any) =>
-        this.inventory
-          .adjustStock(item.menuItemId, Number(item.quantity) || 0)
-          .catch((err) => {
-            this.logger.error(
-              `Failed to restore stock for expired order ${transitioned._id} item ${item.menuItemId}: ${err?.message || err}`,
-            );
-          }),
-      ),
-    );
+    await this.restoreReservedStockIfCurrentCameroonDay(transitioned, 'payment_timeout');
 
     this.logger.log(
-      `Order ${transitioned.orderNumber} expired (PENDING_PAYMENT > ${process.env.ORDER_PAYMENT_TIMEOUT_MINUTES || 30}min) — stock restored`,
+      `Order ${transitioned.orderNumber} expired (PENDING_PAYMENT > ${process.env.ORDER_PAYMENT_TIMEOUT_MINUTES || 10}min)`,
     );
+  }
+
+  private async restoreReservedStockIfCurrentCameroonDay(order: any, reason: string) {
+    if (!this.isOrderFromCurrentCameroonDay(order)) {
+      this.logger.warn(
+        `Stock restoration skipped for order ${order._id} (${reason}): order date is not current Cameroon day`,
+      );
+      return { restored: false, skipped: true, failures: [] as string[] };
+    }
+
+    const failures: string[] = [];
+    for (const item of order.items || []) {
+      try {
+        const restored = await this.inventory.adjustStock(item.menuItemId, Number(item.quantity) || 0);
+        if (!restored) {
+          failures.push(String(item.menuItemId));
+          this.logger.error(
+            `Failed to restore stock for order ${order._id} item ${item.menuItemId}: menu item not found`,
+          );
+        }
+      } catch (err: any) {
+        failures.push(String(item.menuItemId));
+        this.logger.error(
+          `Failed to restore stock for order ${order._id} item ${item.menuItemId}: ${err?.message || err}`,
+        );
+      }
+    }
+    return { restored: failures.length === 0, skipped: false, failures };
   }
 
 
@@ -870,15 +1031,7 @@ export class PaymentsService implements OnModuleInit {
 
     if (failed && !wasAlreadyFailed && !wasAlreadyPaid) {
       // Restitution du stock réservé à la création de la commande
-      await Promise.all(
-        (order.items || []).map((item: any) =>
-          this.inventory.adjustStock(item.menuItemId, Number(item.quantity) || 0).catch((err) => {
-            this.logger.error(
-              `Failed to restore stock for order ${order._id} item ${item.menuItemId}: ${err?.message || err}`,
-            );
-          }),
-        ),
-      );
+      await this.restoreReservedStockIfCurrentCameroonDay(order, 'payment_failed');
     }
   }
 

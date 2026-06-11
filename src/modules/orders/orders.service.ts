@@ -14,11 +14,20 @@ import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { CheckoutFromCartDto } from './dto/checkout-from-cart.dto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MenuInventoryService } from '../menu/menu-inventory.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
 import { buildTimeSeriesStats } from '../../common/stats/time-series-stats';
+import {
+  PromoCodeRedemption,
+  PromoCodeRedemptionDocument,
+} from '../../database/schemas/promo-code-redemption.schema';
+import {
+  allowedManualOrderStatuses,
+  canManuallyTransitionOrderStatus,
+} from '../../common/utils/order-status-transition.util';
 
 @Injectable()
 export class OrdersService {
@@ -29,8 +38,11 @@ export class OrdersService {
     @InjectModel(PromoCode.name) private promoModel: Model<PromoCodeDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Cart.name) private cartModel: Model<CartDocument>,
+    @InjectModel(PromoCodeRedemption.name)
+    private promoRedemptionModel: Model<PromoCodeRedemptionDocument>,
     private notifications: NotificationsService,
     private inventory: MenuInventoryService,
+    private platformSettings: PlatformSettingsService,
   ) {}
 
   private async buildPreviewInputFromCart(userId: string, dto: CheckoutFromCartDto, session?: ClientSession): Promise<PreviewOrderDto> {
@@ -49,7 +61,7 @@ export class OrdersService {
   }
 
   private async placeOrderWithinSession(userId: string, dto: PreviewOrderDto, session: ClientSession) {
-    const result = await this.calculate(dto, session);
+    const result = await this.calculate(dto, session, userId);
 
     // Réservation atomique du stock : on décrémente chaque item dans la même
     // transaction que la création de la commande. Si un item n'a plus assez de
@@ -77,7 +89,64 @@ export class OrdersService {
       ],
       { session },
     );
+    if (result.promo) {
+      await this.consumePromoCode(result.promo, userId, order._id, session);
+    }
     return order;
+  }
+
+  private async consumePromoCode(
+    promo: PromoCodeDocument,
+    userId: string,
+    orderId: Types.ObjectId,
+    session: ClientSession,
+  ) {
+    try {
+      await this.promoRedemptionModel.create(
+        [{
+          promoCodeId: promo._id,
+          userId: new Types.ObjectId(userId),
+          orderId,
+          code: promo.code,
+        }],
+        { session },
+      );
+    } catch (error: any) {
+      if (error?.code === 11000) {
+        throw new BadRequestException('Vous avez déjà utilisé ce code promotionnel');
+      }
+      throw error;
+    }
+
+    const now = new Date();
+    const usageFilter: any = {
+      _id: promo._id,
+      isActive: true,
+      $and: [
+        {
+          $or: [
+            { expirationDate: { $exists: false } },
+            { expirationDate: null },
+            { expirationDate: { $gte: now } },
+          ],
+        },
+        {
+          $or: [
+            { usageLimit: { $exists: false } },
+            { usageLimit: null },
+            { $expr: { $lt: [{ $ifNull: ['$usedCount', 0] }, '$usageLimit'] } },
+          ],
+        },
+      ],
+    };
+    const consumed = await this.promoModel.findOneAndUpdate(
+      usageFilter,
+      { $inc: { usedCount: 1 } },
+      { new: true, session },
+    );
+    if (!consumed) {
+      throw new BadRequestException('Ce code promotionnel a expiré ou sa limite d’utilisation est atteinte');
+    }
   }
 
   private buildOrderListFilter(filters?: {
@@ -134,7 +203,7 @@ export class OrdersService {
     ]);
   }
 
-  private async calculate(dto: PreviewOrderDto, session?: ClientSession) {
+  private async calculate(dto: PreviewOrderDto, session?: ClientSession, userId?: string) {
     const restaurantId = String((dto.restaurantId as any)?._id ?? dto.restaurantId);
     const menuIds = dto.items.map((i) => new Types.ObjectId(i.menuItemId));
     const menuItems = await this.menuModel
@@ -208,6 +277,18 @@ export class OrdersService {
       if (promo.expirationDate && new Date(promo.expirationDate) < new Date()) throw new BadRequestException('Promo code expired');
       if (promo.usageLimit && promo.usedCount >= promo.usageLimit) throw new BadRequestException('Promo code limit reached');
       if (promo.minOrderAmount && itemsSubtotal < promo.minOrderAmount) throw new BadRequestException('Order below minimum promo amount');
+      if (
+        promo.applicableRestaurantIds?.length
+        && !promo.applicableRestaurantIds.some((id) => String(id) === restaurantId)
+      ) {
+        throw new BadRequestException('Promo code not valid for this restaurant');
+      }
+      if (userId) {
+        const alreadyUsed = await this.promoRedemptionModel
+          .exists({ promoCodeId: promo._id, userId: new Types.ObjectId(userId) })
+          .session(session || null);
+        if (alreadyUsed) throw new BadRequestException('Vous avez déjà utilisé ce code promotionnel');
+      }
       promoDiscount = Math.min(promo.amount, payableBeforePlatformFee);
     }
     const restaurantNetBeforeDelivery = itemsSubtotal + packagingTotal - promoDiscount;
@@ -237,16 +318,21 @@ export class OrdersService {
     };
   }
 
-  async preview(dto: PreviewOrderDto) {
-    return this.calculate(dto);
+  async preview(userId: string, dto: PreviewOrderDto) {
+    return this.calculate(dto, undefined, userId);
   }
 
   async previewFromCart(userId: string, dto: CheckoutFromCartDto) {
     const previewInput = await this.buildPreviewInputFromCart(userId, dto);
-    return this.calculate(previewInput);
+    return this.calculate(previewInput, undefined, userId);
   }
 
   async create(userId: string, dto: PreviewOrderDto) {
+    // Bloque la création hors fenêtre de service configurée
+    // (PlatformSettings.ordering). Le contrôle frontend grise déjà l'UI mais
+    // on revalide ici pour empêcher tout contournement par API directe.
+    await this.platformSettings.assertOrderingOpen();
+
     const session = await this.orderModel.db.startSession();
     try {
       session.startTransaction();
@@ -262,6 +348,8 @@ export class OrdersService {
   }
 
   async createFromCart(userId: string, dto: CheckoutFromCartDto) {
+    await this.platformSettings.assertOrderingOpen();
+
     const session = await this.orderModel.db.startSession();
     try {
       session.startTransaction();
@@ -449,30 +537,27 @@ export class OrdersService {
     if ([UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role) && String(order.restaurantId) !== String(actor.restaurantId)) {
       throw new ForbiddenException('You can only update orders from your restaurant');
     }
-    if (actor.role === UserRole.DRIVER && String(order.assignedDriverId) !== actor.sub) {
-      throw new ForbiddenException('You can only update your assigned orders');
-    }
-    if (dto.assignedDriverId && ![UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role)) {
-      throw new ForbiddenException('Only admin, manager or employee can assign a driver');
+    if (![UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role)) {
+      throw new ForbiddenException('Les statuts de livraison doivent être modifiés depuis la livraison assignée');
     }
 
+    const currentStatus = order.orderStatus as OrderStatus;
+    if (!canManuallyTransitionOrderStatus(currentStatus, dto.orderStatus)) {
+      const allowed = allowedManualOrderStatuses(currentStatus);
+      throw new BadRequestException(
+        allowed.length
+          ? `Transition de commande invalide. Statut autorisé: ${allowed.join(', ')}`
+          : `Aucune transition manuelle n’est autorisée depuis le statut ${currentStatus}`,
+      );
+    }
+    if (order.paymentStatus !== PaymentStatus.PAID) {
+      throw new BadRequestException('La commande doit être payée avant de poursuivre sa préparation');
+    }
     order.orderStatus = dto.orderStatus;
-    if (dto.orderStatus === OrderStatus.OUT_FOR_DELIVERY && !order.outForDeliveryAt) order.outForDeliveryAt = new Date();
-    if (dto.assignedDriverId) order.assignedDriverId = new Types.ObjectId(dto.assignedDriverId);
     await order.save();
 
     const user = await this.userModel.findById(order.userId);
     if (user) await this.notifications.sendStatusChanged(user.email, user.phone, order.orderNumber, order.orderStatus);
-    if (
-      user
-      && dto.orderStatus === OrderStatus.OUT_FOR_DELIVERY
-      && !order.deliveryStartedWhatsappSentAt
-    ) {
-      await this.orderModel.findOneAndUpdate(
-        { _id: order._id, deliveryStartedWhatsappSentAt: { $exists: false } },
-        { $set: { deliveryStartedWhatsappSentAt: new Date() } },
-      );
-    }
     return order;
   }
 }

@@ -53,9 +53,9 @@ export class BalancesController {
     return this.service.withdrawals(req.user, query.page, query.limit);
   }
 
-  @Roles(UserRole.MANAGER, UserRole.DRIVER)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.DRIVER)
   @Post('withdrawals')
-  @ApiOperation({ summary: 'Initier un retrait MTN Mobile Money ou Orange Money Cameroun' })
+  @ApiOperation({ summary: 'Initier un retrait du solde système, restaurant ou livreur vers Mobile Money' })
   withdraw(@Req() req: any, @Body() dto: CreateWithdrawalDto) { return this.service.createWithdrawal(req.user, dto); }
 
   @Roles(UserRole.ADMIN)

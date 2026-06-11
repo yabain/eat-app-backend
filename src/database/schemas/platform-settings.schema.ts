@@ -40,17 +40,47 @@ export class PlatformPartner {
 export const PlatformPartnerSchema = SchemaFactory.createForClass(PlatformPartner);
 
 @Schema({ timestamps: true })
+export class PlatformTestimonial {
+  _id?: Types.ObjectId;
+
+  @Prop({ required: true, trim: true }) name: string;
+  @Prop({ default: '', trim: true }) profession?: string;
+  @Prop({ default: '', trim: true }) photoUrl?: string;
+  @Prop({ required: true, trim: true }) comment: string;
+  @Prop({ default: 5, min: 1, max: 5 }) rating: number;
+  @Prop({ default: true }) isActive: boolean;
+  @Prop({ default: 0 }) order: number;
+}
+
+export const PlatformTestimonialSchema = SchemaFactory.createForClass(PlatformTestimonial);
+
+@Schema({ _id: false })
+export class PlatformOrderingSettings {
+  @Prop({ default: 7, min: 0, max: 23 }) startHour: number;
+  @Prop({ default: 24, min: 0, max: 24 }) endHour: number;
+  @Prop({ default: 'Africa/Douala' }) timezone: string;
+}
+
+export const PlatformOrderingSettingsSchema = SchemaFactory.createForClass(PlatformOrderingSettings);
+
+@Schema({ timestamps: true })
 export class PlatformSettings {
   @Prop({ unique: true, default: 'public' }) key: string;
 
   @Prop({ type: PlatformContactSettingsSchema, default: {} })
   contact: PlatformContactSettings;
 
+  @Prop({ type: PlatformOrderingSettingsSchema, default: () => ({}) })
+  ordering: PlatformOrderingSettings;
+
   @Prop({ type: [PlatformSocialLinkSchema], default: [] })
   socialLinks: PlatformSocialLink[];
 
   @Prop({ type: [PlatformPartnerSchema], default: [] })
   partners: PlatformPartner[];
+
+  @Prop({ type: [PlatformTestimonialSchema], default: [] })
+  testimonials: PlatformTestimonial[];
 }
 
 export const PlatformSettingsSchema = SchemaFactory.createForClass(PlatformSettings);

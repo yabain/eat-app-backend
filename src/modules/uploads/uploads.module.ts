@@ -8,6 +8,18 @@ import { randomUUID } from 'crypto';
 import { UploadsController } from './uploads.controller';
 import { UploadStorageService } from './upload-storage.service';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
+import { UserRole } from '../../common/enums/roles.enum';
+
+function assertFolderAllowedForRole(role: string | undefined, folder = '') {
+  const profileFolders = ['', 'profiles', 'profile', 'avatars'];
+  const restaurantFolders = ['restaurants', 'restaurant-logos', 'restaurant-banners'];
+  const menuFolders = ['menus', 'menu-items', 'products', 'items'];
+  if (role === UserRole.ADMIN) return;
+  if (profileFolders.includes(folder)) return;
+  if (restaurantFolders.includes(folder) && role === UserRole.MANAGER) return;
+  if (menuFolders.includes(folder) && [UserRole.MANAGER, UserRole.EMPLOYEE].includes(role as UserRole)) return;
+  throw new Error('Upload folder not allowed for this user');
+}
 
 @Module({
   imports: [
@@ -27,6 +39,7 @@ import { resolveUploadDir } from '../../common/utils/upload-dir.util';
               if (folder && !/^[a-zA-Z0-9_-]+$/.test(folder)) {
                 return cb(new Error('Invalid upload folder'), '');
               }
+              assertFolderAllowedForRole((req as any).user?.role, folder || '');
 
               const target = resolveUploadDir(folder);
               mkdirSync(target, { recursive: true });

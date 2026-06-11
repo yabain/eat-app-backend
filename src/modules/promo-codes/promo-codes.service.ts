@@ -6,10 +6,18 @@ import { buildPaginationMeta, normalizePagination } from '../../common/paginatio
 import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search.util';
 import { CreatePromoCodeDto } from './dto/create-promo-code.dto';
 import { UpdatePromoCodeDto } from './dto/update-promo-code.dto';
+import {
+  PromoCodeRedemption,
+  PromoCodeRedemptionDocument,
+} from '../../database/schemas/promo-code-redemption.schema';
 
 @Injectable()
 export class PromoCodesService {
-  constructor(@InjectModel(PromoCode.name) private model: Model<PromoCodeDocument>) {}
+  constructor(
+    @InjectModel(PromoCode.name) private model: Model<PromoCodeDocument>,
+    @InjectModel(PromoCodeRedemption.name)
+    private redemptionModel: Model<PromoCodeRedemptionDocument>,
+  ) {}
   create(dto: CreatePromoCodeDto) {
     return this.model.create({ ...dto, code: dto.code.toUpperCase() });
   }
@@ -61,7 +69,7 @@ export class PromoCodesService {
     if (!item) throw new NotFoundException('Promo code not found');
     return item;
   }
-  async validateCode(code: string, orderAmount: number, restaurantId?: string) {
+  async validateCode(code: string, orderAmount: number, restaurantId?: string, userId?: string) {
     const promo = await this.model.findOne({ code: code.toUpperCase(), isActive: true });
     if (!promo) throw new NotFoundException('Promo code not found');
     if (promo.expirationDate && new Date(promo.expirationDate) < new Date()) throw new BadRequestException('Promo code expired');
@@ -71,9 +79,12 @@ export class PromoCodesService {
       const allowed = promo.applicableRestaurantIds.map((id:any)=>id.toString()).includes(restaurantId);
       if (!allowed) throw new BadRequestException('Promo code not valid for this restaurant');
     }
+    if (userId) {
+      const alreadyUsed = await this.redemptionModel.exists({ promoCodeId: promo._id, userId });
+      if (alreadyUsed) throw new BadRequestException('Vous avez déjà utilisé ce code promotionnel');
+    }
     return promo;
   }
-  consume(promoId: string) { return this.model.findByIdAndUpdate(promoId, { $inc: { usedCount: 1 } }, { new: true }); }
   async update(id: string, dto: UpdatePromoCodeDto) {
     const item = await this.model.findByIdAndUpdate(id, dto, { new: true });
     if (!item) throw new NotFoundException('Promo code not found');

@@ -149,6 +149,16 @@ export class BalancesService {
     throw new ForbiddenException('No balance available for this role');
   }
 
+  private scopeForWithdrawal(withdrawal: WithdrawalRequestDocument) {
+    if (withdrawal.ownerType === 'restaurant') {
+      return { ownerType: 'restaurant', restaurantId: withdrawal.restaurantId };
+    }
+    if (withdrawal.ownerType === 'user') {
+      return { ownerType: 'user', userId: withdrawal.userId };
+    }
+    return { ownerType: 'system' };
+  }
+
   /**
    * Recalcule chaque `Balance` à partir de la somme de ses `BalanceTransaction`.
    * Idempotent : sûr de l'appeler à tout moment, manuellement ou via le cron.
@@ -596,86 +606,140 @@ export class BalancesService {
     this.assertAdmin(actor);
     const amount = this.normalizeAmount(dto);
     const driver = await this.findDriverOrFail(driverId);
-
-    const mainBalance = (await this.summary(actor)).balance;
-    if (amount > mainBalance) throw new BadRequestException('Insufficient main balance');
-
     const createdBy = this.oid(actor.sub);
-    const [systemDebit, driverCredit] = await Promise.all([
-      this.recordBalanceTransaction({ ownerType: 'system', amount: -amount, type: 'debit', reason: 'driver_funding', userId: driver._id, createdBy, note: dto.note, currency: 'XAF' }),
-      this.recordBalanceTransaction({ ownerType: 'user', userId: driver._id, amount, type: 'credit', reason: 'admin_driver_credit', createdBy, note: dto.note, currency: 'XAF' }),
-    ]);
+    const session = await this.connection.startSession();
+    try {
+      let result: any;
+      await session.withTransaction(async () => {
+        const mainBalance = await this.balanceFor({ ownerType: 'system' }, session);
+        if (amount > mainBalance) throw new BadRequestException('Insufficient main balance');
 
-    return { systemDebit, driverCredit, driverBalance: await this.balanceFor({ ownerType: 'user', userId: driver._id }) };
+        const systemDebit = await this.recordBalanceTransaction(
+          { ownerType: 'system', amount: -amount, type: 'debit', reason: 'driver_funding', userId: driver._id, createdBy, note: dto.note, currency: 'XAF' },
+          session,
+        );
+        const driverCredit = await this.recordBalanceTransaction(
+          { ownerType: 'user', userId: driver._id, amount, type: 'credit', reason: 'admin_driver_credit', createdBy, note: dto.note, currency: 'XAF' },
+          session,
+        );
+        result = {
+          systemDebit,
+          driverCredit,
+          driverBalance: await this.balanceFor({ ownerType: 'user', userId: driver._id }, session),
+          systemBalance: await this.balanceFor({ ownerType: 'system' }, session),
+        };
+      });
+      return result;
+    } finally {
+      await session.endSession();
+    }
   }
 
   async debitDriver(driverId: string, dto: AdminBalanceOperationDto, actor: any) {
     this.assertAdmin(actor);
     const amount = this.normalizeAmount(dto);
     const driver = await this.findDriverOrFail(driverId);
-    const driverBalance = await this.balanceFor({ ownerType: 'user', userId: driver._id });
-    if (amount > driverBalance) throw new BadRequestException('Insufficient driver balance');
-
     const createdBy = this.oid(actor.sub);
-    const transaction = await this.recordBalanceTransaction({
-      ownerType: 'user',
-      userId: driver._id,
-      amount: -amount,
-      type: 'debit',
-      reason: 'admin_driver_debit',
-      createdBy,
-      note: dto.note,
-      currency: 'XAF',
-    });
+    const session = await this.connection.startSession();
+    try {
+      let result: any;
+      await session.withTransaction(async () => {
+        const driverBalance = await this.balanceFor({ ownerType: 'user', userId: driver._id }, session);
+        if (amount > driverBalance) throw new BadRequestException('Insufficient driver balance');
 
-    return { transaction, driverBalance: await this.balanceFor({ ownerType: 'user', userId: driver._id }) };
+        const transaction = await this.recordBalanceTransaction({
+          ownerType: 'user',
+          userId: driver._id,
+          amount: -amount,
+          type: 'debit',
+          reason: 'admin_driver_debit',
+          createdBy,
+          note: dto.note,
+          currency: 'XAF',
+        }, session);
+        result = {
+          transaction,
+          driverBalance: await this.balanceFor({ ownerType: 'user', userId: driver._id }, session),
+        };
+      });
+      return result;
+    } finally {
+      await session.endSession();
+    }
   }
 
   async creditRestaurant(restaurantId: string, dto: AdminBalanceOperationDto, actor: any) {
     this.assertAdmin(actor);
     const amount = this.normalizeAmount(dto);
     const restaurant = await this.findRestaurantOrFail(restaurantId);
-    const mainBalance = (await this.summary(actor)).balance;
-    if (amount > mainBalance) throw new BadRequestException('Insufficient main balance');
-
     const createdBy = this.oid(actor.sub);
-    const [systemDebit, restaurantCredit] = await Promise.all([
-      this.recordBalanceTransaction({ ownerType: 'system', amount: -amount, type: 'debit', reason: 'restaurant_funding', restaurantId: restaurant._id, createdBy, note: dto.note, currency: 'XAF' }),
-      this.recordBalanceTransaction({ ownerType: 'restaurant', restaurantId: restaurant._id, amount, type: 'credit', reason: 'admin_restaurant_credit', createdBy, note: dto.note, currency: 'XAF' }),
-    ]);
+    const session = await this.connection.startSession();
+    try {
+      let result: any;
+      await session.withTransaction(async () => {
+        const mainBalance = await this.balanceFor({ ownerType: 'system' }, session);
+        if (amount > mainBalance) throw new BadRequestException('Insufficient main balance');
 
-    return { systemDebit, restaurantCredit, restaurantBalance: await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id }) };
+        const systemDebit = await this.recordBalanceTransaction(
+          { ownerType: 'system', amount: -amount, type: 'debit', reason: 'restaurant_funding', restaurantId: restaurant._id, createdBy, note: dto.note, currency: 'XAF' },
+          session,
+        );
+        const restaurantCredit = await this.recordBalanceTransaction(
+          { ownerType: 'restaurant', restaurantId: restaurant._id, amount, type: 'credit', reason: 'admin_restaurant_credit', createdBy, note: dto.note, currency: 'XAF' },
+          session,
+        );
+        result = {
+          systemDebit,
+          restaurantCredit,
+          restaurantBalance: await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id }, session),
+          systemBalance: await this.balanceFor({ ownerType: 'system' }, session),
+        };
+      });
+      return result;
+    } finally {
+      await session.endSession();
+    }
   }
 
   async debitRestaurant(restaurantId: string, dto: AdminBalanceOperationDto, actor: any) {
     this.assertAdmin(actor);
     const amount = this.normalizeAmount(dto);
     const restaurant = await this.findRestaurantOrFail(restaurantId);
-    const restaurantBalance = await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id });
-    if (amount > restaurantBalance) throw new BadRequestException('Insufficient restaurant balance');
-
     const createdBy = this.oid(actor.sub);
-    const transaction = await this.recordBalanceTransaction({
-      ownerType: 'restaurant',
-      restaurantId: restaurant._id,
-      amount: -amount,
-      type: 'debit',
-      reason: 'admin_restaurant_debit',
-      createdBy,
-      note: dto.note,
-      currency: 'XAF',
-    });
+    const session = await this.connection.startSession();
+    try {
+      let result: any;
+      await session.withTransaction(async () => {
+        const restaurantBalance = await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id }, session);
+        if (amount > restaurantBalance) throw new BadRequestException('Insufficient restaurant balance');
 
-    return { transaction, restaurantBalance: await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id }) };
+        const transaction = await this.recordBalanceTransaction({
+          ownerType: 'restaurant',
+          restaurantId: restaurant._id,
+          amount: -amount,
+          type: 'debit',
+          reason: 'admin_restaurant_debit',
+          createdBy,
+          note: dto.note,
+          currency: 'XAF',
+        }, session);
+        result = {
+          transaction,
+          restaurantBalance: await this.balanceFor({ ownerType: 'restaurant', restaurantId: restaurant._id }, session),
+        };
+      });
+      return result;
+    } finally {
+      await session.endSession();
+    }
   }
 
   async createWithdrawal(actor: any, dto: CreateWithdrawalDto) {
-    if (![UserRole.MANAGER, UserRole.DRIVER].includes(actor.role)) {
-      throw new ForbiddenException('Only managers and drivers can request withdrawals');
+    if (![UserRole.ADMIN, UserRole.MANAGER, UserRole.DRIVER].includes(actor.role)) {
+      throw new ForbiddenException('Only admins, managers and drivers can request withdrawals');
     }
     const scope = this.scopeForActor(actor);
-    if (scope.ownerType === 'system') throw new BadRequestException('System balance withdrawals are not available here');
-    const amount = Number(dto.amount || 0);
+    const amount = Math.floor(Number(dto.amount || 0));
     if (amount <= 0) throw new BadRequestException('Amount must be positive');
     const accountBankCode = detectCameroonMobileMoneyOperator(dto.phone);
     if (!accountBankCode) {
@@ -780,9 +844,7 @@ export class BalancesService {
           Object.assign(withdrawal, providerFields || {});
           if (note) withdrawal.note = note;
           await withdrawal.save({ session });
-          const scope = withdrawal.ownerType === 'restaurant'
-            ? { ownerType: 'restaurant', restaurantId: withdrawal.restaurantId }
-            : { ownerType: 'user', userId: withdrawal.userId };
+          const scope = this.scopeForWithdrawal(withdrawal);
           result = { withdrawal, refunded: false, balance: await this.balanceFor(scope, session) };
           return;
         }
@@ -819,9 +881,7 @@ export class BalancesService {
           refunded = Boolean(refund.upsertedCount);
         }
 
-        const scope = withdrawal.ownerType === 'restaurant'
-          ? { ownerType: 'restaurant', restaurantId: withdrawal.restaurantId }
-          : { ownerType: 'user', userId: withdrawal.userId };
+        const scope = this.scopeForWithdrawal(withdrawal);
         result = {
           withdrawal,
           refunded,

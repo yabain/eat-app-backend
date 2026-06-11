@@ -16,6 +16,11 @@ import { AssignDeliveryDto } from './dto/assign-delivery.dto';
 import { UpdateDeliveryStatusDto } from './dto/update-delivery-status.dto';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { DispatchSettings, DispatchSettingsDocument } from '../../database/schemas/dispatch-settings.schema';
+import { DeliveryStatus } from '../../common/enums/delivery-status.enum';
+import {
+  allowedDeliveryStatuses,
+  canTransitionDeliveryStatus,
+} from '../../common/utils/delivery-status-transition.util';
 
 @Injectable()
 export class DeliveriesService {
@@ -337,41 +342,76 @@ export class DeliveriesService {
   }
 
   async updateStatus(id: string, dto: UpdateDeliveryStatusDto, actor: any) {
-    const delivery = await this.deliveryModel.findById(id);
-    if (!delivery) throw new NotFoundException('Delivery not found');
+    const session = await this.connection.startSession();
+    let delivery: DeliveryDocument | null = null;
+    let order: OrderDocument | null = null;
+    let notifyStarted = false;
+    let notifyCompleted = false;
 
-    if (actor.role === UserRole.DRIVER && String(delivery.driverId) !== String(actor.sub)) {
-      throw new ForbiddenException('You can only update your own deliveries');
+    try {
+      await session.withTransaction(async () => {
+        delivery = await this.deliveryModel.findById(id).session(session);
+        if (!delivery) throw new NotFoundException('Delivery not found');
+
+        if (actor.role === UserRole.DRIVER && String(delivery.driverId) !== String(actor.sub)) {
+          throw new ForbiddenException('You can only update your own deliveries');
+        }
+
+        order = await this.orderModel.findById(delivery.orderId).session(session);
+        if (!order) throw new NotFoundException('Order not found');
+        if (actor.role === UserRole.MANAGER && String(order.restaurantId) !== String(actor.restaurantId)) {
+          throw new ForbiddenException('You can only update deliveries for your restaurant');
+        }
+
+        const previousStatus = delivery.status as DeliveryStatus;
+        const nextStatus = dto.status as DeliveryStatus;
+        if (!canTransitionDeliveryStatus(previousStatus, nextStatus)) {
+          const allowed = allowedDeliveryStatuses(previousStatus);
+          throw new BadRequestException(
+            allowed.length
+              ? `Transition de livraison invalide. Statuts autorisés: ${allowed.join(', ')}`
+              : `La livraison au statut ${previousStatus} est clôturée`,
+          );
+        }
+
+        delivery.status = nextStatus;
+        if (nextStatus === DeliveryStatus.OUT_FOR_DELIVERY && !delivery.outForDeliveryAt) {
+          delivery.outForDeliveryAt = new Date();
+        }
+        if (nextStatus === DeliveryStatus.DELIVERED) delivery.deliveredAt = new Date();
+        await delivery.save({ session });
+
+        if (nextStatus === DeliveryStatus.FAILED) {
+          order.orderStatus = OrderStatus.READY;
+          order.assignedDriverId = null as any;
+        } else {
+          const nextOrderStatus = orderStatusForDeliveryStatus(nextStatus);
+          if (nextOrderStatus) order.orderStatus = nextOrderStatus;
+          if (nextStatus === DeliveryStatus.OUT_FOR_DELIVERY && !order.outForDeliveryAt) {
+            order.outForDeliveryAt = new Date();
+          }
+        }
+        await order.save({ session });
+
+        if ([DeliveryStatus.DELIVERED, DeliveryStatus.FAILED].includes(nextStatus)) {
+          await this.userModel.updateOne(
+            { _id: delivery.driverId, role: UserRole.DRIVER },
+            { $set: { isDriverAvailable: true } },
+            { session },
+          );
+        }
+
+        notifyStarted = nextStatus === DeliveryStatus.OUT_FOR_DELIVERY;
+        notifyCompleted = nextStatus === DeliveryStatus.DELIVERED;
+      });
+    } finally {
+      await session.endSession();
     }
 
-    const order = await this.orderModel.findById(delivery.orderId);
-    if (!order) throw new NotFoundException('Order not found');
-    if (actor.role === UserRole.MANAGER && String(order.restaurantId) !== String(actor.restaurantId)) {
-      throw new ForbiddenException('You can only update deliveries for your restaurant');
-    }
-
-    const previousStatus = delivery.status;
-    delivery.status = dto.status;
-    if (dto.status === 'out_for_delivery' && !delivery.outForDeliveryAt) delivery.outForDeliveryAt = new Date();
-    if (dto.status === 'delivered') delivery.deliveredAt = new Date();
-    await delivery.save();
-
-    const nextOrderStatus = orderStatusForDeliveryStatus(dto.status);
-    if (nextOrderStatus) {
-      order.orderStatus = nextOrderStatus;
-      if (dto.status === 'out_for_delivery' && !order.outForDeliveryAt) order.outForDeliveryAt = new Date();
-      await order.save();
-    }
-    if (dto.status === 'out_for_delivery' && previousStatus !== 'out_for_delivery') {
-      await this.notifyDeliveryStarted(order);
-    }
-    if (dto.status === 'delivered') {
-      await this.userModel.updateOne(
-        { _id: delivery.driverId, role: UserRole.DRIVER },
-        { $set: { isDriverAvailable: true } },
-      );
+    if (!delivery || !order) throw new NotFoundException('Delivery not found');
+    if (notifyStarted) await this.notifyDeliveryStarted(order);
+    if (notifyCompleted) {
       this.notifyDelivered(order);
-
       try {
         await this.paymentsService.ensurePaidOrderBalances(order, delivery.driverId);
       } catch (error: any) {
@@ -380,12 +420,6 @@ export class DeliveriesService {
           error?.stack,
         );
       }
-    }
-    if (dto.status === 'failed' && previousStatus !== 'failed') {
-      await this.userModel.updateOne(
-        { _id: delivery.driverId, role: UserRole.DRIVER },
-        { $set: { isDriverAvailable: true } },
-      );
     }
     return delivery;
   }

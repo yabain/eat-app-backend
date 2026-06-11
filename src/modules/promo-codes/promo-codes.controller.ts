@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { PromoCodesService } from './promo-codes.service';
 import { CreatePromoCodeDto } from './dto/create-promo-code.dto';
@@ -25,8 +25,8 @@ export class PromoCodesController {
   @ApiOperation({ summary: 'Valider un code promo' })
   @ApiBody({ type: ValidatePromoCodeDto })
   @ApiOkResponse({ description: 'Résultat validation promo', type: PromoCodeValidationResponseDto })
-  validate(@Body() body: ValidatePromoCodeDto) {
-    return this.service.validateCode(body.code, body.orderAmount, body.restaurantId);
+  validate(@Req() req: any, @Body() body: ValidatePromoCodeDto) {
+    return this.service.validateCode(body.code, body.orderAmount, body.restaurantId, req.user?.sub);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

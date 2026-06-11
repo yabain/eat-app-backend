@@ -56,12 +56,35 @@ export class PlatformSocialLinkDto {
   order?: number;
 }
 
+export class PlatformOrderingSettingsDto {
+  @ApiPropertyOptional({ example: 7, minimum: 0, maximum: 23, description: 'Heure d\'ouverture des commandes (0-23, fuseau du champ timezone).' })
+  @IsOptional()
+  @IsNumber()
+  startHour?: number;
+
+  @ApiPropertyOptional({ example: 24, minimum: 0, maximum: 24, description: 'Heure de fermeture des commandes (0-24, où 24 = minuit fin de journée).' })
+  @IsOptional()
+  @IsNumber()
+  endHour?: number;
+
+  @ApiPropertyOptional({ example: 'Africa/Douala' })
+  @IsOptional()
+  @IsString()
+  timezone?: string;
+}
+
 export class UpdatePlatformSettingsDto {
   @ApiPropertyOptional({ type: PlatformContactSettingsDto })
   @IsOptional()
   @ValidateNested()
   @Type(() => PlatformContactSettingsDto)
   contact?: PlatformContactSettingsDto;
+
+  @ApiPropertyOptional({ type: PlatformOrderingSettingsDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PlatformOrderingSettingsDto)
+  ordering?: PlatformOrderingSettingsDto;
 
   @ApiPropertyOptional({ type: [PlatformSocialLinkDto] })
   @IsOptional()
@@ -111,6 +134,78 @@ export class UpdatePartnerDto {
   @IsOptional()
   @IsString()
   websiteUrl?: string;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+
+  @ApiPropertyOptional({ example: 10 })
+  @IsOptional()
+  @IsNumber()
+  order?: number;
+}
+
+export class CreateTestimonialDto {
+  @ApiProperty({ example: 'Mirana Marci' })
+  @IsString()
+  name: string;
+
+  @ApiPropertyOptional({ example: '3D Designer' })
+  @IsOptional()
+  @IsString()
+  profession?: string;
+
+  @ApiPropertyOptional({ example: '/uploads/testimonials/photo.png' })
+  @IsOptional()
+  @IsString()
+  photoUrl?: string;
+
+  @ApiProperty({ example: 'Commande livrée en 25 minutes, plat encore chaud et délicieux.' })
+  @IsString()
+  comment: string;
+
+  @ApiPropertyOptional({ example: 5, minimum: 1, maximum: 5 })
+  @IsOptional()
+  @IsNumber()
+  rating?: number;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+
+  @ApiPropertyOptional({ example: 10 })
+  @IsOptional()
+  @IsNumber()
+  order?: number;
+}
+
+export class UpdateTestimonialDto {
+  @ApiPropertyOptional({ example: 'Mirana Marci' })
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @ApiPropertyOptional({ example: '3D Designer' })
+  @IsOptional()
+  @IsString()
+  profession?: string;
+
+  @ApiPropertyOptional({ example: '/uploads/testimonials/photo.png' })
+  @IsOptional()
+  @IsString()
+  photoUrl?: string;
+
+  @ApiPropertyOptional({ example: 'Commande livrée en 25 minutes, plat encore chaud et délicieux.' })
+  @IsOptional()
+  @IsString()
+  comment?: string;
+
+  @ApiPropertyOptional({ example: 5, minimum: 1, maximum: 5 })
+  @IsOptional()
+  @IsNumber()
+  rating?: number;
 
   @ApiPropertyOptional({ example: true })
   @IsOptional()

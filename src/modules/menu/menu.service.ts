@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, SortOrder, Types } from 'mongoose';
 import { UserRole } from '../../common/enums/roles.enum';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
+import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search.util';
 import { CreateMenuItemDto } from './dto/create-menu-item.dto';
@@ -14,6 +15,7 @@ import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils
 export class MenuService {
   constructor(
     @InjectModel(MenuItem.name) private model: Model<MenuItemDocument>,
+    @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
     private readonly inventory: MenuInventoryService,
   ) {}
 
@@ -29,6 +31,8 @@ export class MenuService {
     limit?: number,
     filters?: { q?: string; categoryId?: string },
   ) {
+    const restaurant = await this.restaurantModel.exists({ _id: restaurantId, status: 'active' });
+    if (!restaurant) throw new NotFoundException('Restaurant not found');
     const pagination = normalizePagination(page, limit);
     const qRegex = buildContainsRegex(filters?.q);
     const filter: any = {
@@ -116,6 +120,7 @@ export class MenuService {
       .populate('restaurantId')
       .populate('categoryId');
     if (!item) throw new NotFoundException('Menu item not found');
+    if ((item.restaurantId as any)?.status !== 'active') throw new NotFoundException('Menu item not found');
     return item;
   }
 

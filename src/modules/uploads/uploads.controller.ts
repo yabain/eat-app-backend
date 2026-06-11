@@ -1,6 +1,7 @@
-import { Controller, Param, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Controller, Param, Post, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOkResponse, ApiParam, ApiTags } from '@nestjs/swagger';
 import { UploadStorageService } from './upload-storage.service';
 import { UploadResponseDto } from '../../common/dto/response.dto';
@@ -11,7 +12,7 @@ import { UploadResponseDto } from '../../common/dto/response.dto';
 export class UploadsController {
   constructor(private readonly storage: UploadStorageService) {}
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Post()
   @UseInterceptors(FileInterceptor('file'))
   @ApiConsumes('multipart/form-data')
@@ -25,12 +26,13 @@ export class UploadsController {
     },
   })
   @ApiOkResponse({ description: 'Fichier uploadé', type: UploadResponseDto })
-  uploadRoot(@UploadedFile() file: Express.Multer.File) {
+  uploadRoot(@Req() req: any, @UploadedFile() file: Express.Multer.File) {
+    this.storage.assertUploadAllowed(req.user);
     const path = this.storage.publicPath(file.filename);
     return { path, filename: file.filename };
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Post(':folder')
   @UseInterceptors(FileInterceptor('file'))
   @ApiConsumes('multipart/form-data')
@@ -45,7 +47,8 @@ export class UploadsController {
     },
   })
   @ApiOkResponse({ description: 'Fichier uploadé dans un dossier', type: UploadResponseDto })
-  uploadInFolder(@Param('folder') folder: string, @UploadedFile() file: Express.Multer.File) {
+  uploadInFolder(@Req() req: any, @Param('folder') folder: string, @UploadedFile() file: Express.Multer.File) {
+    this.storage.assertUploadAllowed(req.user, folder);
     const path = this.storage.publicPath(file.filename, folder);
     return { path, filename: file.filename };
   }

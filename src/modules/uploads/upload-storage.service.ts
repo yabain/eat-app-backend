@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { mkdirSync } from 'fs';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
+import { UserRole } from '../../common/enums/roles.enum';
 
 @Injectable()
 export class UploadStorageService {
@@ -21,6 +22,24 @@ export class UploadStorageService {
     if (driver !== 'local') {
       throw new BadRequestException(`Unsupported storage driver: ${driver}`);
     }
+  }
+
+  assertUploadAllowed(actor: any, rawFolder?: string | string[]) {
+    const folder = this.parseFolder(rawFolder);
+    const role = actor?.role;
+    const profileFolders = ['', 'profiles', 'profile', 'avatars'];
+    const restaurantFolders = ['restaurants', 'restaurant-logos', 'restaurant-banners'];
+    const menuFolders = ['menus', 'menu-items', 'products', 'items'];
+
+    if (role === UserRole.ADMIN) return;
+
+    if (profileFolders.includes(folder)) return;
+
+    if (restaurantFolders.includes(folder) && role === UserRole.MANAGER) return;
+
+    if (menuFolders.includes(folder) && [UserRole.MANAGER, UserRole.EMPLOYEE].includes(role)) return;
+
+    throw new BadRequestException('Upload folder not allowed for this user');
   }
 
   resolveDestination(rawFolder?: string | string[]) {

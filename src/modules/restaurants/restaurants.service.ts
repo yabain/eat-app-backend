@@ -135,12 +135,22 @@ export class RestaurantsService {
     };
   }
 
-  findOne(id: string) {
-    return this.populateManager(this.model.findById(id));
+  async findOne(id: string) {
+    const restaurant = await this.populateManager(this.model.findOne({ _id: id, status: 'active' }));
+    if (!restaurant) throw new NotFoundException('Restaurant not found');
+    return restaurant;
   }
 
-  findBySlug(slug: string) {
-    return this.populateManager(this.model.findOne({ slug, status: 'active' }));
+  async findOneForAdmin(id: string) {
+    const restaurant = await this.populateManager(this.model.findById(id));
+    if (!restaurant) throw new NotFoundException('Restaurant not found');
+    return restaurant;
+  }
+
+  async findBySlug(slug: string) {
+    const restaurant = await this.populateManager(this.model.findOne({ slug, status: 'active' }));
+    if (!restaurant) throw new NotFoundException('Restaurant not found');
+    return restaurant;
   }
 
   async findForStaff(actor: any) {
@@ -358,13 +368,17 @@ export class RestaurantsService {
     return { removed: true, userId: String(user._id) };
   }
 
-  async updateMedia(id: string, dto: UpdateRestaurantMediaDto) {
+  async updateMedia(id: string, dto: UpdateRestaurantMediaDto, actor?: any) {
     const existing = await this.model.findById(id);
     const updatePayload: any = { ...dto };
     if (dto.bannerImage && !dto.coverImage) updatePayload.coverImage = dto.bannerImage;
     if (!existing) {
       await this.deleteNewMedia(updatePayload);
       throw new NotFoundException('Restaurant not found');
+    }
+    if (actor?.role === UserRole.MANAGER && String(actor.restaurantId || '') !== id) {
+      await this.deleteNewMedia(updatePayload);
+      throw new ForbiddenException('You can only edit media from your restaurant');
     }
     const item = await this.model.findByIdAndUpdate(id, updatePayload, { new: true });
     if (!item) throw new NotFoundException('Restaurant not found');

@@ -62,7 +62,7 @@ export class RestaurantsController {
   @ApiOkResponse({ description: 'Restaurant du compte connecté', type: RestaurantResponseDto })
   myRestaurant(@Req() req: any) { return this.service.findForStaff(req.user); }
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Get()
   @ApiBearerAuth('bearer')
   @ApiOperation({ summary: 'Lister tous les restaurants (admin)' })
@@ -83,6 +83,14 @@ export class RestaurantsController {
   ) {
     return this.service.findAll(query.page, query.limit, { q, status, managerId });
   }
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Get('admin/:id')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Détail restaurant par id, y compris inactif (admin)' })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiOkResponse({ description: 'Restaurant trouvé', type: RestaurantResponseDto })
+  findOneForAdmin(@Param('id') id: string) { return this.service.findOneForAdmin(id); }
   @Get(':id')
   @ApiOperation({ summary: 'Détail restaurant par id' })
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
@@ -132,9 +140,9 @@ export class RestaurantsController {
     description: 'Médias restaurant mis à jour',
     type: RestaurantMediaResponseDto,
   })
-  updateMedia(@Param('id') id: string, @Body() dto: UpdateRestaurantMediaDto) { return this.service.updateMedia(id, dto); }
+  updateMedia(@Param('id') id: string, @Body() dto: UpdateRestaurantMediaDto, @Req() req: any) { return this.service.updateMedia(id, dto, req.user); }
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Patch(':id/logo/upload')
   @UseInterceptors(FileInterceptor('file', {
     storage: restaurantUploadStorage,
@@ -145,7 +153,7 @@ export class RestaurantsController {
     limits: { fileSize: 5 * 1024 * 1024 },
   }))
   @ApiBearerAuth('bearer')
-  @ApiOperation({ summary: 'Uploader et enregistrer le logo du restaurant (admin)' })
+  @ApiOperation({ summary: 'Uploader et enregistrer le logo du restaurant (admin ou manager du restaurant)' })
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -158,14 +166,14 @@ export class RestaurantsController {
     },
   })
   @ApiOkResponse({ description: 'Logo restaurant mis à jour', type: RestaurantMediaResponseDto })
-  uploadLogo(@Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+  uploadLogo(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Req() req: any) {
     const relativePath = `/uploads/restaurants/${file.filename}`;
     const appUrl = (process.env.APP_URL || '').replace(/\/+$/, '');
     const logo = appUrl ? `${appUrl}${relativePath}` : relativePath;
-    return this.service.updateMedia(id, { logo });
+    return this.service.updateMedia(id, { logo }, req.user);
   }
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Patch(':id/banner/upload')
   @UseInterceptors(FileInterceptor('file', {
     storage: restaurantUploadStorage,
@@ -176,7 +184,7 @@ export class RestaurantsController {
     limits: { fileSize: 5 * 1024 * 1024 },
   }))
   @ApiBearerAuth('bearer')
-  @ApiOperation({ summary: 'Uploader et enregistrer la bannière du restaurant (admin)' })
+  @ApiOperation({ summary: 'Uploader et enregistrer la bannière du restaurant (admin ou manager du restaurant)' })
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -189,11 +197,11 @@ export class RestaurantsController {
     },
   })
   @ApiOkResponse({ description: 'Bannière restaurant mise à jour', type: RestaurantMediaResponseDto })
-  uploadBanner(@Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+  uploadBanner(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Req() req: any) {
     const relativePath = `/uploads/restaurants/${file.filename}`;
     const appUrl = (process.env.APP_URL || '').replace(/\/+$/, '');
     const bannerImage = appUrl ? `${appUrl}${relativePath}` : relativePath;
-    return this.service.updateMedia(id, { bannerImage });
+    return this.service.updateMedia(id, { bannerImage }, req.user);
   }
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
