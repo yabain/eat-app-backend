@@ -73,18 +73,32 @@ export class AuthService {
   }
 
   async register(dto: RegisterDto) {
+    // Double sécurité côté service : on vérifie que l'utilisateur a bien
+    // accepté les CGU (la DTO le valide déjà, mais on évite tout contournement
+    // par appel direct au service).
+    if (dto.acceptTerms !== true) {
+      throw new BadRequestException(
+        'Vous devez accepter les conditions générales d’utilisation pour créer un compte.',
+      );
+    }
+
     const exists = await this.userModel.findOne({ email: dto.email.toLowerCase() });
     if (exists) throw new BadRequestException('Email already exists');
     await this.assertPhoneAvailable(dto.phone);
     const passwordHash = await bcrypt.hash(dto.password, 10);
+    const termsAcceptedAt = new Date();
+    const termsAcceptedVersion = process.env.TERMS_VERSION || 'v1.0';
+    const { acceptTerms: _accept, ...userPayload } = dto;
     const user = await this.withPhoneConflictHandling(() =>
       this.userModel.create({
-        ...dto,
+        ...userPayload,
         email: dto.email.toLowerCase(),
         passwordHash,
         role: UserRole.CLIENT,
         authProvider: 'local',
         isProfileComplete: true,
+        termsAcceptedAt,
+        termsAcceptedVersion,
       }),
     );
     this.notifyAccountCreated(user);
@@ -209,7 +223,9 @@ export class AuthService {
     }
 
     const names = this.extractGoogleNames(googleUser);
-    const userPayload = {
+    // Acceptation implicite des CGU via la mention affichée sur la page
+    // d'inscription "En continuant avec Google, vous acceptez nos CGU…".
+    const userPayload: Record<string, any> = {
       email,
       googleId: googleUser.sub,
       firstName: names.firstName,
@@ -218,8 +234,10 @@ export class AuthService {
       role: UserRole.CLIENT,
       authProvider: 'google',
       isProfileComplete: false,
+      termsAcceptedAt: new Date(),
+      termsAcceptedVersion: process.env.TERMS_VERSION || 'v1.0',
     };
-    userPayload.isProfileComplete = this.getMissingProfileFields(userPayload).length === 0;
+    userPayload.isProfileComplete = this.getMissingProfileFields(userPayload as any).length === 0;
 
     const created = await this.userModel.create(userPayload);
     this.notifyAccountCreated(created);
