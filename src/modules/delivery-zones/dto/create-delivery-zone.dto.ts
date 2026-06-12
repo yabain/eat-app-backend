@@ -15,4 +15,9 @@ export class CreateDeliveryZoneDto {
   @IsNumber() time: number;
   @ApiPropertyOptional({ example: true })
   @IsOptional() @IsBoolean() isActive?: boolean;
+  @ApiPropertyOptional({
+    example: 'Z01',
+    description: 'Identifiant logique pour regrouper les commandes vers un même livreur lors du dispatch automatique.',
+  })
+  @IsOptional() @IsString() zoneNumber?: string;
 }

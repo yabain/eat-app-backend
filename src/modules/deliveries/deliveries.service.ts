@@ -5,6 +5,7 @@ import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.sche
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
+import { DeliveryZone, DeliveryZoneDocument } from '../../database/schemas/delivery-zone.schema';
 import { PaymentsService } from '../payments/payments.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
@@ -31,6 +32,7 @@ export class DeliveriesService {
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
+    @InjectModel(DeliveryZone.name) private deliveryZoneModel: Model<DeliveryZoneDocument>,
     @InjectModel(DispatchSettings.name) private dispatchSettingsModel: Model<DispatchSettingsDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly paymentsService: PaymentsService,
@@ -175,13 +177,21 @@ export class DeliveriesService {
     };
   }
 
+  /** Capacité maximale de commandes actives simultanément par livreur. */
+  private static readonly MAX_ACTIVE_DELIVERIES_PER_DRIVER = 5;
+
   @Cron('*/3 * * * *')
   async runAutomaticDispatch() {
     const settings = await this.getOrCreateAutoDispatchSettings();
     if (!settings.enabled) return;
 
     let assignedCount = 0;
+    let assignedGroups = 0;
+
     try {
+      // 1) Pool des livreurs candidats (actifs, on duty) avec leur capacité restante.
+      //    On considère "actives" toutes les livraisons dont le statut implique
+      //    qu'elles ne sont pas encore livrées ni échouées.
       const drivers = await this.userModel
         .find({
           role: UserRole.DRIVER,
@@ -190,38 +200,120 @@ export class DeliveriesService {
         })
         .select('_id')
         .lean();
+      if (!drivers.length) return;
 
-      const shuffledDrivers = this.shuffle(drivers);
-      if (shuffledDrivers.length) {
-        const orders = await this.orderModel
-          .find({
-            orderStatus: OrderStatus.READY,
-            $or: [
-              { assignedDriverId: null },
-              { assignedDriverId: { $exists: false } },
-            ],
-          })
-          .sort({ createdAt: 1 })
-          .limit(shuffledDrivers.length)
-          .select('_id')
-          .lean();
+      const driverIds = drivers.map((d) => d._id);
+      const activeCounts = await this.deliveryModel.aggregate([
+        {
+          $match: {
+            driverId: { $in: driverIds },
+            status: { $in: [DeliveryStatus.ASSIGNED, DeliveryStatus.PICKED_UP, DeliveryStatus.OUT_FOR_DELIVERY] },
+          },
+        },
+        { $group: { _id: '$driverId', count: { $sum: 1 } } },
+      ]);
+      const capacities = new Map<string, number>();
+      for (const driver of drivers) {
+        capacities.set(String(driver._id), DeliveriesService.MAX_ACTIVE_DELIVERIES_PER_DRIVER);
+      }
+      for (const row of activeCounts) {
+        const driverIdKey = String(row._id);
+        const remaining = Math.max(
+          0,
+          DeliveriesService.MAX_ACTIVE_DELIVERIES_PER_DRIVER - Number(row.count || 0),
+        );
+        capacities.set(driverIdKey, remaining);
+      }
 
-        for (let index = 0; index < orders.length; index += 1) {
+      // 2) Charge la table des zones (city|district -> zoneNumber).
+      const zones = await this.deliveryZoneModel
+        .find({ isActive: { $ne: false } })
+        .select({ city: 1, district: 1, zoneNumber: 1 })
+        .lean();
+      const zoneByLocation = new Map<string, string>();
+      for (const zone of zones) {
+        if (!zone.zoneNumber) continue;
+        const key = this.zoneKey(zone.city, zone.district);
+        zoneByLocation.set(key, String(zone.zoneNumber).trim());
+      }
+
+      // 3) Charge les commandes prêtes sans livreur affecté.
+      const orders = await this.orderModel
+        .find({
+          orderStatus: OrderStatus.READY,
+          $or: [
+            { assignedDriverId: null },
+            { assignedDriverId: { $exists: false } },
+          ],
+        })
+        .sort({ createdAt: 1 })
+        .select({ _id: 1, restaurantId: 1, deliveryAddress: 1, createdAt: 1 })
+        .lean();
+      if (!orders.length) return;
+
+      // 4) Groupe par (restaurantId, zoneNumber). Les commandes sans zoneNumber
+      //    connu forment chacune un groupe à 1 élément (= dispatch individuel).
+      const groupsMap = new Map<string, { restaurantId: string; zoneNumber: string | null; orders: any[] }>();
+      for (const order of orders) {
+        const restaurantId = String(order.restaurantId || '');
+        const locKey = this.zoneKey(
+          (order.deliveryAddress as any)?.city,
+          (order.deliveryAddress as any)?.district,
+        );
+        const zoneNumber = zoneByLocation.get(locKey) || null;
+        const groupKey = zoneNumber
+          ? `${restaurantId}|${zoneNumber}`
+          : `${restaurantId}|solo:${String(order._id)}`;
+        let group = groupsMap.get(groupKey);
+        if (!group) {
+          group = { restaurantId, zoneNumber, orders: [] };
+          groupsMap.set(groupKey, group);
+        }
+        group.orders.push(order);
+      }
+
+      // 5) Tri des groupes : zones identifiées d'abord, puis par taille décroissante,
+      //    puis par âge (oldest first) pour respecter l'équité FIFO.
+      const groups = Array.from(groupsMap.values()).sort((a, b) => {
+        const aHasZone = a.zoneNumber ? 1 : 0;
+        const bHasZone = b.zoneNumber ? 1 : 0;
+        if (aHasZone !== bHasZone) return bHasZone - aHasZone;
+        if (a.orders.length !== b.orders.length) return b.orders.length - a.orders.length;
+        const aOldest = new Date(a.orders[0].createdAt || 0).getTime();
+        const bOldest = new Date(b.orders[0].createdAt || 0).getTime();
+        return aOldest - bOldest;
+      });
+
+      // 6) Pour chaque groupe : choisit le livreur avec la plus grande capacité
+      //    restante (ex-aequo : aléatoire). Assigne min(taille du groupe, capacité)
+      //    commandes à ce livreur — le reste sera traité au prochain run.
+      for (const group of groups) {
+        if (!group.orders.length) continue;
+
+        // Sélectionne le driver avec le plus de capacité (>0). Tirage aléatoire
+        // sur ex-aequo pour répartir la charge.
+        const candidates = Array.from(capacities.entries())
+          .filter(([, cap]) => cap > 0)
+          .sort((a, b) => b[1] - a[1] || (Math.random() - 0.5));
+        if (!candidates.length) break; // plus de capacité globalement
+
+        const [chosenDriverId, capacity] = candidates[0];
+        const take = Math.min(group.orders.length, capacity);
+        const slice = group.orders.slice(0, take);
+
+        for (const order of slice) {
           try {
-            await this.assign(
-              {
-                orderId: String(orders[index]._id),
-                driverId: String(shuffledDrivers[index]._id),
-              },
-              { role: UserRole.ADMIN },
-            );
+            const delivery = await this.dispatchAssign(String(order._id), chosenDriverId);
+            this.notifyDeliveryAssigned(delivery).catch(() => undefined);
             assignedCount += 1;
           } catch (error: any) {
             this.logger.warn(
-              `Automatic dispatch skipped order ${orders[index]._id}: ${error?.message || error}`,
+              `Automatic dispatch skipped order ${order._id}: ${error?.message || error}`,
             );
           }
         }
+        capacities.set(chosenDriverId, capacity - take);
+        if (slice.length) assignedGroups += 1;
       }
     } catch (error: any) {
       this.logger.error(`Automatic dispatch failed: ${error?.message || error}`, error?.stack);
@@ -238,8 +330,64 @@ export class DeliveriesService {
     }
 
     if (assignedCount) {
-      this.logger.log(`Automatic dispatch assigned ${assignedCount} order(s)`);
+      this.logger.log(
+        `Automatic dispatch assigned ${assignedCount} order(s) across ${assignedGroups} group(s)`,
+      );
     }
+  }
+
+  /**
+   * Affecte une commande à un livreur sans toucher au flag `isDriverAvailable`
+   * (le flag est piloté manuellement par le livreur ; la capacité réelle est
+   * désormais déterminée par le compteur d'actives < 5). Crée la Delivery + met
+   * à jour la commande dans une transaction. À utiliser uniquement par le cron
+   * de dispatch — l'assignation manuelle continue de passer par `assign()`.
+   */
+  private async dispatchAssign(orderId: string, driverId: string): Promise<DeliveryDocument | null> {
+    const session = await this.connection.startSession();
+    let delivery: DeliveryDocument | null = null;
+    try {
+      await session.withTransaction(async () => {
+        const order = await this.orderModel.findById(orderId).session(session);
+        if (!order) throw new NotFoundException('Order not found');
+        if (order.assignedDriverId) throw new BadRequestException('Order already has an assigned driver');
+        if (order.orderStatus !== OrderStatus.READY) throw new BadRequestException('Only ready orders can be assigned');
+
+        const activeDelivery = await this.deliveryModel
+          .findOne({
+            orderId: order._id,
+            status: { $in: [DeliveryStatus.ASSIGNED, DeliveryStatus.PICKED_UP, DeliveryStatus.OUT_FOR_DELIVERY] },
+          })
+          .session(session);
+        if (activeDelivery) throw new BadRequestException('Order already has an active delivery');
+
+        const driver = await this.userModel.findById(driverId).session(session);
+        if (!driver) throw new NotFoundException('Driver not found');
+        if (driver.role !== UserRole.DRIVER) throw new BadRequestException('Assigned user must be a driver');
+        if (driver.isActive === false) throw new BadRequestException('Assigned driver is inactive');
+
+        order.assignedDriverId = new Types.ObjectId(driverId);
+        order.orderStatus = OrderStatus.ASSIGNED;
+        await order.save({ session });
+
+        [delivery] = await this.deliveryModel.create(
+          [{
+            orderId: order._id,
+            driverId: new Types.ObjectId(driverId),
+            status: DeliveryStatus.ASSIGNED,
+            assignedAt: new Date(),
+          }],
+          { session },
+        );
+      });
+      return delivery;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  private zoneKey(city: any, district: any): string {
+    return `${String(city || '').trim().toLowerCase()}|${String(district || '').trim().toLowerCase()}`;
   }
 
   private async getOrCreateAutoDispatchSettings() {

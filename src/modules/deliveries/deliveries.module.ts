@@ -4,6 +4,7 @@ import { Delivery, DeliverySchema } from '../../database/schemas/delivery.schema
 import { Order, OrderSchema } from '../../database/schemas/order.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
 import { Restaurant, RestaurantSchema } from '../../database/schemas/restaurant.schema';
+import { DeliveryZone, DeliveryZoneSchema } from '../../database/schemas/delivery-zone.schema';
 import { DeliveriesController } from './deliveries.controller';
 import { DeliveriesService } from './deliveries.service';
 import { PaymentsModule } from '../payments/payments.module';
@@ -17,6 +18,7 @@ import { DispatchSettings, DispatchSettingsSchema } from '../../database/schemas
       { name: Order.name, schema: OrderSchema },
       { name: User.name, schema: UserSchema },
       { name: Restaurant.name, schema: RestaurantSchema },
+      { name: DeliveryZone.name, schema: DeliveryZoneSchema },
       { name: DispatchSettings.name, schema: DispatchSettingsSchema },
     ]),
     PaymentsModule,
