@@ -1,12 +1,13 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { Category, CategoryDocument } from '../../database/schemas/category.schema';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search.util';
 import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
+import { CreateAccompanimentDto, UpdateAccompanimentDto } from './dto/accompaniment.dto';
 
 @Injectable()
 export class CategoriesService {
@@ -87,5 +88,50 @@ export class CategoriesService {
     const item = await this.model.findByIdAndDelete(id);
     if (item) await deleteLocalUpload(item.image);
     return item;
+  }
+
+  // ── Accompaniments ──────────────────────────────────────────────────────
+  // Les accompagnements sont stockés en sous-documents de la catégorie. Chaque
+  // sous-document a son propre _id ObjectId, utilisé comme référence stable
+  // côté MenuItem.availableAccompanimentIds et côté Cart/Order.
+
+  async addAccompaniment(categoryId: string, dto: CreateAccompanimentDto) {
+    const category = await this.model.findById(categoryId);
+    if (!category) throw new NotFoundException('Category not found');
+    const sub: any = {
+      _id: new Types.ObjectId(),
+      name: dto.name.trim(),
+      isActive: dto.isActive ?? true,
+      order: dto.order ?? (category.accompaniments?.length || 0),
+    };
+    category.accompaniments.push(sub);
+    await category.save();
+    return category;
+  }
+
+  async updateAccompaniment(categoryId: string, accId: string, dto: UpdateAccompanimentDto) {
+    const category = await this.model.findById(categoryId);
+    if (!category) throw new NotFoundException('Category not found');
+    const sub = (category.accompaniments || []).find((a: any) => String(a._id) === String(accId)) as any;
+    if (!sub) throw new NotFoundException('Accompaniment not found');
+    if (dto.name !== undefined) sub.name = dto.name.trim();
+    if (dto.isActive !== undefined) sub.isActive = dto.isActive;
+    if (dto.order !== undefined) sub.order = dto.order;
+    await category.save();
+    return category;
+  }
+
+  async deleteAccompaniment(categoryId: string, accId: string) {
+    const category = await this.model.findById(categoryId);
+    if (!category) throw new NotFoundException('Category not found');
+    const initial = category.accompaniments.length;
+    category.accompaniments = (category.accompaniments || []).filter(
+      (a: any) => String(a._id) !== String(accId),
+    ) as any;
+    if (category.accompaniments.length === initial) {
+      throw new NotFoundException('Accompaniment not found');
+    }
+    await category.save();
+    return category;
   }
 }

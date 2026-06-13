@@ -10,6 +10,13 @@ export class OrderInputItemDto {
   @IsInt()
   @Min(1)
   quantity: number;
+  @ApiPropertyOptional({
+    example: '665d58e63d7bfeb8f7f61888',
+    description: '_id de l\'accompagnement choisi (Category.accompaniments[i]._id).',
+  })
+  @IsOptional() @IsString() accompanimentId?: string;
+  @ApiPropertyOptional({ example: 'Riz blanc' })
+  @IsOptional() @IsString() accompanimentName?: string;
 }
 
 export class PreviewOrderDto {

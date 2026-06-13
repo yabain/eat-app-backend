@@ -4,6 +4,7 @@ import { Model, SortOrder, Types } from 'mongoose';
 import { UserRole } from '../../common/enums/roles.enum';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
+import { Category, CategoryDocument } from '../../database/schemas/category.schema';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex, parseBooleanQuery } from '../../common/utils/search.util';
 import { CreateMenuItemDto } from './dto/create-menu-item.dto';
@@ -16,8 +17,41 @@ export class MenuService {
   constructor(
     @InjectModel(MenuItem.name) private model: Model<MenuItemDocument>,
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
+    @InjectModel(Category.name) private categoryModel: Model<CategoryDocument>,
     private readonly inventory: MenuInventoryService,
   ) {}
+
+  /**
+   * Filtre les `availableAccompanimentIds` proposés pour ne garder que ceux
+   * qui appartiennent réellement aux accompagnements de la catégorie cible.
+   * Si la catégorie n'existe pas ou n'a pas d'accompagnements, on renvoie [].
+   * Évite ainsi qu'un attaquant injecte des IDs arbitraires côté API.
+   */
+  private async sanitizeAccompanimentIds(
+    categoryId: string | Types.ObjectId | undefined | null,
+    ids: string[] | undefined,
+  ): Promise<Types.ObjectId[] | undefined> {
+    if (ids === undefined) return undefined; // pas demandé → laissé tel quel
+    if (!Array.isArray(ids) || ids.length === 0) return [];
+    if (!categoryId) throw new BadRequestException('categoryId is required when sending availableAccompanimentIds');
+
+    const category = await this.categoryModel
+      .findById(categoryId)
+      .select({ accompaniments: 1 })
+      .lean();
+    if (!category) throw new BadRequestException('Category not found for accompaniments validation');
+
+    const validIds = new Set(
+      (category.accompaniments || []).map((a: any) => String(a._id)),
+    );
+    const unknown = ids.filter((id) => !validIds.has(String(id)));
+    if (unknown.length) {
+      throw new BadRequestException(
+        `Unknown accompaniment IDs for this category: ${unknown.join(', ')}`,
+      );
+    }
+    return ids.map((id) => new Types.ObjectId(id));
+  }
 
   private restaurantFilter(restaurantId: unknown) {
     const value = String(restaurantId || '');
@@ -124,8 +158,16 @@ export class MenuService {
     return item;
   }
 
-  createForActor(actor: any, dto: CreateMenuItemDto) {
-    const payload = this.inventory.normalizeAvailabilityForStock(dto);
+  async createForActor(actor: any, dto: CreateMenuItemDto) {
+    const payload: any = this.inventory.normalizeAvailabilityForStock(dto);
+
+    // Validation des accompagnements proposés (doivent appartenir à la catégorie).
+    const sanitized = await this.sanitizeAccompanimentIds(
+      payload.categoryId,
+      payload.availableAccompanimentIds,
+    );
+    if (sanitized !== undefined) payload.availableAccompanimentIds = sanitized;
+
     if (actor.role === UserRole.ADMIN) {
       if (!payload.restaurantId) throw new BadRequestException('restaurantId is required for admin');
       return this.model.create(payload);
@@ -139,7 +181,7 @@ export class MenuService {
   }
 
   async updateForActor(actor: any, id: string, dto: UpdateMenuItemDto) {
-    const payload = this.inventory.normalizeAvailabilityForStock(dto);
+    const payload: any = this.inventory.normalizeAvailabilityForStock(dto);
     let filter: any = { _id: id };
     if (actor.role !== UserRole.ADMIN) {
       if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
@@ -154,6 +196,16 @@ export class MenuService {
       await deleteLocalUpload(payload.image);
       throw new NotFoundException('Menu item not found');
     }
+
+    // Validation des accompagnements proposés : utilise la nouvelle catégorie
+    // si elle change, sinon celle déjà liée au menu item.
+    const targetCategoryId = payload.categoryId ?? existing.categoryId;
+    const sanitized = await this.sanitizeAccompanimentIds(
+      targetCategoryId as any,
+      payload.availableAccompanimentIds,
+    );
+    if (sanitized !== undefined) payload.availableAccompanimentIds = sanitized;
+
     const item = await this.model.findOneAndUpdate(filter, payload, { new: true });
     if (!item) throw new NotFoundException('Menu item not found');
     if (payload.image !== undefined) await deleteReplacedLocalUpload(existing.image, payload.image);

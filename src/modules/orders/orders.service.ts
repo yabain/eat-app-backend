@@ -51,7 +51,12 @@ export class OrdersService {
     if (!cart.restaurantId) throw new BadRequestException('Cart restaurant is not set');
     return {
       restaurantId: String(cart.restaurantId),
-      items: cart.items.map((i) => ({ menuItemId: String(i.menuItemId), quantity: i.quantity })),
+      items: cart.items.map((i) => ({
+        menuItemId: String(i.menuItemId),
+        quantity: i.quantity,
+        accompanimentId: i.accompanimentId ? String(i.accompanimentId) : undefined,
+        accompanimentName: i.accompanimentName || undefined,
+      })),
       city: dto.city,
       district: dto.district,
       details: dto.details,
@@ -208,7 +213,7 @@ export class OrdersService {
     const menuIds = dto.items.map((i) => new Types.ObjectId(i.menuItemId));
     const menuItems = await this.menuModel
       .find({ _id: { $in: menuIds }, restaurantId, isActive: true })
-      .populate({ path: 'categoryId', select: 'name systemFeePerItem maxItemsPerOrder' })
+      .populate({ path: 'categoryId', select: 'name systemFeePerItem maxItemsPerOrder accompaniments' })
       .session(session || null);
     if (menuItems.length !== dto.items.length) throw new BadRequestException('Some menu items are invalid');
     const zone = await this.zoneModel
@@ -222,6 +227,29 @@ export class OrdersService {
       if (menu.stock < input.quantity) throw new BadRequestException(`Insufficient stock for ${menu.name}`);
       const category = menu.categoryId as any;
       const systemFeePerItem = Math.max(0, Math.floor(Number(category?.systemFeePerItem || 0)));
+
+      // Snapshot de l'accompagnement choisi par le client. On valide qu'il
+      // appartient bien aux availableAccompanimentIds du menu item, sinon on
+      // l'ignore pour éviter qu'une commande forgée n'inclue un accompagnement
+      // arbitraire dans son historique.
+      let accompanimentId: any = null;
+      let accompanimentName = '';
+      if (input.accompanimentId) {
+        const available = (menu.availableAccompanimentIds || []).map((id: any) => String(id));
+        if (available.includes(String(input.accompanimentId))) {
+          accompanimentId = input.accompanimentId;
+          accompanimentName = String(input.accompanimentName || '');
+          // Fallback: si pas de nom transmis, on tente d'aller le chercher
+          // dans la catégorie embarquée.
+          if (!accompanimentName && category?.accompaniments) {
+            const sub = (category.accompaniments || []).find(
+              (a: any) => String(a._id) === String(input.accompanimentId),
+            );
+            if (sub) accompanimentName = sub.name || '';
+          }
+        }
+      }
+
       return {
         menuItemId: menu._id,
         categoryId: category?._id || null,
@@ -232,6 +260,8 @@ export class OrdersService {
         systemFeeTotal: systemFeePerItem * input.quantity,
         quantity: input.quantity,
         subtotal: menu.price * input.quantity,
+        accompanimentId,
+        accompanimentName,
       };
     });
 

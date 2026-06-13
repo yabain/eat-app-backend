@@ -1,4 +1,4 @@
-import { IsBoolean, IsMongoId, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { IsArray, IsBoolean, IsMongoId, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 export class UpdateMenuItemDto {
@@ -27,4 +27,13 @@ export class UpdateMenuItemDto {
   @ApiPropertyOptional({ example: true })
   @IsOptional() @Transform(({ value }) => value === 'true' || value === true)
   @IsBoolean() isActive?: boolean;
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['665d58e63d7bfeb8f7f61888'],
+    description: 'Liste des _id des accompagnements disponibles pour ce menu item.',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsMongoId({ each: true })
+  availableAccompanimentIds?: string[];
 }

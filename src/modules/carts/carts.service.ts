@@ -26,6 +26,41 @@ export class CartsService {
     return menuItem;
   }
 
+  /**
+   * Vérifie que `accompanimentId` (s'il est fourni) appartient bien aux
+   * accompagnements disponibles du menu item ET qu'il est actif dans la
+   * catégorie. Renvoie le nom de l'accompagnement (snapshot dénormalisé)
+   * ou une chaîne vide si pas d'accompagnement choisi.
+   *
+   * Si le menu item a des accompagnements disponibles et qu'aucun n'est
+   * choisi, on tolère l'absence (le client peut décider en panier plus tard) —
+   * mais le frontend impose la sélection par défaut au moment de l'ajout.
+   */
+  private async resolveAccompaniment(
+    menuItem: MenuItemDocument,
+    accompanimentId: string | null | undefined,
+  ): Promise<{ id: Types.ObjectId | null; name: string }> {
+    if (!accompanimentId) return { id: null, name: '' };
+    const available = (menuItem.availableAccompanimentIds || []).map((id: any) => String(id));
+    if (!available.includes(String(accompanimentId))) {
+      throw new BadRequestException('Accompagnement non disponible pour ce produit');
+    }
+    if (!menuItem.categoryId) {
+      throw new BadRequestException('Le produit n\'a pas de catégorie associée');
+    }
+    const category = await this.categoryModel
+      .findById(menuItem.categoryId)
+      .select({ accompaniments: 1 })
+      .lean();
+    if (!category) throw new BadRequestException('Catégorie introuvable');
+    const sub = (category.accompaniments || []).find(
+      (a: any) => String(a._id) === String(accompanimentId),
+    );
+    if (!sub) throw new BadRequestException('Accompagnement introuvable dans la catégorie');
+    if (sub.isActive === false) throw new BadRequestException('Accompagnement désactivé');
+    return { id: new Types.ObjectId(accompanimentId), name: sub.name };
+  }
+
   private async findOrCreateCart(userId: string) {
     const userObjectId = new Types.ObjectId(userId);
     return this.cartModel.findOneAndUpdate(
@@ -108,7 +143,17 @@ export class CartsService {
       throw new BadRequestException('Requested quantity exceeds available stock');
     }
 
-    const existing = cart.items.find((i) => String(i.menuItemId) === dto.menuItemId);
+    const accompaniment = await this.resolveAccompaniment(menuItem, dto.accompanimentId);
+
+    // Une ligne panier est unique par couple (menuItemId, accompanimentId) :
+    // si le client commande le même produit avec deux accompagnements
+    // distincts, on les stocke comme deux lignes pour préserver le choix
+    // individuel dans la commande finale.
+    const existing = cart.items.find(
+      (i) =>
+        String(i.menuItemId) === dto.menuItemId
+        && String(i.accompanimentId || '') === String(accompaniment.id || ''),
+    );
     if (existing) {
       const nextQty = existing.quantity + dto.quantity;
       if (nextQty > menuItem.stock) throw new BadRequestException('Requested quantity exceeds available stock');
@@ -116,7 +161,12 @@ export class CartsService {
       existing.quantity = nextQty;
     } else {
       await this.assertCategoryLimit(cart, menuItem, dto.quantity);
-      cart.items.push({ menuItemId: new Types.ObjectId(dto.menuItemId), quantity: dto.quantity } as any);
+      cart.items.push({
+        menuItemId: new Types.ObjectId(dto.menuItemId),
+        quantity: dto.quantity,
+        accompanimentId: accompaniment.id,
+        accompanimentName: accompaniment.name,
+      } as any);
     }
     cart.restaurantId = menuItem.restaurantId;
     await cart.save();
@@ -134,9 +184,17 @@ export class CartsService {
     }
     await this.assertCategoryLimit(cart, menuItem, dto.quantity);
 
+    // Mise à jour optionnelle de l'accompagnement choisi
+    const setFields: Record<string, any> = { 'items.$.quantity': dto.quantity };
+    if (dto.accompanimentId !== undefined) {
+      const accompaniment = await this.resolveAccompaniment(menuItem, dto.accompanimentId);
+      setFields['items.$.accompanimentId'] = accompaniment.id;
+      setFields['items.$.accompanimentName'] = accompaniment.name;
+    }
+
     const updated = await this.cartModel.findOneAndUpdate(
       { _id: cart._id, 'items.menuItemId': new Types.ObjectId(menuItemId) },
-      { $set: { 'items.$.quantity': dto.quantity } },
+      { $set: setFields },
       { new: true },
     );
     return this.populateCart(updated._id);

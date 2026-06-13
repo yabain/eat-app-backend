@@ -32,6 +32,7 @@ import { resolveUploadDir } from '../../common/utils/upload-dir.util';
 import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
+import { CreateAccompanimentDto, UpdateAccompanimentDto } from './dto/accompaniment.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -151,4 +152,50 @@ export class CategoriesController {
   @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiOkResponse({ description: 'Catégorie supprimée', type: CategoryResponseDto })
   remove(@Param('id') id: string) { return this.service.remove(id); }
+
+  // ── Accompaniments CRUD ────────────────────────────────────────────────
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Post(':id/accompaniments')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({
+    summary: 'Ajouter un accompagnement à une catégorie (admin)',
+    description: 'L\'accompagnement devient ensuite éligible pour les menu items de cette catégorie via leur champ `availableAccompanimentIds`.',
+  })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiBody({ type: CreateAccompanimentDto })
+  @ApiOkResponse({ description: 'Catégorie mise à jour', type: CategoryResponseDto })
+  addAccompaniment(@Param('id') id: string, @Body() dto: CreateAccompanimentDto) {
+    return this.service.addAccompaniment(id, dto);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Patch(':id/accompaniments/:accId')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Mettre à jour un accompagnement (admin)' })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiParam({ name: 'accId', example: '665d58e63d7bfeb8f7f61888' })
+  @ApiBody({ type: UpdateAccompanimentDto })
+  @ApiOkResponse({ description: 'Catégorie mise à jour', type: CategoryResponseDto })
+  updateAccompaniment(
+    @Param('id') id: string,
+    @Param('accId') accId: string,
+    @Body() dto: UpdateAccompanimentDto,
+  ) {
+    return this.service.updateAccompaniment(id, accId, dto);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Delete(':id/accompaniments/:accId')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Supprimer un accompagnement (admin)' })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiParam({ name: 'accId', example: '665d58e63d7bfeb8f7f61888' })
+  @ApiOkResponse({ description: 'Catégorie mise à jour', type: CategoryResponseDto })
+  deleteAccompaniment(@Param('id') id: string, @Param('accId') accId: string) {
+    return this.service.deleteAccompaniment(id, accId);
+  }
 }

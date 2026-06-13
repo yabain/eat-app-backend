@@ -14,6 +14,9 @@ class OrderItem {
   @Prop({ type: Number, default: 0 }) systemFeeTotal: number;
   @Prop({ required: true }) quantity: number;
   @Prop({ required: true }) subtotal: number;
+  /** Accompagnement choisi par le client (snapshot au moment de la commande). */
+  @Prop({ type: Types.ObjectId, default: null }) accompanimentId?: Types.ObjectId | null;
+  @Prop({ default: '' }) accompanimentName?: string;
 }
 class DeliveryAddress {
   @Prop({ required: true }) city: string;
