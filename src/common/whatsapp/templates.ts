@@ -194,3 +194,21 @@ export function orderDeliveredWhatsappTemplate(input: { orderNumber: string; ord
     link('Voir le reçu:', input.orderUrl),
   ]);
 }
+
+export function menuItemAvailableWhatsappTemplate(input: {
+  firstName?: string;
+  menuItemName: string;
+  restaurantName?: string;
+  menuItemUrl?: string;
+}) {
+  const restaurant = input.restaurantName ? ` chez *${input.restaurantName}*` : '';
+  return lines([
+    `*${input.menuItemName} est à nouveau disponible !*`,
+    '\n',
+    `Bonjour ${input.firstName || ''},`,
+    `Le plat *${input.menuItemName}* que vous avez ajouté à vos favoris est de nouveau disponible${restaurant}.`,
+    'Commandez-le avant rupture.',
+    '\n',
+    link('Commander:', input.menuItemUrl),
+  ]);
+}

@@ -6,3 +6,4 @@ export { orderStatusChangedTemplate } from './order-status-changed.template';
 export { passwordChangedTemplate } from './password-changed.template';
 export { restaurantOrderConfirmedTemplate } from './restaurant-order-confirmed.template';
 export { resetPasswordTemplate } from './reset-password.template';
+export { menuItemAvailableTemplate } from './menu-item-available.template';

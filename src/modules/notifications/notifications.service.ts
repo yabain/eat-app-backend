@@ -4,6 +4,7 @@ import * as nodemailer from 'nodemailer';
 import {
   accountCreatedTemplate,
   deliveryAssignedTemplate,
+  menuItemAvailableTemplate,
   orderConfirmedTemplate,
   orderDeliveredTemplate,
   orderStatusChangedTemplate,
@@ -17,6 +18,7 @@ import {
   deliveryAssignedWhatsappTemplate,
   deliveryStartedWhatsappTemplate,
   deliveryStartReminderWhatsappTemplate,
+  menuItemAvailableWhatsappTemplate,
   orderConfirmedWhatsappTemplate,
   orderDeliveredWhatsappTemplate,
   orderStatusChangedWhatsappTemplate,
@@ -188,6 +190,31 @@ export class NotificationsService {
     this.logger.log(`Notify delivered order ${orderNumber} to ${email} / ${phone}`);
   }
 
+  async sendMenuItemBackInStock(
+    recipients: Array<{ email?: string; phone?: string; firstName?: string }>,
+    input: { menuItemId: string; menuItemName: string; restaurantName?: string; restaurantId?: string },
+  ) {
+    if (!recipients?.length) return;
+    const menuItemUrl = this.buildMenuItemUrl(input.menuItemId);
+    for (const recipient of recipients) {
+      const renderInput = {
+        firstName: recipient.firstName,
+        menuItemName: input.menuItemName,
+        restaurantName: input.restaurantName,
+        menuItemUrl,
+      };
+      const template = menuItemAvailableTemplate(renderInput);
+      const whatsappText = menuItemAvailableWhatsappTemplate(renderInput);
+      this.dispatch(`menu_item_available:${input.menuItemId}:${recipient.email || recipient.phone}`, () => Promise.all([
+        this.sendTemplate(recipient.email, template),
+        this.sendWhatsapp(recipient.phone, whatsappText),
+      ]));
+    }
+    this.logger.log(
+      `Notify ${recipients.length} favorite watcher(s) — menu item ${input.menuItemName} back in stock.`,
+    );
+  }
+
   async sendRawHtml(
     email: string | undefined,
     subject: string,
@@ -207,6 +234,12 @@ export class NotificationsService {
     const frontendUrl = this.getFrontendUrl();
     if (!frontendUrl || !orderId) return undefined;
     return `${frontendUrl}/manager/orders/${encodeURIComponent(orderId)}`;
+  }
+
+  private buildMenuItemUrl(menuItemId?: string) {
+    const frontendUrl = this.getFrontendUrl();
+    if (!frontendUrl || !menuItemId) return undefined;
+    return `${frontendUrl}/menu-item/${encodeURIComponent(menuItemId)}`;
   }
 
   private buildDriverUrl() {

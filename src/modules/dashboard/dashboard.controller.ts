@@ -16,9 +16,15 @@ export class DashboardController {
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
   @Get('overview')
   @ApiOperation({ summary: 'Statistiques dashboard selon le rôle' })
-  @ApiQuery({ name: 'period', required: false, enum: ['week', 'month', '12m'] })
+  @ApiQuery({ name: 'period', required: false, enum: ['day', 'month', 'year'] })
+  @ApiQuery({ name: 'date', required: false, type: String, description: 'YYYY-MM-DD pour day, YYYY-MM pour month, YYYY pour year' })
   @ApiQuery({ name: 'restaurantId', required: false, type: String })
-  overview(@Req() req: any, @Query('period') period?: string, @Query('restaurantId') restaurantId?: string) {
-    return this.service.overview(req.user, period, restaurantId);
+  overview(
+    @Req() req: any,
+    @Query('period') period?: string,
+    @Query('restaurantId') restaurantId?: string,
+    @Query('date') date?: string,
+  ) {
+    return this.service.overview(req.user, period, restaurantId, date);
   }
 }

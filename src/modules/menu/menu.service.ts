@@ -11,6 +11,7 @@ import { CreateMenuItemDto } from './dto/create-menu-item.dto';
 import { MenuInventoryService } from './menu-inventory.service';
 import { UpdateMenuItemDto } from './dto/update-menu-item.dto';
 import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
+import { FavoritesService } from '../favorites/favorites.service';
 
 @Injectable()
 export class MenuService {
@@ -19,7 +20,13 @@ export class MenuService {
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
     @InjectModel(Category.name) private categoryModel: Model<CategoryDocument>,
     private readonly inventory: MenuInventoryService,
+    private readonly favorites: FavoritesService,
   ) {}
+
+  private isSellable(item: { isAvailable?: boolean; isActive?: boolean; stock?: number } | null | undefined): boolean {
+    if (!item) return false;
+    return Boolean(item.isAvailable) && Boolean(item.isActive) && Number(item.stock || 0) > 0;
+  }
 
   /**
    * Filtre les `availableAccompanimentIds` proposés pour ne garder que ceux
@@ -206,9 +213,16 @@ export class MenuService {
     );
     if (sanitized !== undefined) payload.availableAccompanimentIds = sanitized;
 
+    const wasSellable = this.isSellable(existing);
+
     const item = await this.model.findOneAndUpdate(filter, payload, { new: true });
     if (!item) throw new NotFoundException('Menu item not found');
     if (payload.image !== undefined) await deleteReplacedLocalUpload(existing.image, payload.image);
+
+    if (!wasSellable && this.isSellable(item)) {
+      void this.favorites.notifyBackInStock(String(item._id));
+    }
+
     return item;
   }
 
@@ -221,6 +235,7 @@ export class MenuService {
     const item = await this.model.findOneAndDelete(filter);
     if (!item) throw new NotFoundException('Menu item not found');
     await deleteLocalUpload(item.image);
+    void this.favorites.markMenuItemDeleted(String(item._id));
     return item;
   }
 

@@ -74,20 +74,30 @@ export class TrackingService {
   }
 
   private aggregateSeries(period: TrackingPeriod, filter: FilterQuery<VisitEventDocument>) {
-    const datePart = period === 'day' ? 'hour' : period === 'month' ? 'day' : 'month';
+    const operator = period === 'day' ? '$hour' : period === 'month' ? '$dayOfMonth' : '$month';
     return this.visitModel.aggregate([
       { $match: filter },
       {
         $group: {
-          _id: { $dateToParts: { date: '$createdAt', timezone: this.timezone } },
+          _id: { [operator]: { date: '$createdAt', timezone: this.timezone } },
           count: { $sum: 1 },
+          sessions: { $addToSet: '$sessionId' },
         },
       },
       {
         $project: {
           _id: 0,
-          bucket: `$_id.${datePart}`,
+          bucket: '$_id',
           count: 1,
+          uniqueVisitors: {
+            $size: {
+              $filter: {
+                input: '$sessions',
+                as: 's',
+                cond: { $and: [{ $ne: ['$$s', ''] }, { $ne: ['$$s', null] }] },
+              },
+            },
+          },
         },
       },
       { $sort: { bucket: 1 } },
@@ -124,17 +134,22 @@ export class TrackingService {
     ]);
   }
 
-  private fillSeries(period: TrackingPeriod, range: { start: Date; selectedDate: string }, rows: Array<{ bucket: number; count: number }>) {
-    const counts = new Map(rows.map((row) => [Number(row.bucket), Number(row.count || 0)]));
+  private fillSeries(period: TrackingPeriod, range: { start: Date; selectedDate: string }, rows: Array<{ bucket: number; count: number; uniqueVisitors: number }>) {
+    const byBucket = new Map(rows.map((row) => [
+      Number(row.bucket),
+      { count: Number(row.count || 0), uniqueVisitors: Number(row.uniqueVisitors || 0) },
+    ]));
     const length = period === 'day' ? 24 : period === 'month' ? this.daysInSelectedMonth(range.selectedDate) : 12;
     const startIndex = period === 'day' ? 0 : 1;
 
     return Array.from({ length }, (_, index) => {
       const bucket = index + startIndex;
+      const data = byBucket.get(bucket) || { count: 0, uniqueVisitors: 0 };
       return {
         bucket,
         label: this.labelFor(period, bucket),
-        count: counts.get(bucket) || 0,
+        count: data.count,
+        uniqueVisitors: data.uniqueVisitors,
       };
     });
   }

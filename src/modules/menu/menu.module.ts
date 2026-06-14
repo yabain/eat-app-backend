@@ -6,6 +6,7 @@ import { Restaurant, RestaurantSchema } from '../../database/schemas/restaurant.
 import { MenuController } from './menu.controller';
 import { MenuInventoryService } from './menu-inventory.service';
 import { MenuService } from './menu.service';
+import { FavoritesModule } from '../favorites/favorites.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { MenuService } from './menu.service';
       { name: Category.name, schema: CategorySchema },
       { name: Restaurant.name, schema: RestaurantSchema },
     ]),
+    FavoritesModule,
   ],
   providers: [MenuService, MenuInventoryService],
   controllers: [MenuController],

@@ -189,41 +189,41 @@ export class DeliveriesService {
     let assignedGroups = 0;
 
     try {
-      // 1) Pool des livreurs candidats (actifs, on duty) avec leur capacité restante.
-      //    On considère "actives" toutes les livraisons dont le statut implique
-      //    qu'elles ne sont pas encore livrées ni échouées.
-      const drivers = await this.userModel
+      // 1) Pool des livreurs strictement libres : actifs, disponibles ET sans
+      //    AUCUNE livraison en cours. Dès qu'on assigne ne serait-ce qu'une
+      //    seule commande à un livreur, il est immédiatement marqué
+      //    indisponible (cf. dispatchAssign) et ne reviendra dans le pool
+      //    qu'une fois TOUTES ses livraisons terminées (cf. updateStatus).
+      const candidateDrivers = await this.userModel
         .find({
           role: UserRole.DRIVER,
           isActive: { $ne: false },
-          isDriverAvailable: { $ne: false },
+          isDriverAvailable: true,
         })
         .select('_id')
         .lean();
-      if (!drivers.length) return;
+      if (!candidateDrivers.length) return;
 
-      const driverIds = drivers.map((d) => d._id);
-      const activeCounts = await this.deliveryModel.aggregate([
+      // Filet de sécurité : on exclut explicitement tout livreur qui aurait
+      // encore une livraison active (cas d'incohérence du flag).
+      const candidateIds = candidateDrivers.map((d) => d._id);
+      const busyRows = await this.deliveryModel.aggregate([
         {
           $match: {
-            driverId: { $in: driverIds },
+            driverId: { $in: candidateIds },
             status: { $in: [DeliveryStatus.ASSIGNED, DeliveryStatus.PICKED_UP, DeliveryStatus.OUT_FOR_DELIVERY] },
           },
         },
-        { $group: { _id: '$driverId', count: { $sum: 1 } } },
+        { $group: { _id: '$driverId' } },
       ]);
-      const capacities = new Map<string, number>();
-      for (const driver of drivers) {
-        capacities.set(String(driver._id), DeliveriesService.MAX_ACTIVE_DELIVERIES_PER_DRIVER);
-      }
-      for (const row of activeCounts) {
-        const driverIdKey = String(row._id);
-        const remaining = Math.max(
-          0,
-          DeliveriesService.MAX_ACTIVE_DELIVERIES_PER_DRIVER - Number(row.count || 0),
-        );
-        capacities.set(driverIdKey, remaining);
-      }
+      const busyIds = new Set(busyRows.map((r) => String(r._id)));
+      const freeDrivers = candidateDrivers.filter((d) => !busyIds.has(String(d._id)));
+      if (!freeDrivers.length) return;
+
+      // File des livreurs encore disponibles pour ce run. Chacun peut recevoir
+      // jusqu'à MAX_ACTIVE_DELIVERIES_PER_DRIVER commandes d'un même groupe puis
+      // il est retiré de la file (et persistant `isDriverAvailable: false`).
+      const availableDriverIds: string[] = freeDrivers.map((d) => String(d._id));
 
       // 2) Charge la table des zones (city|district -> zoneNumber).
       const zones = await this.deliveryZoneModel
@@ -251,22 +251,23 @@ export class DeliveriesService {
         .lean();
       if (!orders.length) return;
 
-      // 4) Groupe par (restaurantId, zoneNumber). Les commandes sans zoneNumber
-      //    connu forment chacune un groupe à 1 élément (= dispatch individuel).
-      const groupsMap = new Map<string, { restaurantId: string; zoneNumber: string | null; orders: any[] }>();
+      // 4) Groupe UNIQUEMENT par zoneNumber, quel que soit le restaurant : toutes
+      //    les commandes prêtes destinées à la même zone vont au même livreur,
+      //    qu'elles viennent du même restaurant ou non. Les commandes sans
+      //    zoneNumber connu forment chacune un groupe à 1 élément (dispatch solo).
+      const groupsMap = new Map<string, { zoneNumber: string | null; orders: any[] }>();
       for (const order of orders) {
-        const restaurantId = String(order.restaurantId || '');
         const locKey = this.zoneKey(
           (order.deliveryAddress as any)?.city,
           (order.deliveryAddress as any)?.district,
         );
         const zoneNumber = zoneByLocation.get(locKey) || null;
         const groupKey = zoneNumber
-          ? `${restaurantId}|${zoneNumber}`
-          : `${restaurantId}|solo:${String(order._id)}`;
+          ? `zone:${zoneNumber}`
+          : `solo:${String(order._id)}`;
         let group = groupsMap.get(groupKey);
         if (!group) {
-          group = { restaurantId, zoneNumber, orders: [] };
+          group = { zoneNumber, orders: [] };
           groupsMap.set(groupKey, group);
         }
         group.orders.push(order);
@@ -284,35 +285,44 @@ export class DeliveriesService {
         return aOldest - bOldest;
       });
 
-      // 6) Pour chaque groupe : choisit le livreur avec la plus grande capacité
-      //    restante (ex-aequo : aléatoire). Assigne min(taille du groupe, capacité)
-      //    commandes à ce livreur — le reste sera traité au prochain run.
+      // 6) Pour chaque groupe : tire un livreur libre au hasard, lui affecte
+      //    jusqu'à MAX_ACTIVE_DELIVERIES_PER_DRIVER commandes du groupe (s'il y
+      //    en a plus, le reste passe au prochain run avec un autre livreur),
+      //    puis on le retire de la file (il devient indisponible).
       for (const group of groups) {
         if (!group.orders.length) continue;
+        if (!availableDriverIds.length) break; // tous les livreurs libres sont pris
 
-        // Sélectionne le driver avec le plus de capacité (>0). Tirage aléatoire
-        // sur ex-aequo pour répartir la charge.
-        const candidates = Array.from(capacities.entries())
-          .filter(([, cap]) => cap > 0)
-          .sort((a, b) => b[1] - a[1] || (Math.random() - 0.5));
-        if (!candidates.length) break; // plus de capacité globalement
+        // Tirage aléatoire d'un livreur libre.
+        const pickIndex = Math.floor(Math.random() * availableDriverIds.length);
+        const chosenDriverId = availableDriverIds.splice(pickIndex, 1)[0];
 
-        const [chosenDriverId, capacity] = candidates[0];
-        const take = Math.min(group.orders.length, capacity);
+        const take = Math.min(group.orders.length, DeliveriesService.MAX_ACTIVE_DELIVERIES_PER_DRIVER);
         const slice = group.orders.slice(0, take);
 
+        let firstSuccess = true;
         for (const order of slice) {
           try {
             const delivery = await this.dispatchAssign(String(order._id), chosenDriverId);
             this.notifyDeliveryAssigned(delivery).catch(() => undefined);
             assignedCount += 1;
+            // Une fois la première commande effectivement assignée, on bascule
+            // le livreur en indisponible — ainsi même si un prochain run du
+            // cron démarre avant la fin de ce groupe, ce livreur ne sera plus
+            // candidat.
+            if (firstSuccess) {
+              firstSuccess = false;
+              await this.userModel.updateOne(
+                { _id: new Types.ObjectId(chosenDriverId) },
+                { $set: { isDriverAvailable: false } },
+              );
+            }
           } catch (error: any) {
             this.logger.warn(
               `Automatic dispatch skipped order ${order._id}: ${error?.message || error}`,
             );
           }
         }
-        capacities.set(chosenDriverId, capacity - take);
         if (slice.length) assignedGroups += 1;
       }
     } catch (error: any) {
@@ -542,11 +552,22 @@ export class DeliveriesService {
         await order.save({ session });
 
         if ([DeliveryStatus.DELIVERED, DeliveryStatus.FAILED].includes(nextStatus)) {
-          await this.userModel.updateOne(
-            { _id: delivery.driverId, role: UserRole.DRIVER },
-            { $set: { isDriverAvailable: true } },
-            { session },
-          );
+          // Ne libère le livreur (isDriverAvailable=true) que s'il n'a plus
+          // d'autre livraison active. Tant qu'il a encore d'autres commandes en
+          // cours (groupe multi-commandes typiquement), on le maintient
+          // indisponible pour qu'il ne reçoive pas de nouvelles affectations.
+          const remainingActive = await this.deliveryModel.countDocuments({
+            driverId: delivery.driverId,
+            _id: { $ne: delivery._id },
+            status: { $in: [DeliveryStatus.ASSIGNED, DeliveryStatus.PICKED_UP, DeliveryStatus.OUT_FOR_DELIVERY] },
+          }).session(session);
+          if (remainingActive === 0) {
+            await this.userModel.updateOne(
+              { _id: delivery.driverId, role: UserRole.DRIVER },
+              { $set: { isDriverAvailable: true } },
+              { session },
+            );
+          }
         }
 
         notifyStarted = nextStatus === DeliveryStatus.OUT_FOR_DELIVERY;
