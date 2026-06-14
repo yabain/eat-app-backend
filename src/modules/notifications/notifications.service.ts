@@ -11,6 +11,8 @@ import {
   passwordChangedTemplate,
   restaurantOrderConfirmedTemplate,
   resetPasswordTemplate,
+  withdrawalFailedUserTemplate,
+  withdrawalFailedAdminTemplate,
 } from '../../common/email/templates';
 import { MailTemplate } from '../../common/email/mail-layout';
 import {
@@ -26,6 +28,8 @@ import {
   restaurantPreparationReminderWhatsappTemplate,
   restaurantOrderConfirmedWhatsappTemplate,
   resetPasswordWhatsappTemplate,
+  withdrawalFailedUserWhatsappTemplate,
+  withdrawalFailedAdminWhatsappTemplate,
 } from '../../common/whatsapp/templates';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
 
@@ -188,6 +192,55 @@ export class NotificationsService {
       this.sendWhatsapp(phone, orderDeliveredWhatsappTemplate(input)),
     ]));
     this.logger.log(`Notify delivered order ${orderNumber} to ${email} / ${phone}`);
+  }
+
+  async sendWithdrawalFailed(
+    recipient: { email?: string; phone?: string; firstName?: string } | undefined | null,
+    input: { amount: number; currency?: string; phone?: string; withdrawalId?: string },
+  ) {
+    if (!recipient) return;
+    const renderInput = {
+      firstName: recipient.firstName,
+      amount: input.amount,
+      currency: input.currency,
+      phone: input.phone,
+      withdrawalId: input.withdrawalId,
+    };
+    const template = withdrawalFailedUserTemplate(renderInput);
+    const whatsappText = withdrawalFailedUserWhatsappTemplate(renderInput);
+    this.dispatch(`withdrawal_failed_user:${input.withdrawalId || input.phone || ''}`, () => Promise.all([
+      this.sendTemplate(recipient.email, template),
+      this.sendWhatsapp(recipient.phone, whatsappText),
+    ]));
+  }
+
+  async sendWithdrawalFailedAdmins(
+    recipients: Array<{ email?: string; phone?: string }>,
+    input: {
+      amount: number;
+      currency?: string;
+      phone?: string;
+      ownerType?: string;
+      ownerLabel?: string;
+      withdrawalId?: string;
+      providerStatus?: string;
+      errorDetail?: string;
+    },
+  ) {
+    if (!recipients?.length) return;
+    const contacts = this.normalizeContacts(recipients);
+    if (!contacts.length) return;
+    const template = withdrawalFailedAdminTemplate(input);
+    const whatsappText = withdrawalFailedAdminWhatsappTemplate(input);
+    this.dispatch(`withdrawal_failed_admin:${input.withdrawalId || ''}`, () => Promise.all(
+      contacts.flatMap((contact) => [
+        this.sendTemplate(contact.email, template),
+        this.sendWhatsapp(contact.phone, whatsappText),
+      ]),
+    ));
+    this.logger.log(
+      `Notify ${contacts.length} admin(s) — withdrawal ${input.withdrawalId} failed.`,
+    );
   }
 
   async sendMenuItemBackInStock(

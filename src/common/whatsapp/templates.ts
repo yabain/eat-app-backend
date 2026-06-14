@@ -212,3 +212,40 @@ export function menuItemAvailableWhatsappTemplate(input: {
     link('Commander:', input.menuItemUrl),
   ]);
 }
+
+export function withdrawalFailedUserWhatsappTemplate(input: {
+  firstName?: string;
+  amount: number;
+  currency?: string;
+  phone?: string;
+}) {
+  const amount = money(Number(input.amount || 0)) || '';
+  return lines([
+    '*Retrait non abouti*',
+    '\n',
+    `Bonjour ${input.firstName || ''},`,
+    `Votre retrait de ${amount}${input.phone ? ` vers le ${input.phone}` : ''} n'a pas pu être finalisé en raison d'un léger souci d'indisponibilité du réseau mobile.`,
+    'Votre solde a été immédiatement recrédité du montant correspondant.',
+    'Vous pouvez relancer l\'opération dans quelques minutes depuis votre espace Eat App.',
+  ]);
+}
+
+export function withdrawalFailedAdminWhatsappTemplate(input: {
+  amount: number;
+  currency?: string;
+  phone?: string;
+  ownerLabel?: string;
+  withdrawalId?: string;
+  providerStatus?: string;
+}) {
+  const amount = money(Number(input.amount || 0)) || '';
+  return lines([
+    '*[Eat App] Échec de retrait*',
+    '\n',
+    `Un retrait de ${amount}${input.phone ? ` vers ${input.phone}` : ''} a échoué côté provider.`,
+    input.ownerLabel ? `Bénéficiaire: ${input.ownerLabel}` : undefined,
+    input.providerStatus ? `Statut provider: \`${input.providerStatus}\`` : undefined,
+    input.withdrawalId ? `Réf retrait: ${input.withdrawalId}` : undefined,
+    'Le solde a été automatiquement recrédité. Vérifiez côté DigiKuntz si besoin.',
+  ]);
+}

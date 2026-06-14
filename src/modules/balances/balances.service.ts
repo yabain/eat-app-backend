@@ -13,6 +13,7 @@ import { Payment, PaymentDocument } from '../../database/schemas/payment.schema'
 import { UserRole } from '../../common/enums/roles.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { DigikuntzProvider } from '../payments/providers/digikuntz.provider';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AdminBalanceOperationDto } from './dto/admin-balance-operation.dto';
 import { CreateWithdrawalDto } from './dto/create-withdrawal.dto';
 import { UpdateWithdrawalStatusDto } from './dto/update-withdrawal-status.dto';
@@ -37,6 +38,7 @@ export class BalancesService {
     @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly digikuntzProvider: DigikuntzProvider,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private oid(id: string | Types.ObjectId) { return new Types.ObjectId(String(id)); }
@@ -888,9 +890,80 @@ export class BalancesService {
           balance: await this.balanceFor(scope, session),
         };
       });
+      if (result?.withdrawal && nextStatus === 'failed') {
+        void this.notifyWithdrawalFailure(result.withdrawal as WithdrawalRequestDocument, note);
+      }
       return result;
     } finally {
       await session.endSession();
+    }
+  }
+
+  /**
+   * Notifie le demandeur (email + WhatsApp) et tous les admins Eat actifs
+   * lorsqu'un retrait passe à `failed`. Le solde a déjà été remboursé par
+   * `transitionWithdrawalStatus`. Fire-and-forget : aucune erreur ne bloque.
+   */
+  private async notifyWithdrawalFailure(
+    withdrawal: WithdrawalRequestDocument,
+    providerStatus?: string,
+  ): Promise<void> {
+    try {
+      const [requester, restaurant, admins] = await Promise.all([
+        withdrawal.requestedBy
+          ? this.userModel
+              .findById(withdrawal.requestedBy)
+              .select({ email: 1, phone: 1, firstName: 1 })
+              .lean()
+          : null,
+        withdrawal.restaurantId
+          ? this.restaurantModel
+              .findById(withdrawal.restaurantId)
+              .select({ name: 1 })
+              .lean()
+          : null,
+        this.userModel
+          .find({ role: UserRole.ADMIN, isActive: true })
+          .select({ email: 1, phone: 1 })
+          .lean(),
+      ]);
+
+      const amount = Number(withdrawal.amount || 0);
+      const currency = withdrawal.currency || 'XAF';
+      const phone = withdrawal.phone;
+      const withdrawalId = String(withdrawal._id);
+      const ownerLabel =
+        withdrawal.ownerType === 'restaurant'
+          ? restaurant?.name || 'Restaurant'
+          : `${requester?.firstName || ''} ${requester?.email || ''}`.trim() || 'Demandeur';
+
+      await this.notifications.sendWithdrawalFailed(
+        requester
+          ? {
+              email: requester.email,
+              phone: requester.phone,
+              firstName: requester.firstName,
+            }
+          : null,
+        { amount, currency, phone, withdrawalId },
+      );
+
+      await this.notifications.sendWithdrawalFailedAdmins(
+        (admins || []).map((admin) => ({ email: admin.email, phone: admin.phone })),
+        {
+          amount,
+          currency,
+          phone,
+          ownerType: withdrawal.ownerType,
+          ownerLabel,
+          withdrawalId,
+          providerStatus,
+        },
+      );
+    } catch (error: any) {
+      this.logger.warn(
+        `notifyWithdrawalFailure(${String(withdrawal._id)}) failed: ${error?.message || error}`,
+      );
     }
   }
 

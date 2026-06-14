@@ -8,6 +8,7 @@ import { User, UserSchema } from '../../database/schemas/user.schema';
 import { WithdrawalRequest, WithdrawalRequestSchema } from '../../database/schemas/withdrawal-request.schema';
 import { Payment, PaymentSchema } from '../../database/schemas/payment.schema';
 import { DigikuntzProvider } from '../payments/providers/digikuntz.provider';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { BalancesController, BalancesWebhookController } from './balances.controller';
 import { BalancesService } from './balances.service';
 
@@ -22,6 +23,7 @@ import { BalancesService } from './balances.service';
       { name: Order.name, schema: OrderSchema },
       { name: Payment.name, schema: PaymentSchema },
     ]),
+    NotificationsModule,
   ],
   providers: [BalancesService, DigikuntzProvider],
   controllers: [BalancesController, BalancesWebhookController],
