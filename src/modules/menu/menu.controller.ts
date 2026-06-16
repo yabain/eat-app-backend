@@ -37,6 +37,38 @@ export class MenuController {
   triggerMidnightStockReset() {
     return this.inventory.resetStocksForConfiguredCategories('manual');
   }
+
+  @Post('stock-check')
+  @ApiOperation({
+    summary: 'Vérifier la disponibilité (sans zone) d\'une liste d\'items du panier',
+    description:
+      'Retourne la liste des items du panier qui ne sont plus disponibles dans la quantité demandée. Utilisé par le panier pour pré-valider avant le checkout.',
+  })
+  @ApiBody({
+    schema: {
+      example: { items: [{ menuItemId: '665d58e63d7bfeb8f7f6172e', quantity: 2 }] },
+    },
+  })
+  @ApiOkResponse({
+    description: 'Diagnostic des stocks par item',
+    schema: {
+      example: {
+        items: [
+          {
+            menuItemId: '665d58e63d7bfeb8f7f6172e',
+            name: 'Riz au poulet',
+            requested: 2,
+            available: 1,
+            reason: 'insufficient',
+          },
+        ],
+      },
+    },
+  })
+  stockCheck(@Body() body: { items: Array<{ menuItemId: string; quantity: number }> }) {
+    return this.service.stockCheck(body?.items || []);
+  }
+
   @Get('public/:restaurantId')
   @ApiOperation({ summary: 'Lister les items publics d’un restaurant' })
   @ApiParam({ name: 'restaurantId', example: '665d58e63d7bfeb8f7f6172e' })

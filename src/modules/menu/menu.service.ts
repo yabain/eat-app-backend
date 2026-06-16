@@ -29,6 +29,80 @@ export class MenuService {
   }
 
   /**
+   * Diagnostique chaque ligne du panier : retourne uniquement les entrées qui
+   * posent problème (non trouvé / désactivé / stock insuffisant) avec leur
+   * quantité disponible courante. Utilisé par la page panier pour afficher un
+   * bandeau de pré-validation avant le checkout.
+   */
+  async stockCheck(
+    items: Array<{ menuItemId: string; quantity: number }>,
+  ): Promise<{
+    items: Array<{
+      menuItemId: string;
+      name: string;
+      requested: number;
+      available: number;
+      reason: 'unavailable' | 'insufficient';
+    }>;
+  }> {
+    const issues: Array<{
+      menuItemId: string;
+      name: string;
+      requested: number;
+      available: number;
+      reason: 'unavailable' | 'insufficient';
+    }> = [];
+
+    const validInputs = (items || []).filter(
+      (entry) => entry && Types.ObjectId.isValid(entry.menuItemId) && Number(entry.quantity) > 0,
+    );
+    if (!validInputs.length) return { items: [] };
+
+    const menuItems = await this.model
+      .find({ _id: { $in: validInputs.map((entry) => new Types.ObjectId(entry.menuItemId)) } })
+      .select({ _id: 1, name: 1, stock: 1, isAvailable: 1, isActive: 1 })
+      .lean();
+
+    const byId = new Map(menuItems.map((menu) => [String(menu._id), menu]));
+
+    for (const entry of validInputs) {
+      const menu = byId.get(entry.menuItemId);
+      const requested = Number(entry.quantity);
+      if (!menu) {
+        issues.push({
+          menuItemId: entry.menuItemId,
+          name: 'Plat introuvable',
+          requested,
+          available: 0,
+          reason: 'unavailable',
+        });
+        continue;
+      }
+      if (!menu.isActive || !menu.isAvailable || (menu.stock || 0) <= 0) {
+        issues.push({
+          menuItemId: entry.menuItemId,
+          name: menu.name,
+          requested,
+          available: 0,
+          reason: 'unavailable',
+        });
+        continue;
+      }
+      if ((menu.stock || 0) < requested) {
+        issues.push({
+          menuItemId: entry.menuItemId,
+          name: menu.name,
+          requested,
+          available: Number(menu.stock || 0),
+          reason: 'insufficient',
+        });
+      }
+    }
+
+    return { items: issues };
+  }
+
+  /**
    * Filtre les `availableAccompanimentIds` proposés pour ne garder que ceux
    * qui appartiennent réellement aux accompagnements de la catégorie cible.
    * Si la catégorie n'existe pas ou n'a pas d'accompagnements, on renvoie [].

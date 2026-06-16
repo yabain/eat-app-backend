@@ -70,10 +70,28 @@ export class OrdersService {
 
     // Réservation atomique du stock : on décrémente chaque item dans la même
     // transaction que la création de la commande. Si un item n'a plus assez de
-    // stock (race avec une autre commande), `adjustStock` lève BadRequestException
-    // et la transaction est rollback.
+    // stock (race avec une autre commande), on transforme l'exception brute en
+    // erreur structurée INSUFFICIENT_STOCK pour que le frontend puisse réagir.
     for (const item of result.items) {
-      await this.inventory.adjustStock(item.menuItemId, -item.quantity, session);
+      try {
+        await this.inventory.adjustStock(item.menuItemId, -item.quantity, session);
+      } catch (error: any) {
+        const isInsufficient = /Insufficient stock/i.test(String(error?.message || ''));
+        if (isInsufficient) {
+          throw new BadRequestException({
+            code: 'INSUFFICIENT_STOCK',
+            message: `« ${item.name} » n'est plus disponible dans la quantité demandée.`,
+            items: [{
+              menuItemId: String(item.menuItemId),
+              name: item.name,
+              requested: item.quantity,
+              available: 0,
+              reason: 'insufficient',
+            }],
+          });
+        }
+        throw error;
+      }
     }
 
     const [order] = await this.orderModel.create(
@@ -215,7 +233,60 @@ export class OrdersService {
       .find({ _id: { $in: menuIds }, restaurantId, isActive: true })
       .populate({ path: 'categoryId', select: 'name systemFeePerItem maxItemsPerOrder accompaniments' })
       .session(session || null);
-    if (menuItems.length !== dto.items.length) throw new BadRequestException('Some menu items are invalid');
+    // Collecte tous les items manquants/désactivés/épuisés et lève une seule
+    // erreur structurée `INSUFFICIENT_STOCK` pour permettre au frontend de
+    // proposer des actions ciblées (réduire la quantité / retirer du panier).
+    const stockIssues: Array<{
+      menuItemId: string;
+      name: string;
+      requested: number;
+      available: number;
+      reason: 'unavailable' | 'insufficient';
+    }> = [];
+
+    for (const input of dto.items) {
+      const menu = menuItems.find((m) => m._id.toString() === input.menuItemId);
+      if (!menu) {
+        stockIssues.push({
+          menuItemId: input.menuItemId,
+          name: 'Plat indisponible',
+          requested: input.quantity,
+          available: 0,
+          reason: 'unavailable',
+        });
+        continue;
+      }
+      if (!menu.isAvailable || (menu.stock || 0) <= 0) {
+        stockIssues.push({
+          menuItemId: input.menuItemId,
+          name: menu.name,
+          requested: input.quantity,
+          available: 0,
+          reason: 'unavailable',
+        });
+        continue;
+      }
+      if (menu.stock < input.quantity) {
+        stockIssues.push({
+          menuItemId: input.menuItemId,
+          name: menu.name,
+          requested: input.quantity,
+          available: menu.stock,
+          reason: 'insufficient',
+        });
+      }
+    }
+
+    if (stockIssues.length > 0) {
+      throw new BadRequestException({
+        code: 'INSUFFICIENT_STOCK',
+        message: stockIssues.length === 1
+          ? `« ${stockIssues[0].name} » n'est plus disponible dans la quantité demandée.`
+          : `${stockIssues.length} articles de votre panier ne sont plus disponibles dans la quantité demandée.`,
+        items: stockIssues,
+      });
+    }
+
     const zone = await this.zoneModel
       .findOne({ city: dto.city, district: dto.district, isActive: true })
       .session(session || null);
@@ -224,7 +295,6 @@ export class OrdersService {
     const items = dto.items.map((input) => {
       const menu = menuItems.find((m) => m._id.toString() === input.menuItemId);
       if (!menu) throw new BadRequestException('Invalid menu item');
-      if (menu.stock < input.quantity) throw new BadRequestException(`Insufficient stock for ${menu.name}`);
       const category = menu.categoryId as any;
       const systemFeePerItem = Math.max(0, Math.floor(Number(category?.systemFeePerItem || 0)));
 
