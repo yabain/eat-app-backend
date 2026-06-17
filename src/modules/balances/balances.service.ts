@@ -446,16 +446,24 @@ export class BalancesService {
         source: 'withdrawal',
         type: 'withdrawal',
         direction: 'debit',
+        // `approved` est un statut hérité (avant la refonte) : on l'expose
+        // comme `pending` au consommateur pour qu'il s'affiche en « En cours »,
+        // même si le document en base n'a pas encore été ré-évalué par le cron.
+        status: withdrawal.status === 'approved' ? 'pending' : withdrawal.status,
         label: 'Retrait de solde',
         amount: Number(withdrawal.amount || 0),
         currency: withdrawal.currency || 'XAF',
-        status: withdrawal.status,
         provider: withdrawal.provider,
         providerRef: withdrawal.providerRef,
         transactionRef: withdrawal.transactionRef,
         phone: withdrawal.phone,
         accountBankCode: withdrawal.accountBankCode,
-        note: withdrawal.note,
+        // Filtre les notes polluées par d'anciens écrasements avec le statut
+        // provider (« payout_pending », « payin_success », etc.) pour ne pas
+        // les afficher comme libellé utilisateur.
+        note: /^(payin_|payout_)/.test(String(withdrawal.note || ''))
+          ? undefined
+          : withdrawal.note,
         restaurant: withdrawal.restaurantId || null,
         user: withdrawal.userId || withdrawal.requestedBy || null,
         createdAt: withdrawal.createdAt,
@@ -571,7 +579,11 @@ export class BalancesService {
   }
 
   private localStatusForProviderStatus(status?: string): WithdrawalStatus | null {
-    if (status === 'payout_pending') return 'approved';
+    // `payout_pending` est renvoyé par DigiKuntz à l'initiation ET pendant le
+    // traitement par l'admin DigiKuntz (avant Flutterwave). Côté Eat, on garde
+    // le retrait en `pending` (« En attente ») jusqu'à ce qu'un état FINAL
+    // arrive (success/error/closed/rejected).
+    if (status === 'payout_pending') return 'pending';
     if (status === 'payout_success') return 'paid';
     if (['payout_error', 'payout_closed', 'payout_rejected'].includes(status || '')) return 'failed';
     return null;
@@ -820,10 +832,14 @@ export class BalancesService {
     // jusqu'à ce qu'un état final (success/error/rejected/closed) arrive par
     // webhook ou par le cron de sync `syncOpenDigikuntzWithdrawals`.
     const nextStatus = this.localStatusForProviderStatus(response.status) || 'pending';
+    // On ne passe pas `response.status` comme `note` car le note de la
+    // withdrawal sert au libellé côté UI (« Retrait de solde / payout_pending »
+    // serait incompréhensible pour l'utilisateur). Le statut provider reste
+    // accessible via `providerStatus` dans providerFields.
     return this.transitionWithdrawalStatus(
       String(withdrawal._id),
       nextStatus,
-      response.status,
+      undefined,
       actor.sub,
       {
         providerRef: response.providerRef,
@@ -988,7 +1004,7 @@ export class BalancesService {
     return this.transitionWithdrawalStatus(
       withdrawalId,
       nextStatus,
-      providerStatus,
+      undefined,
       undefined,
       {
         providerRef: payload?.id,
@@ -999,7 +1015,13 @@ export class BalancesService {
     );
   }
 
-  @Cron(CronExpression.EVERY_MINUTE)
+  // Sync toutes les 10 secondes : on parcourt les retraits Eat encore en
+  // `pending` (ou hérités en `approved`) et on interroge DigiKuntz via
+  // `getTransactionStatus(providerRef)`. Tout changement d'état détecté
+  // déclenche `transitionWithdrawalStatus` (refund + notifs si échec, mise
+  // à `paid` si succès). Idempotent grâce au verrou
+  // `isSyncingProviderWithdrawals`.
+  @Cron(CronExpression.EVERY_10_SECONDS)
   async syncOpenDigikuntzWithdrawals() {
     if (this.isSyncingProviderWithdrawals) {
       this.logger.debug('DigiKuntz withdrawal sync already running, skipping');
@@ -1016,14 +1038,25 @@ export class BalancesService {
           // `approved` reste inclus pour les anciens retraits déjà transitionnés
           // avant le changement de comportement.
           status: { $in: ['pending', 'approved'] },
-          providerRef: { $exists: true, $ne: null },
+          // `transactionRef` est la référence stable côté DigiKuntz (ex:
+          // IN958#260617135017) ; on préfère poll par cette ref plutôt que
+          // par le `providerRef` (= Mongo _id) qui est moins lisible et
+          // peut différer entre déploiements.
+          $or: [
+            { transactionRef: { $exists: true, $ne: null } },
+            { providerRef: { $exists: true, $ne: null } },
+          ],
         })
         .sort({ updatedAt: 1 })
         .limit(Number.isFinite(limit) && limit > 0 ? limit : 100);
 
       for (const withdrawal of withdrawals) {
         try {
-          const remote = await this.digikuntzProvider.getTransactionStatus(withdrawal.providerRef || '');
+          // Lookup prioritaire par transactionRef ; fallback sur providerRef
+          // si la ref n'a pas pu être capturée à l'initiation.
+          const remote = withdrawal.transactionRef
+            ? await this.digikuntzProvider.getTransactionStatusByRef(withdrawal.transactionRef)
+            : await this.digikuntzProvider.getTransactionStatus(withdrawal.providerRef || '');
           const providerStatus = remote?.status;
           const nextStatus = this.localStatusForProviderStatus(providerStatus);
           if (!remote || !providerStatus || !nextStatus) continue;
@@ -1031,7 +1064,7 @@ export class BalancesService {
           await this.transitionWithdrawalStatus(
             String(withdrawal._id),
             nextStatus,
-            providerStatus,
+            undefined,
             undefined,
             {
               providerRef: remote.id || withdrawal.providerRef,

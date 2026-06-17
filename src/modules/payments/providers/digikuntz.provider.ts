@@ -48,13 +48,32 @@ export class DigikuntzProvider {
   }
 
   async getTransactionStatus(transactionId: string): Promise<{ id: string; status: string; data: any } | null> {
+    return this.fetchTransaction(`/dev/transaction?transactionId=${encodeURIComponent(transactionId)}`);
+  }
+
+  /**
+   * Variante par `transactionRef` (ex: `IN958#260617135017`). À privilégier
+   * pour les polls : la référence est stable, lisible et indexée côté
+   * DigiKuntz, et la route source-of-truth est dédiée aux apiPayouts.
+   */
+  async getTransactionStatusByRef(transactionRef: string): Promise<{ id: string; status: string; data: any } | null> {
+    if (!transactionRef) return null;
+    return this.fetchTransaction(`/dev/transaction-by-ref?transactionRef=${encodeURIComponent(transactionRef)}`);
+  }
+
+  private async fetchTransaction(path: string): Promise<{ id: string; status: string; data: any } | null> {
     try {
-      const res = await fetch(`${this.baseUrl}/dev/transaction?transactionId=${transactionId}`, {
+      const res = await fetch(`${this.baseUrl}${path}`, {
         method: 'GET',
         headers: this.headers,
       });
       if (!res.ok) return null;
-      return res.json();
+      // DigiKuntz peut renvoyer une chaîne brute (« Unauthorized », « no
+      // transaction found »…) en cas de mismatch credentials/scopes. On ne
+      // valide la réponse qu'à condition qu'elle ait la forme `{id, status}`.
+      const body: any = await res.json().catch(() => null);
+      if (!body || typeof body !== 'object' || !body.status) return null;
+      return body;
     } catch {
       return null;
     }
