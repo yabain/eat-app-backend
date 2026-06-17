@@ -4,7 +4,7 @@ export function orderDeliveredTemplate(input: { orderNumber: string; orderUrl?: 
   return {
     subject: `Commande livrée - ${input.orderNumber}`,
     html: renderMailLayout({
-      preview: `Votre commande ${input.orderNumber} a été livrée.`,
+      preview: `Votre commande *${input.orderNumber}* a été livrée.`,
       eyebrow: 'Livraison',
       title: 'Commande livrée',
       intro: 'Votre commande a été livrée. Merci d’avoir utilisé Eat App.',

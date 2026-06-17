@@ -814,7 +814,12 @@ export class BalancesService {
         raw: { error: error?.message || String(error) },
       }));
 
-    const nextStatus = this.localStatusForProviderStatus(response.status) || 'approved';
+    // À l'initiation, DigiKuntz renvoie `transaction_payin_success` qui
+    // confirme uniquement que la transaction a été enregistrée côté provider
+    // (avant tout traitement Mobile Money). On garde le retrait en `pending`
+    // jusqu'à ce qu'un état final (success/error/rejected/closed) arrive par
+    // webhook ou par le cron de sync `syncOpenDigikuntzWithdrawals`.
+    const nextStatus = this.localStatusForProviderStatus(response.status) || 'pending';
     return this.transitionWithdrawalStatus(
       String(withdrawal._id),
       nextStatus,
@@ -1007,7 +1012,10 @@ export class BalancesService {
       const withdrawals = await this.withdrawalModel
         .find({
           provider: 'digikuntz',
-          status: { $in: ['approved'] },
+          // `pending` couvre le nouveau flux (initiation → attente final).
+          // `approved` reste inclus pour les anciens retraits déjà transitionnés
+          // avant le changement de comportement.
+          status: { $in: ['pending', 'approved'] },
           providerRef: { $exists: true, $ne: null },
         })
         .sort({ updatedAt: 1 })
