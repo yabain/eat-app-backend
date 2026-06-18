@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -9,6 +9,7 @@ import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { WithdrawalRequest, WithdrawalRequestDocument, WithdrawalStatus } from '../../database/schemas/withdrawal-request.schema';
+import { CronLeaseService } from '../../common/cron-lease/cron-lease.service';
 import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
 import { UserRole } from '../../common/enums/roles.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
@@ -39,9 +40,45 @@ export class BalancesService {
     @InjectConnection() private readonly connection: Connection,
     private readonly digikuntzProvider: DigikuntzProvider,
     private readonly notifications: NotificationsService,
+    private readonly cronLease: CronLeaseService,
   ) {}
 
   private oid(id: string | Types.ObjectId) { return new Types.ObjectId(String(id)); }
+
+  /**
+   * Clé canonique d'un scope balance (ownerType + restaurantId/userId) sous
+   * forme de string. Utilisé pour matcher deux scopes même si l'un a un
+   * ObjectId et l'autre un string, ou pour grouper dans un Set/Map.
+   */
+  private scopeKey(scope: any): string {
+    const ownerType = String(scope?.ownerType || '');
+    const restaurantId = scope?.restaurantId ? String(scope.restaurantId) : '';
+    const userId = scope?.userId ? String(scope.userId) : '';
+    return `${ownerType}|${restaurantId}|${userId}`;
+  }
+
+  /**
+   * Renvoie l'ensemble des scopes ayant une withdrawal NON soldée
+   * (pending/gateway_unavailable/approved). Ces scopes ont leur solde « gelé »
+   * — tout cron de réconciliation doit les skipper pour ne pas écraser le
+   * débit/refund déjà appliqué par `$inc`.
+   */
+  async getScopesWithUnresolvedWithdrawals(): Promise<Set<string>> {
+    const rows = await this.withdrawalModel.aggregate([
+      { $match: { status: { $in: ['pending', 'gateway_unavailable', 'approved'] } } },
+      {
+        $group: {
+          _id: {
+            ownerType: '$ownerType',
+            restaurantId: '$restaurantId',
+            userId: '$userId',
+          },
+        },
+      },
+    ]);
+    return new Set(rows.map((row: any) => this.scopeKey(row._id)));
+  }
+
 
   private constantTimeEquals(a: string, b: string): boolean {
     const ba = Buffer.from(a, 'utf8');
@@ -73,21 +110,70 @@ export class BalancesService {
   }
 
   private async balanceFor(scope: any, session?: ClientSession): Promise<number> {
-    const account = this.balanceAccountForScope(scope);
-    let doc = await this.balanceModel.findOne(account).session(session || null);
-    if (!doc) {
-      const agg = await this.transactionModel.aggregate([
-        { $match: scope },
-        { $group: { _id: null, balance: { $sum: '$amount' } } },
-      ]).session(session || null);
-      const balance = this.toBalanceInteger(agg[0]?.balance || 0);
-      doc = await this.balanceModel.findOneAndUpdate(
-        account,
-        { $setOnInsert: { ...account, balance, currency: 'XAF' } },
-        { upsert: true, new: true, session },
-      );
+    // Le ledger BalanceTransaction est l'unique source de vérité :
+    // - retrait initié/en attente => withdrawal_request débitée
+    // - retrait échoué/rejeté => withdrawal_refund créditée
+    // Tant qu'il n'y a pas de refund, le solde reste donc débité.
+    return this.refreshCachedBalance(scope, session);
+  }
+
+  /**
+   * Calcul autoritaire du solde pour un scope donné. On ne dépend plus du
+   * statut WithdrawalRequest pour éviter qu'un retrait `pending` soit
+   * recrédité par erreur lors d'un refresh/backfill.
+   */
+  private async computeBalanceFromSources(scope: any, session?: ClientSession): Promise<number> {
+    const btsMatch: any = {
+      ownerType: scope.ownerType,
+    };
+    if (scope.ownerType === 'restaurant') {
+      btsMatch.restaurantId = scope.restaurantId;
+    } else if (scope.ownerType === 'user') {
+      btsMatch.userId = scope.userId;
     }
-    return this.toBalanceInteger(doc?.balance || 0);
+    const [btRow] = await this.transactionModel.aggregate([
+      { $match: btsMatch },
+      {
+        $lookup: {
+          from: this.withdrawalModel.collection.name,
+          localField: 'withdrawalId',
+          foreignField: '_id',
+          as: 'withdrawal',
+        },
+      },
+      {
+        $addFields: {
+          withdrawalStatus: { $arrayElemAt: ['$withdrawal.status', 0] },
+        },
+      },
+      {
+        $match: {
+          $or: [
+            { reason: { $ne: 'withdrawal_refund' } },
+            { withdrawalStatus: { $in: ['failed', 'rejected'] } },
+          ],
+        },
+      },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]).session(session || null);
+    return this.toBalanceInteger(Number(btRow?.total || 0));
+  }
+
+  private async refreshCachedBalance(scope: any, session?: ClientSession): Promise<number> {
+    const account = this.balanceAccountForScope(scope);
+    const balance = await this.computeBalanceFromSources(scope, session);
+    await this.balanceModel.updateOne(
+      account,
+      {
+        $set: {
+          ...account,
+          balance,
+          currency: 'XAF',
+        },
+      },
+      { upsert: true, session },
+    );
+    return balance;
   }
 
   private toBalanceInteger(value: any): number {
@@ -116,29 +202,47 @@ export class BalancesService {
     return transaction;
   }
 
+  /**
+   * Helper IDEMPOTENT pour les mouvements de solde rattachés à un événement
+   * métier unique (withdrawal request/refund, order share, etc.).
+   *
+   * Le `filter` doit identifier le couple **(transaction métier, action)**
+   * — typiquement `{ withdrawalId, reason: 'withdrawal_request' }` ou
+   * `{ orderId, reason: 'order_restaurant_share' }`.
+   *
+   * Garantie cross-service/cron : même si plusieurs threads (cron de sync,
+   * webhook DigiKuntz, retry…) appellent simultanément cette méthode avec
+   * le même filtre, le `$inc` sur la Balance ne s'applique **qu'une seule
+   * fois** (celui qui gagne la course d'insertion). Les threads perdants
+   * voient l'existant et ne font rien.
+   */
   private async upsertBalanceTransaction(filter: any, payload: any, session?: ClientSession) {
-    const previous = await this.transactionModel.findOne(filter).session(session || null).select('amount');
-    const previousAmount = Number(previous?.amount || 0);
     const nextAmount = this.toBalanceInteger(payload.amount);
     payload.amount = nextAmount;
-    const delta = nextAmount - previousAmount;
     const account = this.balanceAccountForScope(payload);
+
     const result = await this.transactionModel.updateOne(
       filter,
       { $setOnInsert: payload },
       { upsert: true, session },
     );
-    if (delta !== 0) {
+
+    const inserted = Number(result.upsertedCount || 0) > 0
+      || !!(result as any).upsertedId;
+    if (inserted && nextAmount !== 0) {
       await this.balanceModel.updateOne(
         account,
         {
           $setOnInsert: { ...account, currency: payload.currency || 'XAF' },
-          $inc: { balance: delta },
+          $inc: { balance: nextAmount },
         },
         { upsert: true, session },
       );
     }
-    return result;
+    // On ré-expose `inserted` + le résultat brut pour les call-sites qui
+    // doivent savoir si c'est cet appel-ci qui a appliqué le mouvement
+    // (utile pour les notifications, refund flags, etc.).
+    return { ...result, inserted };
   }
 
   private scopeForActor(actor: any) {
@@ -171,10 +275,37 @@ export class BalancesService {
 
   @Cron('*/5 * * * *')
   async backfillBalancesFromTransactions() {
+    // Multi-instance safe : seul un nœud détient le lease à la fois (TTL 4 min,
+    // donc strictement inférieur à l'intervalle 5 min pour libérer entre ticks).
+    if (!(await this.cronLease.acquire('balances.backfill', 4 * 60 * 1000))) return;
     if (this.isBackfillingBalances) return;
     this.isBackfillingBalances = true;
     try {
-      const rows = await this.transactionModel.aggregate([
+      // Le solde est la somme du ledger. Un retrait pending reste débité via
+      // `withdrawal_request`; un échec ajoute `withdrawal_refund`.
+      const bts = await this.transactionModel.aggregate([
+        { $match: {} },
+        {
+          $lookup: {
+            from: this.withdrawalModel.collection.name,
+            localField: 'withdrawalId',
+            foreignField: '_id',
+            as: 'withdrawal',
+          },
+        },
+        {
+          $addFields: {
+            withdrawalStatus: { $arrayElemAt: ['$withdrawal.status', 0] },
+          },
+        },
+        {
+          $match: {
+            $or: [
+              { reason: { $ne: 'withdrawal_refund' } },
+              { withdrawalStatus: { $in: ['failed', 'rejected'] } },
+            ],
+          },
+        },
         {
           $group: {
             _id: {
@@ -188,20 +319,31 @@ export class BalancesService {
         },
       ]);
 
-      for (const row of rows) {
-        const scope = row._id.ownerType === 'restaurant'
-          ? { ownerType: 'restaurant', restaurantId: row._id.restaurantId }
-          : row._id.ownerType === 'user'
-            ? { ownerType: 'user', userId: row._id.userId }
+      const map = new Map<string, { scope: any; balance: number; currency?: string }>();
+      for (const row of bts) {
+        const key = this.scopeKey(row._id);
+        map.set(key, {
+          scope: row._id,
+          balance: Number(row.balance || 0),
+          currency: row.currency,
+        });
+      }
+
+      for (const { scope: scopeId, balance, currency } of map.values()) {
+        const scope = scopeId.ownerType === 'restaurant'
+          ? { ownerType: 'restaurant', restaurantId: scopeId.restaurantId }
+          : scopeId.ownerType === 'user'
+            ? { ownerType: 'user', userId: scopeId.userId }
             : { ownerType: 'system' };
         const account = this.balanceAccountForScope(scope);
+        const finalBalance = this.toBalanceInteger(balance);
         await this.balanceModel.updateOne(
           account,
           {
             $set: {
               ...account,
-              balance: this.toBalanceInteger(row.balance),
-              currency: row.currency || 'XAF',
+              balance: finalBalance,
+              currency: currency || 'XAF',
             },
           },
           { upsert: true },
@@ -562,20 +704,34 @@ export class BalancesService {
     return restaurant;
   }
 
-  private withdrawalCallbackUrl(withdrawalId: string) {
-    const webhookSecret = process.env.DIGIKUNTZ_WEBHOOK_SECRET;
-    const baseUrl = (process.env.APP_URL || '').replace(/\/+$/, '');
-    if (!baseUrl) return undefined;
-    const token = webhookSecret ? `?token=${encodeURIComponent(webhookSecret)}` : '';
-    return `${baseUrl}/api/balances/withdrawals/${withdrawalId}/webhook/digikuntz${token}`;
-  }
-
   private userDisplayName(user: any) {
     return `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || user?.phone || 'Bénéficiaire';
   }
 
   private normalizeWithdrawalPhone(phone: string) {
     return `237${normalizeCameroonPhone(phone)}`;
+  }
+
+  /**
+   * Tente d'extraire le `message` JSON d'une chaîne d'erreur provider
+   * (typiquement `"DigiKuntz payout error: {\"statusCode\":409,\"message\":\"Insufficient balance\"...}"`).
+   * Renvoie une chaîne lisible utilisateur, ou la chaîne brute en dernier
+   * recours.
+   */
+  private extractProviderErrorMessage(rawError: string): string {
+    if (!rawError) return '';
+    const jsonStart = rawError.indexOf('{');
+    if (jsonStart >= 0) {
+      try {
+        const parsed = JSON.parse(rawError.slice(jsonStart));
+        const message = parsed?.message;
+        if (Array.isArray(message)) return message.join(', ');
+        if (typeof message === 'string') return message;
+      } catch {
+        /* fallthrough */
+      }
+    }
+    return rawError.replace(/^DigiKuntz payout error:\s*/i, '').slice(0, 240);
   }
 
   private localStatusForProviderStatus(status?: string): WithdrawalStatus | null {
@@ -760,24 +916,82 @@ export class BalancesService {
       throw new BadRequestException('Unsupported MTN Mobile Money or Orange Money number');
     }
 
+    // Préchecking: solde suffisant côté Eat (hors transaction pour ne pas
+    // tenir un lock pendant l'appel réseau à DigiKuntz).
+    const preAvailable = await this.balanceFor(scope);
+    if (amount > preAvailable) throw new BadRequestException('Insufficient balance');
+
+    // 1) Contact DigiKuntz EN PREMIER. L'ID du retrait est généré upfront pour
+    //    pouvoir le passer en narration sans avoir encore écrit en base.
+    const withdrawalId = new Types.ObjectId();
+    const requester = await this.userModel.findById(this.oid(actor.sub));
+    const outcome = await this.callDigikuntzPayoutOutcome({
+      amount,
+      phone: dto.phone,
+      accountBankCode,
+      receiverName: this.userDisplayName(requester),
+      narration: `Retrait Eat App ${withdrawalId}`,
+    });
+
+    // 2) Selon la réponse de DigiKuntz, on enregistre la transaction.
+    //    - SUCCESS → status='pending' (en attente de l'état final DigiKuntz)
+    //    - GATEWAY_UNAVAILABLE → status='gateway_unavailable' (le cron retentera)
+    //    - PROVIDER_ERROR (4xx) → on lève une exception → AUCUNE écriture en BD
+    if (outcome.kind === 'provider_error') {
+      this.logger.warn(
+        `Withdrawal aborted (no DB write) — providerMessage="${outcome.providerMessage}", raw="${outcome.rawError}"`,
+      );
+      throw new BadRequestException(
+        outcome.providerMessage || 'Retrait refusé par le service de paiement.',
+      );
+    }
+
+    const localStatus: WithdrawalStatus =
+      outcome.kind === 'gateway_unavailable' ? 'gateway_unavailable' : 'pending';
+    const now = new Date();
+
     const session = await this.connection.startSession();
     try {
       let result: any;
-      let withdrawalId: Types.ObjectId | null = null;
       await session.withTransaction(async () => {
+        // Re-check de solde dans la transaction (race protection).
         const available = await this.balanceFor(scope, session);
         if (amount > available) throw new BadRequestException('Insufficient balance');
 
         const [withdrawal] = await this.withdrawalModel.create([{
+          _id: withdrawalId,
           ...scope,
           requestedBy: this.oid(actor.sub),
           amount,
           phone: dto.phone,
           accountBankCode,
           currency: 'XAF',
-          status: 'pending',
+          status: localStatus,
+          provider: 'digikuntz',
+          ...(outcome.kind === 'success'
+            ? {
+                providerRef: outcome.providerRef,
+                transactionRef: outcome.transactionRef,
+                providerStatus: outcome.providerStatus,
+                providerPayload: outcome.providerPayload,
+              }
+            : {
+                providerStatus: 'gateway_unavailable',
+                providerPayload: {
+                  reason: 'gateway_unavailable',
+                  error: outcome.rawError,
+                  attemptedAt: now.toISOString(),
+                },
+                gatewayUnavailableSince: now,
+                gatewayUnavailableAttempts: 1,
+                lastGatewayRetryAt: now,
+              }),
         }], { session });
 
+        // Débit initial : insertion directe via `recordBalanceTransaction`.
+        // L'unique index (withdrawalId, reason) sur BalanceTransaction
+        // prévient tout double-insert au niveau Mongo. La transaction
+        // session garantit l'atomicité avec la création de la withdrawal.
         const debit = await this.recordBalanceTransaction({
           ...scope,
           withdrawalId: withdrawal._id,
@@ -789,63 +1003,148 @@ export class BalancesService {
           createdBy: this.oid(actor.sub),
         }, session);
 
+        const newBalance = await this.refreshCachedBalance(scope, session);
+        this.logger.log(
+          `Withdrawal ${withdrawal._id} created — amount=${amount}, status=${localStatus}, balanceBefore=${available}, balanceAfter=${newBalance}, debitId=${(debit as any)?._id}`,
+        );
+
         result = {
           withdrawal,
           debit,
-          balance: await this.balanceFor(scope, session),
+          balance: newBalance,
         };
-        withdrawalId = withdrawal._id;
       });
-      if (!withdrawalId) throw new BadRequestException('Withdrawal creation failed');
-      const execution = await this.executeWithdrawal(withdrawalId, actor);
-      return { ...result, withdrawal: execution.withdrawal, balance: execution.balance, execution };
+      return { ...result, execution: { withdrawal: result.withdrawal, balance: result.balance } };
     } finally {
       await session.endSession();
     }
   }
 
-  private async executeWithdrawal(withdrawalId: Types.ObjectId, actor: any) {
-    const withdrawal = await this.withdrawalModel.findById(withdrawalId);
-    if (!withdrawal) throw new NotFoundException('Withdrawal request not found');
-    const requester = await this.userModel.findById(withdrawal.requestedBy);
-    const response = await this.digikuntzProvider
-      .initiatePayout({
-        amount: withdrawal.amount,
-        phone: this.normalizeWithdrawalPhone(withdrawal.phone),
-        accountBankCode: withdrawal.accountBankCode
-          || detectCameroonMobileMoneyOperator(withdrawal.phone)
-          || 'MTN',
-        receiverName: this.userDisplayName(requester),
-        narration: `Retrait Eat App ${withdrawal._id}`,
-        callbackUrl: this.withdrawalCallbackUrl(String(withdrawal._id)),
-      })
-      .catch((error) => ({
-        providerRef: undefined,
-        transactionRef: undefined,
-        status: 'payout_error',
-        raw: { error: error?.message || String(error) },
-      }));
-
-    // À l'initiation, DigiKuntz renvoie `transaction_payin_success` qui
-    // confirme uniquement que la transaction a été enregistrée côté provider
-    // (avant tout traitement Mobile Money). On garde le retrait en `pending`
-    // jusqu'à ce qu'un état final (success/error/rejected/closed) arrive par
-    // webhook ou par le cron de sync `syncOpenDigikuntzWithdrawals`.
-    const nextStatus = this.localStatusForProviderStatus(response.status) || 'pending';
-    // On ne passe pas `response.status` comme `note` car le note de la
-    // withdrawal sert au libellé côté UI (« Retrait de solde / payout_pending »
-    // serait incompréhensible pour l'utilisateur). Le statut provider reste
-    // accessible via `providerStatus` dans providerFields.
-    return this.transitionWithdrawalStatus(
-      String(withdrawal._id),
-      nextStatus,
-      undefined,
-      actor.sub,
-      {
+  /**
+   * Encapsule l'appel à DigiKuntz `initiatePayout` et catégorise le résultat
+   * pour le consommateur (createWithdrawal + cron de retry) :
+   *   - `success` : transaction acceptée par DigiKuntz
+   *   - `gateway_unavailable` : timeout/5xx/réseau — à retenter
+   *   - `provider_error` : 4xx — le provider a refusé (insufficient balance,
+   *     payload invalide…)
+   */
+  private async callDigikuntzPayoutOutcome(input: {
+    amount: number;
+    phone: string;
+    accountBankCode: 'MTN' | 'ORANGEMONEY';
+    receiverName: string;
+    narration: string;
+  }): Promise<
+    | {
+        kind: 'success';
+        providerRef?: string;
+        transactionRef?: string;
+        providerStatus?: string;
+        providerPayload?: any;
+      }
+    | { kind: 'gateway_unavailable'; rawError: string }
+    | { kind: 'provider_error'; providerMessage: string; rawError: string }
+  > {
+    try {
+      const response = await this.digikuntzProvider.initiatePayout({
+        amount: input.amount,
+        phone: this.normalizeWithdrawalPhone(input.phone),
+        accountBankCode: input.accountBankCode,
+        receiverName: input.receiverName,
+        narration: input.narration,
+      });
+      return {
+        kind: 'success',
         providerRef: response.providerRef,
         transactionRef: response.transactionRef,
         providerStatus: response.status,
         providerPayload: response.raw,
+      };
+    } catch (error: any) {
+      const rawError = String(error?.message || error || '');
+      if (error instanceof ServiceUnavailableException) {
+        return { kind: 'gateway_unavailable', rawError };
+      }
+      const providerMessage = this.extractProviderErrorMessage(rawError);
+      return { kind: 'provider_error', providerMessage, rawError };
+    }
+  }
+
+  /**
+   * Tente d'initier une withdrawal déjà existante chez DigiKuntz (utilisé
+   * uniquement par le cron de retry des `gateway_unavailable`). À la création
+   * initiale, on passe par `createWithdrawal` qui appelle DigiKuntz AVANT
+   * d'écrire en base.
+   */
+  private async executeWithdrawal(withdrawalId: Types.ObjectId, actor: any) {
+    const withdrawal = await this.withdrawalModel.findById(withdrawalId);
+    if (!withdrawal) throw new NotFoundException('Withdrawal request not found');
+    const requester = await this.userModel.findById(withdrawal.requestedBy);
+
+    const outcome = await this.callDigikuntzPayoutOutcome({
+      amount: withdrawal.amount,
+      phone: withdrawal.phone,
+      accountBankCode: withdrawal.accountBankCode
+        || detectCameroonMobileMoneyOperator(withdrawal.phone)
+        || 'MTN',
+      receiverName: this.userDisplayName(requester),
+      narration: `Retrait Eat App ${withdrawal._id}`,
+    });
+
+    if (outcome.kind === 'gateway_unavailable') {
+      const now = new Date();
+      return this.transitionWithdrawalStatus(
+        String(withdrawal._id),
+        'gateway_unavailable',
+        undefined,
+        actor?.sub,
+        {
+          providerStatus: 'gateway_unavailable',
+          providerPayload: {
+            reason: 'gateway_unavailable',
+            error: outcome.rawError,
+            attemptedAt: now.toISOString(),
+          },
+          ...(withdrawal.gatewayUnavailableSince
+            ? {}
+            : { gatewayUnavailableSince: now }),
+          lastGatewayRetryAt: now,
+          gatewayUnavailableAttempts: (withdrawal.gatewayUnavailableAttempts || 0) + 1,
+        } as any,
+      );
+    }
+
+    if (outcome.kind === 'provider_error') {
+      this.logger.warn(
+        `Withdrawal ${withdrawal._id} retry rejected by provider — providerMessage="${outcome.providerMessage}", raw="${outcome.rawError}"`,
+      );
+      return this.transitionWithdrawalStatus(
+        String(withdrawal._id),
+        'failed',
+        undefined,
+        actor?.sub,
+        {
+          providerStatus: 'payout_error',
+          providerPayload: {
+            error: outcome.rawError,
+            providerMessage: outcome.providerMessage,
+          },
+        },
+      );
+    }
+
+    // Success — bascule en `pending` (en attente d'un état final DigiKuntz).
+    const nextStatus = this.localStatusForProviderStatus(outcome.providerStatus) || 'pending';
+    return this.transitionWithdrawalStatus(
+      String(withdrawal._id),
+      nextStatus,
+      undefined,
+      actor?.sub,
+      {
+        providerRef: outcome.providerRef,
+        transactionRef: outcome.transactionRef,
+        providerStatus: outcome.providerStatus,
+        providerPayload: outcome.providerPayload,
       },
     );
   }
@@ -868,7 +1167,7 @@ export class BalancesService {
           if (note) withdrawal.note = note;
           await withdrawal.save({ session });
           const scope = this.scopeForWithdrawal(withdrawal);
-          result = { withdrawal, refunded: false, balance: await this.balanceFor(scope, session) };
+          result = { withdrawal, refunded: false, balance: await this.refreshCachedBalance(scope, session) };
           return;
         }
         if (['paid', 'rejected', 'failed'].includes(withdrawal.status)) {
@@ -880,6 +1179,13 @@ export class BalancesService {
         if (processedBy) withdrawal.processedBy = this.oid(processedBy);
         withdrawal.processedAt = new Date();
         Object.assign(withdrawal, providerFields || {});
+        // Nettoyage des champs de retry quand on quitte l'état
+        // `gateway_unavailable` (sauf si la transition reste sur ce statut —
+        // dans ce cas providerFields aura déjà repositionné les bons champs).
+        if (nextStatus !== 'gateway_unavailable') {
+          withdrawal.gatewayUnavailableSince = null;
+          // On garde `gatewayUnavailableAttempts` pour traçabilité.
+        }
         await withdrawal.save({ session });
 
         const shouldRefund = ['rejected', 'failed'].includes(nextStatus);
@@ -901,14 +1207,14 @@ export class BalancesService {
             },
             session,
           );
-          refunded = Boolean(refund.upsertedCount);
+          refunded = Boolean(refund.inserted);
         }
 
         const scope = this.scopeForWithdrawal(withdrawal);
         result = {
           withdrawal,
           refunded,
-          balance: await this.balanceFor(scope, session),
+          balance: await this.refreshCachedBalance(scope, session),
         };
       });
       if (result?.withdrawal && nextStatus === 'failed') {
@@ -1023,6 +1329,10 @@ export class BalancesService {
   // `isSyncingProviderWithdrawals`.
   @Cron(CronExpression.EVERY_10_SECONDS)
   async syncOpenDigikuntzWithdrawals() {
+    // Multi-instance safe : lease 9s (< 10s interval) → un seul nœud poll
+    // DigiKuntz par tick. L'idempotence des transitions garantit la cohérence
+    // même si deux nœuds se chevauchent brièvement.
+    if (!(await this.cronLease.acquire('balances.syncWithdrawals', 9 * 1000))) return;
     if (this.isSyncingProviderWithdrawals) {
       this.logger.debug('DigiKuntz withdrawal sync already running, skipping');
       return;
@@ -1079,6 +1389,85 @@ export class BalancesService {
       }
     } finally {
       this.isSyncingProviderWithdrawals = false;
+    }
+  }
+
+  /**
+   * Cron qui repêche les retraits bloqués en `gateway_unavailable` :
+   * - Si la fenêtre d'1 h depuis `gatewayUnavailableSince` est dépassée →
+   *   bascule à `failed` (refund automatique + notifs user/admins).
+   * - Sinon, tente de ré-initier l'appel à DigiKuntz via `executeWithdrawal`.
+   *   Cette méthode gère elle-même tous les états cibles (pending/paid/failed)
+   *   ou ré-incrémente `gatewayUnavailableAttempts` si le gateway est encore
+   *   injoignable.
+   *
+   * Idempotent grâce au verrou `isRetryingGatewayWithdrawals`.
+   */
+  private isRetryingGatewayWithdrawals = false;
+  private readonly gatewayUnavailableTimeoutMs = Number(
+    process.env.DIGIKUNTZ_GATEWAY_TIMEOUT_MS || 60 * 60 * 1000,
+  );
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async retryGatewayUnavailableWithdrawals() {
+    // Multi-instance safe : lease 50s (< 60s interval).
+    if (!(await this.cronLease.acquire('balances.retryGatewayUnavailable', 50 * 1000))) return;
+    if (this.isRetryingGatewayWithdrawals) {
+      this.logger.debug('Gateway-unavailable retry already running, skipping');
+      return;
+    }
+    this.isRetryingGatewayWithdrawals = true;
+    try {
+      const candidates = await this.withdrawalModel
+        .find({ status: 'gateway_unavailable' })
+        .sort({ gatewayUnavailableSince: 1 })
+        .limit(50);
+
+      for (const withdrawal of candidates) {
+        try {
+          const since = withdrawal.gatewayUnavailableSince
+            ? new Date(withdrawal.gatewayUnavailableSince).getTime()
+            : Date.now();
+          const elapsed = Date.now() - since;
+
+          if (elapsed >= this.gatewayUnavailableTimeoutMs) {
+            // Timeout d'1 h dépassé : on déclare le retrait en échec.
+            // `transitionWithdrawalStatus` orchestre refund + notif user/admins.
+            await this.transitionWithdrawalStatus(
+              String(withdrawal._id),
+              'failed',
+              undefined,
+              undefined,
+              {
+                providerStatus: 'gateway_timeout',
+                providerPayload: {
+                  reason: 'gateway_unavailable_timeout',
+                  unavailableSince: withdrawal.gatewayUnavailableSince,
+                  attempts: withdrawal.gatewayUnavailableAttempts || 0,
+                },
+              },
+            );
+            this.logger.warn(
+              `Withdrawal ${withdrawal._id} timed out in gateway_unavailable after ${Math.round(elapsed / 60_000)} min — marked failed`,
+            );
+            continue;
+          }
+
+          // Sinon, on retente l'initiation. `executeWithdrawal` gère lui-même
+          // toutes les transitions cibles (succès, échec, gateway encore
+          // indisponible).
+          await this.executeWithdrawal(
+            withdrawal._id as Types.ObjectId,
+            { sub: withdrawal.requestedBy ? String(withdrawal.requestedBy) : undefined },
+          );
+        } catch (err: any) {
+          this.logger.warn(
+            `Gateway retry failed for withdrawal ${withdrawal._id}: ${err?.message || err}`,
+          );
+        }
+      }
+    } finally {
+      this.isRetryingGatewayWithdrawals = false;
     }
   }
 }

@@ -8,6 +8,7 @@ import { Restaurant, RestaurantDocument } from '../../database/schemas/restauran
 import { DeliveryZone, DeliveryZoneDocument } from '../../database/schemas/delivery-zone.schema';
 import { PaymentsService } from '../payments/payments.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { CronLeaseService } from '../../common/cron-lease/cron-lease.service';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
 import { UserRole } from '../../common/enums/roles.enum';
@@ -37,6 +38,7 @@ export class DeliveriesService {
     @InjectConnection() private readonly connection: Connection,
     private readonly paymentsService: PaymentsService,
     private readonly notifications: NotificationsService,
+    private readonly cronLease: CronLeaseService,
   ) {}
 
   private readonly autoDispatchKey = 'auto-dispatch';
@@ -182,6 +184,7 @@ export class DeliveriesService {
 
   @Cron('*/3 * * * *')
   async runAutomaticDispatch() {
+    if (!(await this.cronLease.acquire('deliveries.autoDispatch', 2 * 60 * 1000))) return;
     const settings = await this.getOrCreateAutoDispatchSettings();
     if (!settings.enabled) return;
 
@@ -595,6 +598,7 @@ export class DeliveriesService {
 
   @Cron(CronExpression.EVERY_MINUTE)
   async sendOperationalReminders() {
+    if (!(await this.cronLease.acquire('deliveries.operationalReminders', 50 * 1000))) return;
     const reminderMinutes = 10;
     const cutoff = new Date(Date.now() - reminderMinutes * 60_000);
 

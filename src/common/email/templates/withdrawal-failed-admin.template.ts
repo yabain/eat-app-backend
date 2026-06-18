@@ -19,7 +19,7 @@ export function withdrawalFailedAdminTemplate(input: {
       eyebrow: 'Alerte retrait',
       title: 'Un retrait a échoué côté opérateur mobile',
       intro:
-        `Un retrait de <strong>${amount}</strong> n'a pas pu être finalisé par le provider de paiement. ` +
+        `Un retrait de ${amount} n'a pas pu être finalisé par le provider de paiement. ` +
         'Le solde du demandeur a été automatiquement recrédité. Vérifiez le statut côté DigiKuntz.',
       details: [
         { label: 'Montant', value: amount },

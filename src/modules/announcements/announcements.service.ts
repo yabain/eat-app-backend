@@ -20,6 +20,7 @@ import { buildPaginationMeta, normalizePagination } from '../../common/paginatio
 import { NotificationsService } from '../notifications/notifications.service';
 import { ProspectsService } from '../prospects/prospects.service';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
+import { CronLeaseService } from '../../common/cron-lease/cron-lease.service';
 import { CreateAnnouncementDto, UpdateAnnouncementDto } from './dto/announcement.dto';
 import { basename, join } from 'path';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
@@ -37,6 +38,7 @@ export class AnnouncementsService {
     private readonly notificationsService: NotificationsService,
     private readonly prospectsService: ProspectsService,
     private readonly whatsappService: WhatsappService,
+    private readonly cronLease: CronLeaseService,
   ) {}
 
   async list(page?: number, limit?: number, status?: AnnouncementStatus) {
@@ -241,6 +243,7 @@ export class AnnouncementsService {
 
   @Cron(CronExpression.EVERY_MINUTE)
   async sendScheduledAnnouncements() {
+    if (!(await this.cronLease.acquire('announcements.sendScheduled', 50 * 1000))) return;
     const due = await this.announcementModel
       .find({
         status: AnnouncementStatus.SCHEDULED,
@@ -259,6 +262,7 @@ export class AnnouncementsService {
 
   @Cron('*/15 * * * * *')
   async processPendingDeliveries() {
+    if (!(await this.cronLease.acquire('announcements.processPending', 14 * 1000))) return;
     if (this.processingDeliveries) return;
     this.processingDeliveries = true;
     try {

@@ -5,6 +5,7 @@ import { ClientSession, Model, Types } from 'mongoose';
 import { Category, CategoryDocument } from '../../database/schemas/category.schema';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
+import { CronLeaseService } from '../../common/cron-lease/cron-lease.service';
 
 @Injectable()
 export class MenuInventoryService implements OnModuleInit {
@@ -16,6 +17,7 @@ export class MenuInventoryService implements OnModuleInit {
     @InjectModel(MenuItem.name) private readonly menuModel: Model<MenuItemDocument>,
     @InjectModel(Category.name) private readonly categoryModel: Model<CategoryDocument>,
     private readonly auditLogs: AuditLogsService,
+    private readonly cronLease: CronLeaseService,
   ) {}
 
   onModuleInit() {
@@ -63,6 +65,15 @@ export class MenuInventoryService implements OnModuleInit {
 
   @Cron(MenuInventoryService.RESET_CRON, { timeZone: MenuInventoryService.RESET_TZ })
   async resetStocksForConfiguredCategories(triggeredBy: 'cron' | 'manual' = 'cron') {
+    // Trigger manuel (depuis l'admin) : pas de lease, l'opération est explicite.
+    if (triggeredBy === 'cron') {
+      // Le reset minuit doit s'exécuter UNE seule fois par jour, peu importe
+      // combien d'instances tournent. Lease TTL court (1h) suffisant.
+      if (!(await this.cronLease.acquire('menu.resetMidnightStocks', 60 * 60 * 1000))) {
+        this.logger.log('Midnight stock reset skipped — another instance holds the lease');
+        return;
+      }
+    }
     this.logger.log(`==== Midnight stock reset starting (triggeredBy=${triggeredBy}) ====`);
 
     // 1. Trouve toutes les catégories ayant le flag activé.

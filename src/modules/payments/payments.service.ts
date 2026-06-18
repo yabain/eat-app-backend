@@ -6,9 +6,11 @@ import { timingSafeEqual } from 'crypto';
 import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
 import { Balance, BalanceDocument, BalanceAccountType } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
+import { WithdrawalRequest, WithdrawalRequestDocument } from '../../database/schemas/withdrawal-request.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { DigikuntzProvider } from './providers/digikuntz.provider';
 import { NotificationsService } from '../notifications/notifications.service';
+import { CronLeaseService } from '../../common/cron-lease/cron-lease.service';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
 import { PaymentStatus } from '../../common/enums/payment-status.enum';
@@ -31,9 +33,11 @@ export class PaymentsService implements OnModuleInit {
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
     @InjectModel(Balance.name) private balanceModel: Model<BalanceDocument>,
     @InjectModel(BalanceTransaction.name) private transactionModel: Model<BalanceTransactionDocument>,
+    @InjectModel(WithdrawalRequest.name) private withdrawalModel: Model<WithdrawalRequestDocument>,
     private readonly inventory: MenuInventoryService,
     private provider: DigikuntzProvider,
     private notifications: NotificationsService,
+    private readonly cronLease: CronLeaseService,
   ) {}
 
   async onModuleInit() {
@@ -394,6 +398,21 @@ export class PaymentsService implements OnModuleInit {
 
       return { payment, checkout: response };
     } catch (error: any) {
+      // Gateway DigiKuntz indisponible → on supprime le Payment temporaire
+      // pour ne laisser AUCUNE trace en base (rien à réessayer, rien à
+      // historiser) et on remonte une erreur 503 explicite au client.
+      if (error instanceof ServiceUnavailableException) {
+        await this.paymentModel.deleteOne({
+          _id: payment._id,
+          status: PaymentStatus.PROCESSING,
+          providerRef: { $exists: false },
+        });
+        throw new ServiceUnavailableException(
+          'Le service de paiement est temporairement indisponible. Réessayez dans quelques minutes.',
+        );
+      }
+      // Autres erreurs (validation provider, 4xx…) : on garde le Payment
+      // en FAILED pour audit.
       await this.paymentModel.updateOne(
         { _id: payment._id, status: PaymentStatus.PROCESSING },
         {
@@ -608,6 +627,7 @@ export class PaymentsService implements OnModuleInit {
 
   @Cron(CronExpression.EVERY_MINUTE)
   async syncPendingPayments() {
+    if (!(await this.cronLease.acquire('payments.syncPending', 50 * 1000))) return;
     if (this.isSyncingProviderPayments) {
       this.logger.debug('DigiKuntz payment sync already running, skipping');
       return;
@@ -812,7 +832,10 @@ export class PaymentsService implements OnModuleInit {
 
   private async setBalanceTotal(payload: any): Promise<number> {
     const account = this.balanceAccountFromTransactionPayload(payload);
-    const balance = await this.getBalanceTotalFromTransactions(payload);
+    // Le ledger BalanceTransaction est l'unique source de vérité :
+    // retrait initié => débit withdrawal_request ; retrait échoué => refund.
+    // Une réconciliation paiement ne doit jamais recréditer un retrait pending.
+    const balance = await this.computeAuthoritativeBalance(payload);
     await this.balanceModel.findOneAndUpdate(
       account,
       {
@@ -825,6 +848,45 @@ export class PaymentsService implements OnModuleInit {
       { upsert: true, new: true, runValidators: true },
     );
     return balance;
+  }
+
+  private async computeAuthoritativeBalance(payload: any): Promise<number> {
+    const btsMatch: any = {
+      ownerType: payload.ownerType,
+    };
+    if (payload.ownerType === 'restaurant') {
+      btsMatch.restaurantId = payload.restaurantId;
+    } else if (payload.ownerType === 'user') {
+      btsMatch.userId = payload.userId;
+    }
+
+    const [btRow] = await this.transactionModel.aggregate([
+      { $match: btsMatch },
+      {
+        $lookup: {
+          from: this.withdrawalModel.collection.name,
+          localField: 'withdrawalId',
+          foreignField: '_id',
+          as: 'withdrawal',
+        },
+      },
+      {
+        $addFields: {
+          withdrawalStatus: { $arrayElemAt: ['$withdrawal.status', 0] },
+        },
+      },
+      {
+        $match: {
+          $or: [
+            { reason: { $ne: 'withdrawal_refund' } },
+            { withdrawalStatus: { $in: ['failed', 'rejected'] } },
+          ],
+        },
+      },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]);
+
+    return this.balanceInteger(Number(btRow?.total || 0));
   }
 
   private async recordOrderBalanceTransaction(filter: any, payload: any) {
@@ -1037,6 +1099,7 @@ export class PaymentsService implements OnModuleInit {
 
   @Cron(CronExpression.EVERY_MINUTE)
   async reconcilePaidOrderBalances() {
+    if (!(await this.cronLease.acquire('payments.reconcile', 50 * 1000))) return;
     const limit = Number(process.env.BALANCE_RECONCILIATION_BATCH_LIMIT || 100);
     const payments = await this.paymentModel
       .find({ status: PaymentStatus.PAID })

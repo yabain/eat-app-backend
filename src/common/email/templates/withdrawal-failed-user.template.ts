@@ -16,15 +16,15 @@ export function withdrawalFailedUserTemplate(input: {
       eyebrow: 'Retrait',
       title: `Bonjour ${input.firstName || ''},`,
       intro:
-        `Nous n'avons pas pu finaliser votre retrait de <strong>${amount}</strong>` +
-        (input.phone ? ` vers le numéro <strong>${input.phone}</strong>` : '') +
+        `Nous n'avons pas pu finaliser votre retrait de ${amount}` +
+        (input.phone ? ` vers le numéro ${input.phone}` : '') +
         ' en raison d\'un léger souci d\'indisponibilité du réseau mobile. ' +
         'Votre solde a été immédiatement recrédité du montant correspondant. ' +
         'Vous pouvez relancer l\'opération dans quelques minutes depuis votre espace Eat App.',
       details: [
-        { label: 'Montant', value: amount },
-        ...(input.phone ? [{ label: 'Numéro', value: input.phone }] : []),
-        ...(input.withdrawalId ? [{ label: 'Référence', value: input.withdrawalId }] : []),
+        { label: 'Montant: ', value: amount },
+        ...(input.phone ? [{ label: 'Numéro: ', value: input.phone }] : []),
+        ...(input.withdrawalId ? [{ label: 'Référence: ', value: input.withdrawalId }] : []),
       ],
     }),
   };

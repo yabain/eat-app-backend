@@ -6,6 +6,7 @@ import { User, UserSchema } from '../../database/schemas/user.schema';
 import { Restaurant, RestaurantSchema } from '../../database/schemas/restaurant.schema';
 import { Balance, BalanceSchema } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionSchema } from '../../database/schemas/balance-transaction.schema';
+import { WithdrawalRequest, WithdrawalRequestSchema } from '../../database/schemas/withdrawal-request.schema';
 import { DigikuntzWebhookController, PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
 import { DigikuntzProvider } from './providers/digikuntz.provider';
@@ -21,6 +22,7 @@ import { MenuModule } from '../menu/menu.module';
       { name: Restaurant.name, schema: RestaurantSchema },
       { name: Balance.name, schema: BalanceSchema },
       { name: BalanceTransaction.name, schema: BalanceTransactionSchema },
+      { name: WithdrawalRequest.name, schema: WithdrawalRequestSchema },
     ]),
     NotificationsModule,
     MenuModule,

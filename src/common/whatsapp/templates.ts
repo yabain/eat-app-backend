@@ -204,7 +204,7 @@ export function menuItemAvailableWhatsappTemplate(input: {
   const restaurant = input.restaurantName ? ` chez *${input.restaurantName}*` : '';
   return lines([
     `*${input.menuItemName} est à nouveau disponible !*`,
-    '\n',
+    '',
     `Bonjour ${input.firstName || ''},`,
     `Le plat *${input.menuItemName}* que vous avez ajouté à vos favoris est de nouveau disponible${restaurant}.`,
     'Commandez-le avant rupture.',
@@ -222,11 +222,13 @@ export function withdrawalFailedUserWhatsappTemplate(input: {
   const amount = money(Number(input.amount || 0)) || '';
   return lines([
     '*Retrait non abouti*',
-    '\n',
-    `Bonjour ${input.firstName || ''},`,
-    `Votre retrait de ${amount}${input.phone ? ` vers le ${input.phone}` : ''} n'a pas pu être finalisé en raison d'un léger souci d'indisponibilité du réseau mobile.`,
+    '',
+    `Bonjour *${input.firstName || ''}*,`,
+    `Votre retrait de *${amount}*${input.phone ? ` vers le *${input.phone}*` : ''} n'a pas pu être finalisé en raison d'un léger souci d'indisponibilité du réseau mobile.`,
     'Votre solde a été immédiatement recrédité du montant correspondant.',
     'Vous pouvez relancer l\'opération dans quelques minutes depuis votre espace Eat App.',
+    '\n',
+    'https://eat.yaba-in.com',
   ]);
 }
 
@@ -240,9 +242,9 @@ export function withdrawalFailedAdminWhatsappTemplate(input: {
 }) {
   const amount = money(Number(input.amount || 0)) || '';
   return lines([
-    '*[Eat App] Échec de retrait*',
+    '*Échec de retrait*',
     '\n',
-    `Un retrait de ${amount}${input.phone ? ` vers ${input.phone}` : ''} a échoué côté provider.`,
+    `Un retrait de *${amount}*${input.phone ? ` vers *${input.phone}*` : ''} a échoué côté provider.`,
     input.ownerLabel ? `Bénéficiaire: ${input.ownerLabel}` : undefined,
     input.providerStatus ? `Statut provider: \`${input.providerStatus}\`` : undefined,
     input.withdrawalId ? `Réf retrait: ${input.withdrawalId}` : undefined,

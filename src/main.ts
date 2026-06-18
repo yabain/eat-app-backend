@@ -21,26 +21,43 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const allowedHeaders = corsAllowedHeaders();
 
+  // Middleware de pré-vol : on intercepte les OPTIONS le PLUS TÔT possible
+  // avant tout guard/interceptor NestJS, et on renvoie 204 inconditionnellement
+  // pour que le navigateur valide le preflight. Si l'origine est en liste
+  // blanche, on positionne les en-têtes Access-Control-Allow-*. Sinon on
+  // retourne 204 sans les en-têtes — le navigateur bloquera la requête
+  // suivante (XHR) avec un message clair, mais le preflight lui-même réussit.
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (typeof origin === 'string' && isAllowedCorsOrigin(origin, allowedOrigins)) {
+    const isAllowed = typeof origin === 'string' && isAllowedCorsOrigin(origin, allowedOrigins);
+    if (isAllowed && typeof origin === 'string') {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Methods', CORS_METHODS);
-      res.setHeader('Access-Control-Allow-Headers', allowedHeaders.join(','));
-      res.setHeader('Vary', 'Origin');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        // Reflète les headers demandés si fournis (utile pour les preflights
+        // avec headers custom non explicitement listés), sinon liste blanche.
+        String(req.headers['access-control-request-headers'] || allowedHeaders.join(',')),
+      );
+      res.setHeader('Access-Control-Max-Age', '86400');
+      res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
     }
 
     if (req.method === 'OPTIONS') {
-      return res.sendStatus(204);
+      // 204 No Content — preflight terminé, pas de body.
+      res.statusCode = 204;
+      res.setHeader('Content-Length', '0');
+      return res.end();
     }
 
     next();
   });
 
+  // Backup CORS via NestJS au cas où un endpoint contourne le middleware
+  // ci-dessus (très rare). Configure aussi le passthrough préflight.
   app.enableCors({
     origin: (origin, callback) => {
-      // Pas d'Origin : curl, webhooks, apps natives — CORS ne s'applique pas au navigateur.
       if (!origin) return callback(null, true);
       return callback(null, isAllowedCorsOrigin(origin, allowedOrigins));
     },
@@ -48,6 +65,7 @@ async function bootstrap() {
     methods: CORS_METHODS,
     allowedHeaders,
     optionsSuccessStatus: 204,
+    preflightContinue: false,
   });
 
   app.use(cookieParser());

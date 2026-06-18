@@ -25,6 +25,7 @@ import { WhatsappModule } from './modules/whatsapp/whatsapp.module';
 import { ProspectsModule } from './modules/prospects/prospects.module';
 import { TrackingModule } from './modules/tracking/tracking.module';
 import { FavoritesModule } from './modules/favorites/favorites.module';
+import { CronLeaseModule } from './common/cron-lease/cron-lease.module';
 
 @Module({
   imports: [
@@ -59,6 +60,7 @@ import { FavoritesModule } from './modules/favorites/favorites.module';
     ProspectsModule,
     TrackingModule,
     FavoritesModule,
+    CronLeaseModule,
   ],
 })
 export class AppModule {}
