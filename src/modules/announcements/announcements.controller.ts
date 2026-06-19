@@ -111,12 +111,23 @@ export class AnnouncementsController {
 
   @Post(':id/retry-failed')
   @ApiOperation({
-    summary: 'Relancer uniquement les destinataires en échec d’une annonce',
-    description: 'Les destinataires ayant déjà reçu l’annonce ne sont pas recontactés.',
+    summary: 'Relancer uniquement les destinataires en échec d\'une annonce',
+    description: 'Les destinataires ayant déjà reçu l\'annonce ne sont pas recontactés.',
   })
   @ApiParam({ name: 'id' })
-  @ApiOkResponse({ description: 'Les envois en échec ont été remis en file d’attente' })
+  @ApiOkResponse({ description: 'Les envois en échec ont été remis en file d\'attente' })
   retryFailed(@Param('id') id: string) {
+    return this.announcementsService.retryFailedDeliveries(id);
+  }
+
+  @Post(':id/resume')
+  @ApiOperation({
+    summary: 'Relancer l\'envoi après arrêt pour échecs',
+    description: 'Réinitialise les échecs et continue l\'envoi des messages en attente avec l\'algorithme anti-spam.',
+  })
+  @ApiParam({ name: 'id' })
+  @ApiOkResponse({ description: 'L\'envoi a été relancé' })
+  resume(@Param('id') id: string) {
     return this.announcementsService.retryFailedDeliveries(id);
   }
 

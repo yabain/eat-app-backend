@@ -63,8 +63,16 @@ export class Announcement {
   @Prop({ default: 0 }) failureCount: number;
   @Prop({ type: [AnnouncementRecipientSnapshotSchema], default: [] }) recipientsSnapshot: AnnouncementRecipientSnapshot[];
   @Prop({ type: Types.ObjectId, ref: 'User', default: null }) createdBy?: Types.ObjectId;
+
+  // Wave-based anti-spam delivery fields
+  @Prop({ default: 0 }) currentWaveCount: number;
+  @Prop({ default: 0 }) totalWaveFailures: number;
+  @Prop({ default: 0 }) consecutiveFailures: number;
+  @Prop({ default: false }) stoppedByFailure: boolean;
+  @Prop({ default: null }) nextProcessAt?: Date;
 }
 
 export const AnnouncementSchema = SchemaFactory.createForClass(Announcement);
 AnnouncementSchema.index({ status: 1, scheduledAt: 1 });
 AnnouncementSchema.index({ createdAt: -1 });
+AnnouncementSchema.index({ status: 1, stoppedByFailure: 1, nextProcessAt: 1 });

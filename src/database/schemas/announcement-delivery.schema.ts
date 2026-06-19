@@ -49,6 +49,12 @@ export class AnnouncementDelivery {
   @Prop({ default: 0 })
   attempts: number;
 
+  @Prop({ default: 0 })
+  waveNumber: number;
+
+  @Prop({ default: false })
+  isRetry: boolean;
+
   @Prop({ default: null })
   lastError?: string;
 

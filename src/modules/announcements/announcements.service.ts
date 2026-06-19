@@ -29,7 +29,12 @@ import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils
 @Injectable()
 export class AnnouncementsService {
   private readonly logger = new Logger(AnnouncementsService.name);
-  private processingDeliveries = false;
+  private readonly WAVE_SIZE = 10;
+  private readonly WAVE_DELAY_MIN_SEC = 30;
+  private readonly WAVE_DELAY_MAX_SEC = 60;
+  private readonly PAUSE_MIN_MINUTES = 5;
+  private readonly PAUSE_MAX_MINUTES = 10;
+  private readonly MAX_WAVE_FAILURES = 5;
 
   constructor(
     @InjectModel(Announcement.name) private readonly announcementModel: Model<AnnouncementDocument>,
@@ -174,6 +179,11 @@ export class AnnouncementsService {
     announcement.recipientCount = recipients.length;
     announcement.successCount = 0;
     announcement.failureCount = 0;
+    announcement.currentWaveCount = 0;
+    announcement.totalWaveFailures = 0;
+    announcement.consecutiveFailures = 0;
+    announcement.stoppedByFailure = false;
+    announcement.nextProcessAt = new Date();
     announcement.recipientsSnapshot = recipients.slice(0, 100) as any[];
     return announcement.save();
   }
@@ -213,6 +223,11 @@ export class AnnouncementsService {
     announcement.status = AnnouncementStatus.SENDING;
     announcement.sentAt = null;
     announcement.failureReason = null;
+    announcement.stoppedByFailure = false;
+    announcement.totalWaveFailures = 0;
+    announcement.consecutiveFailures = 0;
+    announcement.currentWaveCount = 0;
+    announcement.nextProcessAt = new Date();
     await announcement.save();
 
     this.logger.log(
@@ -260,19 +275,55 @@ export class AnnouncementsService {
     }
   }
 
-  @Cron('*/15 * * * * *')
+  @Cron('*/10 * * * * *')
   async processPendingDeliveries() {
-    if (!(await this.cronLease.acquire('announcements.processPending', 14 * 1000))) return;
-    if (this.processingDeliveries) return;
-    this.processingDeliveries = true;
+    if (!(await this.cronLease.acquire('announcements.processPending', 9 * 1000))) return;
     try {
       await this.releaseStaleProcessingDeliveries();
-      await this.processDeliveryBatch(AnnouncementChannel.EMAIL, Number(process.env.ANNOUNCEMENT_EMAIL_BATCH_SIZE || 100));
-      await this.processDeliveryBatch(AnnouncementChannel.WHATSAPP, Number(process.env.ANNOUNCEMENT_WHATSAPP_BATCH_SIZE || 10));
+      await this.processNextWaveDeliveries();
     } catch (error) {
       this.logger.warn(`Unable to process announcement deliveries: ${error?.message || error}`);
-    } finally {
-      this.processingDeliveries = false;
+    }
+  }
+
+  private async processNextWaveDeliveries() {
+    const now = new Date();
+    const announcements = await this.announcementModel
+      .find({
+        status: AnnouncementStatus.SENDING,
+        stoppedByFailure: false,
+        nextProcessAt: { $lte: now },
+      })
+      .sort({ nextProcessAt: 1 })
+      .limit(10);
+
+    for (const announcement of announcements) {
+      const delivery = await this.deliveryModel.findOneAndUpdate(
+        {
+          announcementId: announcement._id,
+          status: AnnouncementDeliveryStatus.PENDING,
+        },
+        {
+          $set: { status: AnnouncementDeliveryStatus.PROCESSING, lockedAt: new Date() },
+          $inc: { attempts: 1 },
+        },
+        { sort: { createdAt: 1 } },
+      );
+      if (!delivery) {
+        // No pending deliveries left — check if all done
+        const remaining = await this.deliveryModel.countDocuments({
+          announcementId: announcement._id,
+          status: { $in: [AnnouncementDeliveryStatus.PENDING, AnnouncementDeliveryStatus.PROCESSING] },
+        });
+        if (remaining === 0 && !announcement.stoppedByFailure) {
+          await this.announcementModel.updateOne(
+            { _id: announcement._id },
+            { $set: { status: AnnouncementStatus.SENT, sentAt: now, nextProcessAt: null } },
+          );
+        }
+        continue;
+      }
+      await this.processOneDeliveryForWave(delivery);
     }
   }
 
@@ -328,37 +379,14 @@ export class AnnouncementsService {
     }
   }
 
-  private async processDeliveryBatch(channel: AnnouncementChannel, limit: number) {
-    const batchSize = Math.max(1, Math.min(500, Number(limit || 1)));
-    const deliveries = await this.deliveryModel
-      .find({
-        channel,
-        status: AnnouncementDeliveryStatus.PENDING,
-      })
-      .sort({ createdAt: 1 })
-      .limit(batchSize);
-
-    for (const delivery of deliveries) {
-      const locked = await this.deliveryModel.findOneAndUpdate(
-        { _id: delivery._id, status: AnnouncementDeliveryStatus.PENDING },
-        {
-          $set: { status: AnnouncementDeliveryStatus.PROCESSING, lockedAt: new Date() },
-          $inc: { attempts: 1 },
-        },
-        { new: true },
-      );
-      if (!locked) continue;
-      await this.processOneDelivery(locked);
-    }
-  }
-
-  private async processOneDelivery(delivery: AnnouncementDeliveryDocument) {
+  private async processOneDeliveryForWave(delivery: AnnouncementDeliveryDocument) {
     const announcement = await this.announcementModel.findById(delivery.announcementId);
     if (!announcement) {
-      await this.markDeliveryFailed(delivery, 'Announcement not found');
+      await this.markDeliveryFailed(delivery, 'Annonce introuvable');
       return;
     }
 
+    let success = false;
     try {
       const content = this.renderContent(announcement.html, delivery);
       const attachment = this.resolveAttachment(announcement);
@@ -383,11 +411,100 @@ export class AnnouncementsService {
           },
         },
       );
+      success = true;
     } catch (error) {
       await this.markDeliveryFailed(delivery, error?.message || String(error));
     }
 
-    await this.refreshAnnouncementProgress(String(delivery.announcementId));
+    await this.updateWaveProgress(String(delivery.announcementId), success, success ? undefined : delivery);
+  }
+
+  private async updateWaveProgress(announcementId: string, success: boolean, failedDelivery?: AnnouncementDeliveryDocument) {
+    const ann = await this.announcementModel.findById(announcementId);
+    if (!ann) return;
+
+    const now = new Date();
+    const update: Record<string, any> = {};
+
+    if (success) {
+      update.currentWaveCount = (ann.currentWaveCount || 0) + 1;
+      update.consecutiveFailures = 0;
+
+      if (update.currentWaveCount >= this.WAVE_SIZE) {
+        update.nextProcessAt = new Date(now.getTime() + this.randomInt(this.PAUSE_MIN_MINUTES, this.PAUSE_MAX_MINUTES) * 60 * 1000);
+        update.currentWaveCount = 0;
+      } else {
+        update.nextProcessAt = new Date(now.getTime() + this.randomInt(this.WAVE_DELAY_MIN_SEC, this.WAVE_DELAY_MAX_SEC) * 1000);
+      }
+    } else {
+      update.consecutiveFailures = (ann.consecutiveFailures || 0) + 1;
+      update.totalWaveFailures = (ann.totalWaveFailures || 0) + 1;
+
+      if (update.totalWaveFailures >= this.MAX_WAVE_FAILURES) {
+        update.stoppedByFailure = true;
+        update.status = AnnouncementStatus.FAILED;
+        update.failureReason = `Envoi interrompu après ${this.MAX_WAVE_FAILURES} échecs`;
+        update.nextProcessAt = null;
+        void this.notifyAdminsOfFailure(ann, failedDelivery?.lastError || `${this.MAX_WAVE_FAILURES} échecs atteints`);
+      } else {
+        update.nextProcessAt = new Date(now.getTime() + this.randomInt(this.WAVE_DELAY_MIN_SEC, this.WAVE_DELAY_MAX_SEC) * 1000);
+      }
+    }
+
+    // Count successes and check completion
+    const [successCount, pendingCount] = await Promise.all([
+      this.deliveryModel.countDocuments({ announcementId: new Types.ObjectId(announcementId), status: AnnouncementDeliveryStatus.SENT }),
+      this.deliveryModel.countDocuments({
+        announcementId: new Types.ObjectId(announcementId),
+        status: { $in: [AnnouncementDeliveryStatus.PENDING, AnnouncementDeliveryStatus.PROCESSING] },
+      }),
+    ]);
+
+    update.successCount = successCount;
+
+    if (pendingCount === 0 && !ann.stoppedByFailure && !update.stoppedByFailure) {
+      update.status = AnnouncementStatus.SENT;
+      update.sentAt = now;
+      update.nextProcessAt = null;
+    }
+
+    await this.announcementModel.updateOne({ _id: ann._id }, { $set: update });
+  }
+
+  resumeAnnouncementDelivery(id: string) {
+    return this.retryFailedDeliveries(id);
+  }
+
+  private async notifyAdminsOfFailure(announcement: AnnouncementDocument, reason: string) {
+    try {
+      const admins = await this.userModel
+        .find({ role: UserRole.ADMIN, isActive: { $ne: false } })
+        .select('firstName lastName email phone')
+        .limit(5);
+
+      const subject = `Annonce interrompue: ${announcement.subject}`;
+      const message = `L'envoi groupé "${announcement.subject}" (${announcement.channel}) a été interrompu après ${this.MAX_WAVE_FAILURES} échecs.\nDernière erreur: ${reason || 'Non spécifiée'}\nConnectez-vous pour relancer l'envoi.`;
+
+      for (const admin of admins) {
+        try {
+          if (announcement.channel === AnnouncementChannel.WHATSAPP) {
+            if (admin.email) {
+              await this.notificationsService.sendRawHtml(admin.email, subject, message.replace(/\n/g, '<br>'));
+            }
+          } else if (admin.phone) {
+            await this.whatsappService.sendText(admin.phone, message);
+          }
+        } catch {
+          // Notification aux admins non bloquante
+        }
+      }
+    } catch (error) {
+      this.logger.warn(`Unable to notify admins of announcement failure: ${error?.message || error}`);
+    }
+  }
+
+  private randomInt(min: number, max: number): number {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
   }
 
   private async markDeliveryFailed(delivery: AnnouncementDeliveryDocument, message: string) {
@@ -402,41 +519,6 @@ export class AnnouncementsService {
           status: nextStatus,
           lastError: message.slice(0, 500),
           lockedAt: null,
-        },
-      },
-    );
-  }
-
-  private async refreshAnnouncementProgress(announcementId: string) {
-    const id = new Types.ObjectId(announcementId);
-    const [successCount, failureCount, pendingCount, processingCount, failures] = await Promise.all([
-      this.deliveryModel.countDocuments({ announcementId: id, status: AnnouncementDeliveryStatus.SENT }),
-      this.deliveryModel.countDocuments({ announcementId: id, status: AnnouncementDeliveryStatus.FAILED }),
-      this.deliveryModel.countDocuments({ announcementId: id, status: AnnouncementDeliveryStatus.PENDING }),
-      this.deliveryModel.countDocuments({ announcementId: id, status: AnnouncementDeliveryStatus.PROCESSING }),
-      this.deliveryModel
-        .find({ announcementId: id, status: AnnouncementDeliveryStatus.FAILED })
-        .sort({ updatedAt: -1 })
-        .limit(10)
-        .select('email phone lastError'),
-    ]);
-
-    const remaining = pendingCount + processingCount;
-    const status = remaining > 0
-      ? AnnouncementStatus.SENDING
-      : successCount > 0
-        ? AnnouncementStatus.SENT
-        : AnnouncementStatus.FAILED;
-
-    await this.announcementModel.updateOne(
-      { _id: id },
-      {
-        $set: {
-          status,
-          sentAt: remaining > 0 ? null : new Date(),
-          successCount,
-          failureCount,
-          failureReason: failures.map((item) => `${item.email || item.phone}: ${item.lastError}`).join('\n') || null,
         },
       },
     );
