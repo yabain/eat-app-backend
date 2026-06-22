@@ -30,11 +30,17 @@ import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils
 export class AnnouncementsService {
   private readonly logger = new Logger(AnnouncementsService.name);
   private readonly WAVE_SIZE = 10;
-  private readonly WAVE_DELAY_MIN_SEC = 30;
-  private readonly WAVE_DELAY_MAX_SEC = 60;
-  private readonly PAUSE_MIN_MINUTES = 5;
-  private readonly PAUSE_MAX_MINUTES = 10;
+  private readonly WAVE_DELAY_MIN_SEC = 60;
+  private readonly WAVE_DELAY_MAX_SEC = 300;
+  private readonly PAUSE_MIN_MINUTES = 10;
+  private readonly PAUSE_MAX_MINUTES = 30;
   private readonly MAX_WAVE_FAILURES = 5;
+  private readonly DAILY_EMAIL_LIMIT = 1500;
+  private readonly DAILY_WHATSAPP_LIMIT = 30;
+  private readonly WHATSAPP_START_HOUR = 8;
+  private readonly WHATSAPP_END_HOUR = 20;
+  private readonly EMAIL_START_HOUR = 6;
+  private readonly EMAIL_END_HOUR = 22;
 
   constructor(
     @InjectModel(Announcement.name) private readonly announcementModel: Model<AnnouncementDocument>,
@@ -196,18 +202,18 @@ export class AnnouncementsService {
     }
 
     const announcementId = announcement._id as Types.ObjectId;
-    const failedCount = await this.deliveryModel.countDocuments({
+    const toRetry = await this.deliveryModel.countDocuments({
       announcementId,
-      status: AnnouncementDeliveryStatus.FAILED,
+      status: { $in: [AnnouncementDeliveryStatus.FAILED, AnnouncementDeliveryStatus.PENDING] },
     });
-    if (!failedCount) {
+    if (!toRetry) {
       throw new BadRequestException('No failed recipient to retry');
     }
 
     await this.deliveryModel.updateMany(
       {
         announcementId,
-        status: AnnouncementDeliveryStatus.FAILED,
+        status: { $in: [AnnouncementDeliveryStatus.FAILED, AnnouncementDeliveryStatus.PENDING] },
       },
       {
         $set: {
@@ -231,7 +237,7 @@ export class AnnouncementsService {
     await announcement.save();
 
     this.logger.log(
-      `Retrying ${failedCount} failed ${announcement.channel} delivery(ies) for announcement ${announcement._id}`,
+      `Retrying ${toRetry} delivery(ies) for announcement ${announcement._id}`,
     );
     return announcement;
   }
@@ -298,6 +304,43 @@ export class AnnouncementsService {
       .limit(10);
 
     for (const announcement of announcements) {
+      const dailyLimit = announcement.channel === AnnouncementChannel.WHATSAPP
+        ? this.DAILY_WHATSAPP_LIMIT
+        : this.DAILY_EMAIL_LIMIT;
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      const sentToday = await this.deliveryModel.countDocuments({
+        channel: announcement.channel,
+        status: AnnouncementDeliveryStatus.SENT,
+        sentAt: { $gte: startOfDay },
+      });
+
+      if (sentToday >= dailyLimit) {
+        const nextDay = this.nextSendingWindow(announcement.channel);
+        await this.announcementModel.updateOne(
+          { _id: announcement._id },
+          { $set: { nextProcessAt: nextDay, currentWaveCount: 0 } },
+        );
+        this.logger.log(
+          `Daily ${announcement.channel} limit (${sentToday}/${dailyLimit}) reached for ` +
+          `announcement ${announcement._id}, resuming ${nextDay.toISOString()}`,
+        );
+        continue;
+      }
+
+      if (!this.isWithinSendingHours(announcement.channel, now)) {
+        const nextWindow = this.nextSendingWindow(announcement.channel);
+        await this.announcementModel.updateOne(
+          { _id: announcement._id },
+          { $set: { nextProcessAt: nextWindow, currentWaveCount: 0 } },
+        );
+        this.logger.log(
+          `Outside ${announcement.channel} sending hours for announcement ${announcement._id}, ` +
+          `resuming at ${nextWindow.toISOString()}`,
+        );
+        continue;
+      }
+
       const delivery = await this.deliveryModel.findOneAndUpdate(
         {
           announcementId: announcement._id,
@@ -391,14 +434,15 @@ export class AnnouncementsService {
       const content = this.renderContent(announcement.html, delivery);
       const attachment = this.resolveAttachment(announcement);
       if (delivery.channel === AnnouncementChannel.WHATSAPP) {
-        const message = this.withWhatsappFooter(this.stripHtml(content));
+        const message = this.withWhatsappFooter(this.addMessageVariation(this.stripHtml(content), delivery.recipientKey));
         if (attachment) {
           await this.whatsappService.sendMedia(delivery.phone, message, attachment);
         } else {
           await this.whatsappService.sendText(delivery.phone, message);
         }
       } else {
-        await this.notificationsService.sendRawHtml(delivery.email, announcement.subject, content, attachment || undefined);
+        const subjectPrefix = ['', '\u202F', '\u00A0'][this.simpleHash(delivery.recipientKey) % 3];
+        await this.notificationsService.sendRawHtml(delivery.email, subjectPrefix + announcement.subject, content, attachment || undefined);
       }
 
       await this.deliveryModel.updateOne(
@@ -430,7 +474,34 @@ export class AnnouncementsService {
       update.currentWaveCount = (ann.currentWaveCount || 0) + 1;
       update.consecutiveFailures = 0;
 
-      if (update.currentWaveCount >= this.WAVE_SIZE) {
+      const dailyLimit = ann.channel === AnnouncementChannel.WHATSAPP
+        ? this.DAILY_WHATSAPP_LIMIT
+        : this.DAILY_EMAIL_LIMIT;
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      const sentToday = await this.deliveryModel.countDocuments({
+        channel: ann.channel,
+        status: AnnouncementDeliveryStatus.SENT,
+        sentAt: { $gte: startOfDay },
+      });
+
+      if (sentToday >= dailyLimit) {
+        const nextWindow = this.nextSendingWindow(ann.channel);
+        update.nextProcessAt = nextWindow;
+        update.currentWaveCount = 0;
+        this.logger.log(
+          `Daily ${ann.channel} limit (${sentToday}/${dailyLimit}) reached for ` +
+          `announcement ${ann._id}, resuming ${nextWindow.toISOString()}`,
+        );
+      } else if (!this.isWithinSendingHours(ann.channel, now)) {
+        const nextWindow = this.nextSendingWindow(ann.channel);
+        update.nextProcessAt = nextWindow;
+        update.currentWaveCount = 0;
+        this.logger.log(
+          `Outside ${ann.channel} sending hours for announcement ${ann._id}, ` +
+          `resuming at ${nextWindow.toISOString()}`,
+        );
+      } else if (update.currentWaveCount >= this.jitteredWaveLimit()) {
         update.nextProcessAt = new Date(now.getTime() + this.randomInt(this.PAUSE_MIN_MINUTES, this.PAUSE_MAX_MINUTES) * 60 * 1000);
         update.currentWaveCount = 0;
       } else {
@@ -505,6 +576,63 @@ export class AnnouncementsService {
 
   private randomInt(min: number, max: number): number {
     return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  private sendingWindowStart(channel: AnnouncementChannel): number {
+    return channel === AnnouncementChannel.WHATSAPP ? this.WHATSAPP_START_HOUR : this.EMAIL_START_HOUR;
+  }
+
+  private sendingWindowEnd(channel: AnnouncementChannel): number {
+    return channel === AnnouncementChannel.WHATSAPP ? this.WHATSAPP_END_HOUR : this.EMAIL_END_HOUR;
+  }
+
+  private isWithinSendingHours(channel: AnnouncementChannel, now: Date): boolean {
+    const hour = now.getHours();
+    return hour >= this.sendingWindowStart(channel) && hour < this.sendingWindowEnd(channel);
+  }
+
+  private nextSendingWindow(channel: AnnouncementChannel): Date {
+    const now = new Date();
+    const start = this.sendingWindowStart(channel);
+    const end = this.sendingWindowEnd(channel);
+    const hour = now.getHours();
+    if (hour < start) {
+      const next = new Date(now);
+      next.setHours(start, this.randomInt(0, 30), 0, 0);
+      return next;
+    }
+    if (hour >= end) {
+      const next = new Date(now);
+      next.setDate(next.getDate() + 1);
+      next.setHours(start, this.randomInt(0, 30), 0, 0);
+      return next;
+    }
+    return now;
+  }
+
+  private jitteredWaveLimit(): number {
+    return this.WAVE_SIZE + this.randomInt(-2, 5);
+  }
+
+  private addMessageVariation(message: string, recipientKey: string): string {
+    const hash = this.simpleHash(recipientKey);
+    const tweaks = [
+      (m: string) => m,
+      (m: string) => m + ' ',
+      (m: string) => m.replace(/\n\n/g, '\n'),
+      (m: string) => m.replace(/\.(\s|$)/g, '.\u00A0'),
+      (m: string) => m.replace(/Eat App/g, 'Eat'),
+    ];
+    return tweaks[hash % tweaks.length](message);
+  }
+
+  private simpleHash(str: string): number {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash) + str.charCodeAt(i);
+      hash |= 0;
+    }
+    return Math.abs(hash);
   }
 
   private async markDeliveryFailed(delivery: AnnouncementDeliveryDocument, message: string) {

@@ -100,7 +100,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     for (const candidate of candidates) {
       try {
         const numberId = await this.client.getNumberId(candidate).catch(() => null);
-        const chatId = numberId?._serialized || `${candidate}@c.us`;
+        const userPart = numberId?.user || candidate;
+        const chatId = `${userPart}@c.us`;
         await this.client.sendMessage(chatId, message);
         return { sent: true, to: chatId, attemptedNumbers: candidates };
       } catch (error) {
@@ -142,7 +143,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     for (const candidate of candidates) {
       try {
         const numberId = await this.client.getNumberId(candidate).catch(() => null);
-        const chatId = numberId?._serialized || `${candidate}@c.us`;
+        const userPart = numberId?.user || candidate;
+        const chatId = `${userPart}@c.us`;
         await this.client.sendMessage(
           chatId,
           new MessageMedia(media.mimetype, media.data, media.filename),
@@ -288,6 +290,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       this.qrCodeDataUrl = null;
       this.connectedNumber = this.client?.info?.wid?.user || null;
       this.logger.log(`WhatsApp ready${this.connectedNumber ? ` as ${this.connectedNumber}` : ''}`);
+      this.patchLidFunctions();
     });
 
     client.on('disconnected', (reason) => {
@@ -376,6 +379,30 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async patchLidFunctions() {
+    if (!this.client?.pupPage) return;
+    try {
+      await this.client.pupPage.evaluate(() => {
+        const wwebjs = (window as any).WWebJS;
+        const originalGetChat = wwebjs.getChat;
+        wwebjs.getChat = async (chatId: string, options?: any) => {
+          try {
+            return await originalGetChat(chatId, options);
+          } catch (error: any) {
+            if (error?.toString?.().includes('No LID for user')) {
+              const lidChatId = chatId.replace('@c.us', '@lid');
+              return await originalGetChat(lidChatId, options);
+            }
+            throw error;
+          }
+        };
+      });
+      this.logger.log('WhatsApp getChat patched for LID fallback');
+    } catch (error: any) {
+      this.logger.warn(`Unable to patch getChat: ${error?.message || error}`);
+    }
+  }
+
   private getAuthDataPath() {
     const configured = this.configService.get<string>('WHATSAPP_SESSION_DIR') || 'whatsapp-session';
     if (configured === '/whatsapp-session') return join(process.cwd(), 'whatsapp-session');
@@ -388,9 +415,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     const candidates = [digits];
     if (digits.startsWith('2376') && digits.length === 12) {
+      candidates.push(digits.slice(4));
       candidates.push(`237${digits.slice(4)}`);
     }
     if (digits.startsWith('6') && digits.length === 9) {
+      candidates.push(digits.slice(1));
       candidates.push(`237${digits}`);
       candidates.push(`237${digits.slice(1)}`);
     }

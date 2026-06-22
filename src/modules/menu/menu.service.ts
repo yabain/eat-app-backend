@@ -218,6 +218,46 @@ export class MenuService {
     return { createdAt: direction };
   }
 
+  async searchPublic(q?: string, page?: number, limit?: number) {
+    const pagination = normalizePagination(page, limit);
+    const qRegex = buildContainsRegex(q);
+    const activeRestaurants = await this.restaurantModel
+      .find({ status: 'active' })
+      .select('_id')
+      .lean();
+    const activeRestaurantIds = activeRestaurants.map((r) => r._id);
+
+    if (!activeRestaurantIds.length) {
+      return { data: [], meta: buildPaginationMeta(pagination.page, pagination.limit, 0) };
+    }
+
+    const filter: any = {
+      restaurantId: { $in: activeRestaurantIds },
+      isActive: true,
+      isAvailable: true,
+      stock: { $gt: 0 },
+    };
+    if (qRegex) {
+      filter.$or = [{ name: qRegex }, { description: qRegex }];
+    }
+
+    const [data, total] = await Promise.all([
+      this.model
+        .find(filter)
+        .populate('restaurantId', 'name slug logo')
+        .populate('categoryId', 'name')
+        .sort({ createdAt: -1 })
+        .skip(pagination.skip)
+        .limit(pagination.limit),
+      this.model.countDocuments(filter),
+    ]);
+
+    return {
+      data,
+      meta: buildPaginationMeta(pagination.page, pagination.limit, total),
+    };
+  }
+
   async findOneForActor(actor: any, id: string) {
     const filter: any = { _id: id };
     if (actor.role !== UserRole.ADMIN) {

@@ -69,6 +69,22 @@ export class MenuController {
     return this.service.stockCheck(body?.items || []);
   }
 
+  @Get('public/search')
+  @ApiOperation({ summary: 'Rechercher des plats dans tous les restaurants' })
+  @ApiQuery({ name: 'q', required: true, type: String, example: 'poulet' })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
+  @ApiOkResponse({
+    description: 'Liste paginée des résultats de recherche',
+    type: PaginatedMenuItemsResponseDto,
+  })
+  searchAll(
+    @Query('q') q: string,
+    @Query() query: PaginationQueryDto,
+  ) {
+    return this.service.searchPublic(q, query?.page, query?.limit);
+  }
+
   @Get('public/:restaurantId')
   @ApiOperation({ summary: 'Lister les items publics d’un restaurant' })
   @ApiParam({ name: 'restaurantId', example: '665d58e63d7bfeb8f7f6172e' })

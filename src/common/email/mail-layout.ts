@@ -56,9 +56,9 @@ const EMAIL_FOOTER_HTML = `
                                                     </tbody>
                                                 </table>
                                             </td>
-                                            <td style="padding: 0px; color: rgb(0, 0, 0);"><a href="tel:+237620803178"
+                                            <td style="padding: 0px; color: rgb(0, 0, 0);"><a href="tel:+237622478900"
                                                     style="text-decoration: none; color: rgb(0, 0, 0); font-size: 14px;"><span>+237
-                                                        620 803 178</span></a>
+                                                        622 478 900</span></a>
                                             </td>
                                         </tr>
                                         <tr style="vertical-align: middle; height: 28px;">
@@ -159,12 +159,13 @@ const EMAIL_FOOTER_HTML = `
                         <tr>
                             <td style="text-align: right; vertical-align: top;">
                                 <div style="min-width: 140px;">
-                                    <a
-                                    href="https://www.facebook.com/profile.php?id=61589331656629"
-                                    style="display: inline-block; padding: 0px; background-color: rgb(224, 91, 3); border-radius: 50%;"><img
-                                        src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/facebook-icon-dark-2x.png"
-                                        alt="facebook" width="24" loading="lazy"
-                                        style="background-color: rgb(224, 91, 3); max-width: 135px; display: block; border-radius: inherit;"></a><span
+                                        <a
+                                        href="https://wa.me/237622478900"
+                                        style="display: inline-block; padding: 0px; background-color: rgb(224, 91, 3); border-radius: 50%;"><img
+                                            src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/whatsapp-icon-dark-2x.png"
+                                            alt="whatsapp" width="24" loading="lazy"
+                                            style="background-color: rgb(224, 91, 3); max-width: 135px; display: block; border-radius: inherit;"></a>
+                                        <span
                                     style="display: inline-block; width: 5px;"></span>
 
                                     <a href="https://www.linkedin.com/company/eat-app-yabain"
@@ -175,10 +176,10 @@ const EMAIL_FOOTER_HTML = `
                                         style="display: inline-block; width: 5px;"></span>
 
                                         <a
-                                        href="https://wa.me/237620803178"
+                                        href="https://www.facebook.com/profile.php?id=61589331656629"
                                         style="display: inline-block; padding: 0px; background-color: rgb(224, 91, 3); border-radius: 50%;"><img
-                                            src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/whatsapp-icon-dark-2x.png"
-                                            alt="whatsapp" width="24" loading="lazy"
+                                            src="https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/facebook-icon-dark-2x.png"
+                                            alt="facebook" width="24" loading="lazy"
                                             style="background-color: rgb(224, 91, 3); max-width: 135px; display: block; border-radius: inherit;"></a>
                                 </div>
                             </td>

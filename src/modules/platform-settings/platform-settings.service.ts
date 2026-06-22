@@ -213,7 +213,7 @@ export class PlatformSettingsService {
       },
       socialLinks: [
         { name: 'Facebook', icon: 'fa-brands fa-facebook-f', url: 'https://www.facebook.com/profile.php?id=61589331656629', isActive: true, order: 10 },
-        { name: 'WhatsApp', icon: 'fa-brands fa-whatsapp', url: 'https://wa.me/237620803178', isActive: true, order: 20 },
+        { name: 'WhatsApp', icon: 'fa-brands fa-whatsapp', url: 'https://wa.me/237622478900', isActive: true, order: 20 },
         { name: 'LinkedIn', icon: 'fa-brands fa-linkedin', url: 'https://www.linkedin.com/company/eat-app-yabain', isActive: true, order: 30 },
         { name: 'Instagram', icon: 'fa-brands fa-instagram', url: '#', isActive: false, order: 40 },
       ],
