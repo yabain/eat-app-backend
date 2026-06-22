@@ -25,6 +25,7 @@ import { WhatsappModule } from './modules/whatsapp/whatsapp.module';
 import { ProspectsModule } from './modules/prospects/prospects.module';
 import { TrackingModule } from './modules/tracking/tracking.module';
 import { FavoritesModule } from './modules/favorites/favorites.module';
+import { MerlinModule } from './modules/merlin/merlin.module';
 import { CronLeaseModule } from './common/cron-lease/cron-lease.module';
 
 @Module({
@@ -60,6 +61,7 @@ import { CronLeaseModule } from './common/cron-lease/cron-lease.module';
     ProspectsModule,
     TrackingModule,
     FavoritesModule,
+    MerlinModule,
     CronLeaseModule,
   ],
 })

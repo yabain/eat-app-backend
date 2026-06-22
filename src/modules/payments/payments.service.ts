@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { isValidObjectId, Model } from 'mongoose';
+import { isValidObjectId, Model, Types } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { timingSafeEqual } from 'crypto';
 import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
@@ -43,6 +43,7 @@ export class PaymentsService implements OnModuleInit {
   async onModuleInit() {
     await this.ensureBalanceTransactionIndexes();
     await this.ensureOpenPaymentIndex();
+    await this.normalizeBalanceTransactionIds();
   }
 
   private async ensureOpenPaymentIndex() {
@@ -151,6 +152,83 @@ export class PaymentsService implements OnModuleInit {
       }
     } catch (error: any) {
       this.logger.warn(`Unable to ensure balance transaction index ${name}: ${error?.message || error}`);
+    }
+  }
+
+  /**
+   * Nettoie les données existantes de BalanceTransaction :
+   *   1. Convertit les restaurantId/userId stockés en string vers ObjectId
+   *   2. Supprime les doublons de transactions delivery (même paymentId+userId+reason)
+   *      en gardant celle avec un ObjectId (ou la plus récente en dernier recours).
+   *
+   * Ces incohérences viennent de l'ancienne version de recordOrderBalanceTransaction
+   * qui ne normalisait pas les types BSON, permettant à l'index unique partiel de
+   * ne pas détecter les doublons.
+   */
+  private async normalizeBalanceTransactionIds() {
+    try {
+      const orderReasons = ['order_restaurant_share', 'order_delivery_share', 'order_system_share'];
+
+      // 1. Supprimer les doublons string → certains paiements ont déjà DEUX documents
+      //    (un avec string ID, un avec ObjectId). On garde l'ObjectId et on supprime
+      //    le string pour libérer la contrainte unique avant la conversion.
+      //    Regex: paymentId + ownerType + (restaurantId ou userId) + reason.
+      for (const idField of ['restaurantId', 'userId']) {
+        const dupGroups = await this.transactionModel.aggregate([
+          {
+            $match: {
+              reason: { $in: orderReasons },
+              paymentId: { $type: 'objectId' },
+              [idField]: { $exists: true, $ne: null },
+            },
+          },
+          {
+            $group: {
+              _id: { paymentId: '$paymentId', ownerType: '$ownerType', reason: '$reason' },
+              ids: { $push: '$_id' },
+              idTypes: { $push: { $type: `$${idField}` } },
+              count: { $sum: 1 },
+            },
+          },
+          { $match: { count: { $gt: 1 } } },
+        ]);
+
+        let removed = 0;
+        for (const group of dupGroups) {
+          const toDelete: any[] = [];
+          for (let i = 0; i < group.ids.length; i++) {
+            if (group.idTypes[i] === 'string') toDelete.push(group.ids[i]);
+          }
+          if (toDelete.length > 0) {
+            const del = await this.transactionModel.deleteMany({ _id: { $in: toDelete } });
+            removed += del.deletedCount;
+          }
+        }
+        if (removed > 0) {
+          this.logger.log(`Migration: removed ${removed} duplicate transaction(s) with string ${idField}`);
+        }
+      }
+
+      // 2. Convertir les restaurantId string → ObjectId (pour les éventuels isolés)
+      const fixedRestaurants = await this.transactionModel.updateMany(
+        { restaurantId: { $type: 'string' }, reason: { $in: orderReasons } },
+        [{ $set: { restaurantId: { $toObjectId: '$restaurantId' } } }],
+      );
+
+      // 3. Convertir les userId string → ObjectId
+      const fixedUsers = await this.transactionModel.updateMany(
+        { userId: { $type: 'string' }, reason: { $in: orderReasons } },
+        [{ $set: { userId: { $toObjectId: '$userId' } } }],
+      );
+
+      if (fixedRestaurants.modifiedCount > 0 || fixedUsers.modifiedCount > 0) {
+        this.logger.log(
+          `Migration: converted ${fixedRestaurants.modifiedCount} restaurantId(s)`
+          + ` and ${fixedUsers.modifiedCount} userId(s) from string to ObjectId`,
+        );
+      }
+    } catch (error: any) {
+      this.logger.warn(`Balance transaction ID migration skipped: ${error?.message || error}`);
     }
   }
 
@@ -896,21 +974,20 @@ export class PaymentsService implements OnModuleInit {
       amount,
       currency: payload.currency || 'XAF',
     };
+
+    // Normaliser les IDs en ObjectId pour éviter les doublons liés au type
+    // (string vs ObjectId). L'index unique paymentId+ownerType+userId+reason
+    // ne peut pas dédoublonner si les valeurs ont des types BSON différents.
+    if (doc.restaurantId) doc.restaurantId = new Types.ObjectId(String(doc.restaurantId));
+    if (doc.userId) doc.userId = new Types.ObjectId(String(doc.userId));
+    if (filter.restaurantId) filter.restaurantId = new Types.ObjectId(String(filter.restaurantId));
+    if (filter.userId) filter.userId = new Types.ObjectId(String(filter.userId));
+
     const { amount: _amount, note: _note, currency: _currency, ...insertOnlyDoc } = doc;
 
     await this.transactionModel.updateOne(
       filter,
-      {
-        $setOnInsert: {
-          ...insertOnlyDoc,
-          createdAt: new Date(),
-        },
-        $set: {
-          amount,
-          note: doc.note,
-          currency: doc.currency,
-        },
-      },
+      { $setOnInsert: { ...insertOnlyDoc, createdAt: new Date() } },
       { upsert: true },
     );
 
