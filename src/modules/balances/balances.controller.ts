@@ -17,12 +17,12 @@ import { UpdateWithdrawalStatusDto } from './dto/update-withdrawal-status.dto';
 export class BalancesController {
   constructor(private readonly service: BalancesService) {}
 
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.DRIVER)
   @Get('my')
   @ApiOperation({ summary: 'Solde disponible selon le rôle connecté' })
   summary(@Req() req: any) { return this.service.summary(req.user); }
 
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.DRIVER)
   @Get('transactions/my')
   @ApiOperation({ summary: 'Transactions de solde du compte connecté' })
   transactions(@Req() req: any, @Query() query: PaginationQueryDto) {
@@ -46,7 +46,7 @@ export class BalancesController {
     return this.service.ledger(req.user, query.page, query.limit, { q, status, type, from, to });
   }
 
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.DRIVER)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.DRIVER)
   @Get('withdrawals/my')
   @ApiOperation({ summary: 'Demandes de retrait du compte connecté' })
   withdrawals(@Req() req: any, @Query() query: PaginationQueryDto) {

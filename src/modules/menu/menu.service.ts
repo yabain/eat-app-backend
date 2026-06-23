@@ -214,8 +214,11 @@ export class MenuService {
 
   private buildSort(sortBy?: string, sortDir?: string): Record<string, SortOrder> {
     const direction: SortOrder = sortDir === 'asc' ? 1 : -1;
-    if (sortBy === 'name') return { name: direction, createdAt: -1 };
-    return { createdAt: direction };
+    const sort: Record<string, SortOrder> = { isActive: -1, isAvailable: -1 };
+    if (sortBy === 'name') sort.name = direction;
+    else if (sortBy === 'createdAt') sort.createdAt = direction;
+    else sort.name = 1;
+    return sort;
   }
 
   async searchPublic(q?: string, page?: number, limit?: number) {
@@ -232,10 +235,9 @@ export class MenuService {
     }
 
     const filter: any = {
-      restaurantId: { $in: activeRestaurantIds },
+      restaurantId: { $in: activeRestaurantIds.flatMap((id: any) => [String(id), new Types.ObjectId(String(id))]) },
       isActive: true,
       isAvailable: true,
-      stock: { $gt: 0 },
     };
     if (qRegex) {
       filter.$or = [{ name: qRegex }, { description: qRegex }];

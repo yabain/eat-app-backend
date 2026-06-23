@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model, Types } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { timingSafeEqual } from 'crypto';
+import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
 import { Balance, BalanceDocument, BalanceAccountType } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
@@ -38,6 +39,7 @@ export class PaymentsService implements OnModuleInit {
     private provider: DigikuntzProvider,
     private notifications: NotificationsService,
     private readonly cronLease: CronLeaseService,
+    private auditLogs: AuditLogsService,
   ) {}
 
   async onModuleInit() {
@@ -473,6 +475,24 @@ export class PaymentsService implements OnModuleInit {
 
       order.paymentStatus = PaymentStatus.PROCESSING;
       await order.save();
+
+      this.auditLogs.record({
+        actorId: actor.sub,
+        actorEmail: actor.email,
+        actorRole: actor.role,
+        action: 'payment.initiate',
+        resourceType: 'payment',
+        resourceId: String(payment._id),
+        metadata: {
+          amount: paymentAmount,
+          orderId: String(order._id),
+          orderNumber: order.orderNumber,
+          provider: 'digikuntz',
+        },
+        method: 'POST',
+        path: `/payments/initiate/${orderId}`,
+        statusCode: 200,
+      });
 
       return { payment, checkout: response };
     } catch (error: any) {

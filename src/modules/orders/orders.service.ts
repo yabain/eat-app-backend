@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Model, Types } from 'mongoose';
 import { randomUUID } from 'crypto';
 import { UserRole } from '../../common/enums/roles.enum';
+import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { MenuItem, MenuItemDocument } from '../../database/schemas/menu-item.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { DeliveryZone, DeliveryZoneDocument } from '../../database/schemas/delivery-zone.schema';
@@ -43,6 +44,7 @@ export class OrdersService {
     private notifications: NotificationsService,
     private inventory: MenuInventoryService,
     private platformSettings: PlatformSettingsService,
+    private auditLogs: AuditLogsService,
   ) {}
 
   private async buildPreviewInputFromCart(userId: string, dto: CheckoutFromCartDto, session?: ClientSession): Promise<PreviewOrderDto> {
@@ -438,6 +440,18 @@ export class OrdersService {
       session.startTransaction();
       const order = await this.placeOrderWithinSession(userId, dto, session);
       await session.commitTransaction();
+      this.auditLogs.record({
+        actorId: userId,
+        actorRole: UserRole.CLIENT,
+        action: 'order.create',
+        resourceType: 'order',
+        resourceId: String(order._id),
+        resourceLabel: order.orderNumber,
+        metadata: { grandTotal: (order as any).grandTotal, restaurantId: String((order as any).restaurantId), itemCount: (order as any).items?.length },
+        method: 'POST',
+        path: '/orders',
+        statusCode: 201,
+      });
       return order;
     } catch (error) {
       await session.abortTransaction();
@@ -461,6 +475,18 @@ export class OrdersService {
         { session },
       );
       await session.commitTransaction();
+      this.auditLogs.record({
+        actorId: userId,
+        actorRole: UserRole.CLIENT,
+        action: 'order.create_from_cart',
+        resourceType: 'order',
+        resourceId: String(order._id),
+        resourceLabel: order.orderNumber,
+        metadata: { grandTotal: (order as any).grandTotal, restaurantId: String((order as any).restaurantId), itemCount: (order as any).items?.length },
+        method: 'POST',
+        path: '/orders/from-cart',
+        statusCode: 201,
+      });
       return order;
     } catch (error) {
       await session.abortTransaction();
@@ -658,6 +684,19 @@ export class OrdersService {
 
     const user = await this.userModel.findById(order.userId);
     if (user) await this.notifications.sendStatusChanged(user.email, user.phone, order.orderNumber, order.orderStatus);
+    this.auditLogs.record({
+      actorId: actor.sub,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      action: 'order.update_status',
+      resourceType: 'order',
+      resourceId: id,
+      resourceLabel: order.orderNumber,
+      metadata: { from: currentStatus, to: dto.orderStatus, restaurantId: String(order.restaurantId) },
+      method: 'PATCH',
+      path: `/orders/${id}/status`,
+      statusCode: 200,
+    });
     return order;
   }
 }

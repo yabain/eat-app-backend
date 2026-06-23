@@ -3,6 +3,7 @@ import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { timingSafeEqual } from 'crypto';
+import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { Balance, BalanceAccountType, BalanceDocument } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
@@ -41,6 +42,7 @@ export class BalancesService {
     private readonly digikuntzProvider: DigikuntzProvider,
     private readonly notifications: NotificationsService,
     private readonly cronLease: CronLeaseService,
+    private readonly auditLogs: AuditLogsService,
   ) {}
 
   private oid(id: string | Types.ObjectId) { return new Types.ObjectId(String(id)); }
@@ -1014,6 +1016,18 @@ export class BalancesService {
           balance: newBalance,
         };
       });
+      this.auditLogs.record({
+        actorId: actor.sub,
+        actorEmail: actor.email,
+        actorRole: actor.role,
+        action: 'withdrawal.create',
+        resourceType: 'withdrawal',
+        resourceId: String(result.withdrawal._id),
+        metadata: { amount, phone: dto.phone, status: localStatus },
+        method: 'POST',
+        path: '/balances/withdrawals',
+        statusCode: 200,
+      });
       return { ...result, execution: { withdrawal: result.withdrawal, balance: result.balance } };
     } finally {
       await session.endSession();
@@ -1296,7 +1310,21 @@ export class BalancesService {
 
   async updateWithdrawalStatus(withdrawalId: string, dto: UpdateWithdrawalStatusDto, actor: any) {
     this.assertAdmin(actor);
-    return this.transitionWithdrawalStatus(withdrawalId, dto.status as WithdrawalStatus, dto.note, actor.sub);
+    const prev = await this.withdrawalModel.findById(withdrawalId).select('status');
+    const result = await this.transitionWithdrawalStatus(withdrawalId, dto.status as WithdrawalStatus, dto.note, actor.sub);
+    this.auditLogs.record({
+      actorId: actor.sub,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      action: 'withdrawal.update_status',
+      resourceType: 'withdrawal',
+      resourceId: withdrawalId,
+      metadata: { from: prev?.status, to: dto.status, note: dto.note },
+      method: 'PATCH',
+      path: `/balances/withdrawals/${withdrawalId}/status`,
+      statusCode: 200,
+    });
+    return result;
   }
 
   async processDigikuntzWithdrawalWebhook(withdrawalId: string, payload: any, providedToken?: string) {

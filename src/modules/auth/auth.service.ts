@@ -6,6 +6,7 @@ import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { deleteReplacedLocalUpload } from '../../common/utils/local-upload.util';
+import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { RevokedToken, RevokedTokenDocument } from '../../database/schemas/revoked-token.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
@@ -42,6 +43,7 @@ export class AuthService {
     private configService: ConfigService,
     private prospectsService: ProspectsService,
     private notificationsService: NotificationsService,
+    private auditLogs: AuditLogsService,
   ) {}
 
   async logout(token: string | undefined) {
@@ -131,6 +133,17 @@ export class AuthService {
     if (!user.passwordHash) throw new UnauthorizedException('Use Google sign-in for this account');
     const ok = await bcrypt.compare(dto.password, user.passwordHash);
     if (!ok) throw new UnauthorizedException('Invalid credentials');
+    this.auditLogs.record({
+      actorId: String(user._id),
+      actorEmail: user.email,
+      actorRole: user.role,
+      action: 'auth.login',
+      resourceType: 'user',
+      resourceId: String(user._id),
+      method: 'POST',
+      path: '/auth/login',
+      statusCode: 200,
+    });
     return this.buildAuthResponse(user);
   }
 

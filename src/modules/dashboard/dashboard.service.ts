@@ -230,20 +230,23 @@ export class DashboardService {
       metrics.deliveryFees = Number(revenue.deliveryFees || 0);
     }
 
+    const showBalance = actor.role !== UserRole.EMPLOYEE;
     return {
       period: normalizedPeriod,
       selectedDate: range.selectedDate,
       scope: isRestaurantScope ? 'restaurant' : 'system',
-      balance: Number((balanceAgg as any)?.balance || 0),
+      balance: showBalance ? Number((balanceAgg as any)?.balance || 0) : 0,
       metrics,
       series: this.fillSeries(normalizedPeriod, range, series),
       topItems: topItems.map((item) => ({ menuItemId: item._id, name: item.name, quantity: item.quantity, revenue: item.revenue })),
-      restaurantBalances: restaurantBalances.map((item: any) => ({
-        restaurantId: item.ownerId,
-        restaurantName: item.restaurant?.name || String(item.ownerId),
-        logo: item.restaurant?.logo,
-        balance: item.balance,
-      })),
+      restaurantBalances: showBalance
+        ? restaurantBalances.map((item: any) => ({
+            restaurantId: item.ownerId,
+            restaurantName: item.restaurant?.name || String(item.ownerId),
+            logo: item.restaurant?.logo,
+            balance: item.balance,
+          }))
+        : [],
       refreshedAt: new Date(),
     };
   }
