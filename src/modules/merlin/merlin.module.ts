@@ -7,6 +7,7 @@ import {
 import { MenuItem, MenuItemSchema } from '../../database/schemas/menu-item.schema';
 import { Order, OrderSchema } from '../../database/schemas/order.schema';
 import { Restaurant, RestaurantSchema } from '../../database/schemas/restaurant.schema';
+import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { MerlinController } from './merlin.controller';
 import { MerlinService } from './merlin.service';
 import { ContextBuilder } from './prompts/context.builder';
@@ -19,6 +20,7 @@ import { ContextBuilder } from './prompts/context.builder';
       { name: MenuItem.name, schema: MenuItemSchema },
       { name: Order.name, schema: OrderSchema },
     ]),
+    PlatformSettingsModule,
   ],
   controllers: [MerlinController],
   providers: [MerlinService, ContextBuilder],

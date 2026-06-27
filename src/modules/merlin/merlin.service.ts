@@ -1,43 +1,62 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import OpenAI from 'openai';
 import { Model, Types } from 'mongoose';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   MerlinConversation,
   MerlinConversationDocument,
 } from '../../database/schemas/merlin-conversation.schema';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { AskMerlinDto } from './dto/ask-merlin.dto';
 import { ContextBuilder } from './prompts/context.builder';
 import { MERLIN_SYSTEM_PROMPT } from './prompts/system.prompt';
 
+const RECIPE_KEYWORDS = /\b(recette|recettes|cuisiner|préparer|cuisson|ingrédient|ingrédients|comment.*faire|comment.*préparer|comment.*cuisiner)\b/i;
+
 @Injectable()
-export class MerlinService {
+export class MerlinService implements OnModuleInit {
   private readonly logger = new Logger(MerlinService.name);
-  private readonly genAI: GoogleGenerativeAI;
+  private readonly openai: OpenAI;
   private readonly modelName: string;
+  private recipesResource = '';
 
   constructor(
     @InjectModel(MerlinConversation.name)
     private conversationModel: Model<MerlinConversationDocument>,
     private config: ConfigService,
     private contextBuilder: ContextBuilder,
+    private platformSettings: PlatformSettingsService,
   ) {
-    this.genAI = new GoogleGenerativeAI(config.get<string>('GEMINI_API_KEY'));
-    this.modelName = config.get<string>('MERLIN_MODEL') || 'gemini-2.0-flash-lite';
+    this.openai = new OpenAI({
+      baseURL: 'https://api.groq.com/openai/v1',
+      apiKey: config.get<string>('GROQ_API_KEY'),
+    });
+    this.modelName = config.get<string>('MERLIN_MODEL') || 'gemma2-9b-it';
+  }
+
+  onModuleInit() {
+    try {
+      const filePath = path.join(__dirname, 'prompts/recettes_camerounaises_eat_app.txt');
+      this.recipesResource = fs.readFileSync(filePath, 'utf-8');
+      this.logger.log('Recettes camerounaises chargées');
+    } catch {
+      this.logger.warn('Fichier de recettes non trouvé');
+    }
   }
 
   async ask(
     dto: AskMerlinDto,
     user: any,
-  ): Promise<ReadableStream<string>> {
+  ): Promise<{ stream: ReadableStream<string>; conversationId: string }> {
     const role = user?.role || 'visitor';
     const userId = user?.sub ? new Types.ObjectId(user.sub) : undefined;
     const restaurantId = user?.restaurantId
       ? new Types.ObjectId(user.restaurantId)
       : undefined;
 
-    // Récupérer ou créer la conversation
     let conversation: MerlinConversationDocument;
     if (dto.conversationId && Types.ObjectId.isValid(dto.conversationId)) {
       conversation = await this.conversationModel.findById(dto.conversationId);
@@ -59,47 +78,57 @@ export class MerlinService {
       });
     }
 
-    // Ajouter le message utilisateur immédiatement
     conversation.messages.push({
       role: 'user',
       content: dto.message,
       createdAt: new Date(),
     });
 
-    // Préparer l'historique pour Gemini (sans le dernier message utilisateur)
-    const history = conversation.messages.slice(-11, -1).map((m) => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }],
-    }));
-
-    // Contexte métier
     const businessContext = await this.contextBuilder.build(user);
 
-    // Créer le ReadableStream SSE
+    const settings = await this.platformSettings.getPublicSettings();
+    const contact = settings?.contact || {};
+    const supportPhone = contact.supportPhone || '';
+    const supportEmail = contact.contactEmail || '';
+    const contactInfo = `\n\nCoordonnées de support Eat App :\n- Téléphone : ${supportPhone || 'Non disponible'}\n- Email : ${supportEmail || 'Non disponible'}`;
+
+    let systemContent = `${MERLIN_SYSTEM_PROMPT}${contactInfo}\n\nContexte actuel :\n${businessContext}`;
+
+    if (this.recipesResource && RECIPE_KEYWORDS.test(dto.message)) {
+      systemContent += `\n\n--- BASE DE RECETTES CAMEROUNAISES (consulte cette ressource si l'utilisateur demande une recette) ---\n${this.recipesResource}\n--- FIN DES RECETTES ---`;
+    }
+
+    const systemMessage: OpenAI.Chat.ChatCompletionMessageParam = {
+      role: 'system',
+      content: systemContent,
+    };
+
+    const recentMessages: OpenAI.Chat.ChatCompletionMessageParam[] = conversation.messages
+      .slice(-10)
+      .map((m) => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.content,
+      }));
+
     const stream = new ReadableStream<string>({
       start: async (controller) => {
         try {
-          const model = this.genAI.getGenerativeModel({ model: this.modelName });
-          const chat = model.startChat({
-            history,
-            systemInstruction: {
-              role: 'user',
-              parts: [{ text: `${MERLIN_SYSTEM_PROMPT}\n\nContexte actuel :\n${businessContext}` }],
-            },
+          const response = await this.openai.chat.completions.create({
+            model: this.modelName,
+            messages: [systemMessage, ...recentMessages],
+            stream: true,
+            temperature: 0.7,
           });
 
-          const result = await chat.sendMessageStream(dto.message);
           let fullResponse = '';
-
-          for await (const chunk of result.stream) {
-            const text = chunk.text();
+          for await (const chunk of response) {
+            const text = chunk.choices?.[0]?.delta?.content || '';
             if (text) {
               fullResponse += text;
               controller.enqueue(text);
             }
           }
 
-          // Sauvegarder la réponse
           conversation.messages.push({
             role: 'assistant',
             content: fullResponse,
@@ -117,7 +146,6 @@ export class MerlinService {
             ? 'Désolé, le service Merlin AI est momentanément indisponible (trop de requêtes). Réessaie dans quelques minutes. 🧙'
             : 'Désolé, une erreur est survenue. Réessaie plus tard. 🧙';
 
-          // Sauvegarder quand même le message avec un fallback
           try {
             conversation.messages.push({
               role: 'assistant',
@@ -133,6 +161,52 @@ export class MerlinService {
       },
     });
 
-    return stream;
+    return { stream, conversationId: conversation._id.toString() };
+  }
+
+  async getConversation(
+    id: string,
+    user: any,
+    skip = 0,
+    limit = 20,
+  ): Promise<{ messages: { role: string; content: string; createdAt: Date }[]; total: number }> {
+    if (!Types.ObjectId.isValid(id)) {
+      return { messages: [], total: 0 };
+    }
+    const conversation = await this.conversationModel.findById(id).lean();
+    if (!conversation) {
+      return { messages: [], total: 0 };
+    }
+    if (conversation.userId && user?.sub && conversation.userId.toString() !== user.sub) {
+      return { messages: [], total: 0 };
+    }
+    const all = conversation.messages || [];
+    const end = all.length - skip;
+    const start = Math.max(0, end - limit);
+    return {
+      messages: all.slice(start, end),
+      total: all.length,
+    };
+  }
+
+  async getLatestConversation(
+    user: any,
+    skip = 0,
+    limit = 20,
+  ): Promise<{ id: string; messages: { role: string; content: string; createdAt: Date }[]; total: number } | null> {
+    if (!user?.sub) return null;
+    const conversation = await this.conversationModel
+      .findOne({ userId: new Types.ObjectId(user.sub) })
+      .sort({ updatedAt: -1 })
+      .lean();
+    if (!conversation) return null;
+    const all = conversation.messages || [];
+    const end = all.length - skip;
+    const start = Math.max(0, end - limit);
+    return {
+      id: conversation._id.toString(),
+      messages: all.slice(start, end),
+      total: all.length,
+    };
   }
 }

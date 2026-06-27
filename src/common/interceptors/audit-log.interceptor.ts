@@ -24,6 +24,7 @@ const SKIP_LOG_PATTERNS: RegExp[] = [
   /\/auth\/reset-password\b/i,
   /\/payments\/webhook\b/i,
   /\/tracking\/visit\b/i,
+  /\/merlin\/ask\b/i,
 ];
 
 @Injectable()

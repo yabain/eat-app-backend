@@ -26,24 +26,39 @@ export class ContextBuilder {
     const restoCount = activeRestos.length;
     const restoList = activeRestos.map((r) => r.name).join(', ');
 
-    // Horaires (on prend le premier restaurant comme référence)
-    // const firstResto = activeRestos[0];
-
-    // Quelques produits en exemple
-    const sampleItems = await this.menuItemModel
+    // Tous les articles disponibles, groupés par catégorie (via populate)
+    const allItems = await this.menuItemModel
       .find({ isActive: true, isAvailable: true, stock: { $gt: 0 } })
       .populate('restaurantId', 'name')
-      .select('name price restaurantId')
-      .limit(5)
+      .populate('categoryId', 'name')
+      .select('name price restaurantId categoryId')
+      .sort({ price: 1 })
       .lean();
 
-    const itemsPreview = sampleItems
-      .map((i) => `- ${i.name} (${i.price} FCFA) — ${(i.restaurantId as any)?.name || ''}`)
-      .join('\n');
+    // Regroupement par catégorie
+    const byCategory = new Map<string, { catName: string; items: any[] }>();
+    for (const item of allItems) {
+      const cat: any = (item as any).categoryId;
+      const catName = cat?.name || 'Autre';
+      const key = catName;
+      if (!byCategory.has(key)) byCategory.set(key, { catName, items: [] });
+      byCategory.get(key)!.items.push(item);
+    }
+
+    const catalogLines: string[] = ['--- CATALOGUE EAT APP ---'];
+    for (const [_, group] of byCategory) {
+      catalogLines.push(`\n■ ${group.catName} (${group.items.length} article(s)) :`);
+      for (const item of group.items) {
+        const resto = (item.restaurantId as any)?.name || '';
+        catalogLines.push(`  • ${item.name} — ${item.price} FCFA${resto ? ` (${resto})` : ''}`);
+      }
+    }
+    catalogLines.push('\n--- FIN CATALOGUE ---');
 
     parts.push(
       `Aujourd'hui, Eat App compte ${restoCount} restaurant(s) actif(s) : ${restoList}.`,
-      `Exemples d'articles disponibles :\n${itemsPreview}`,
+      `Catalogue complet des articles disponibles :`,
+      catalogLines.join('\n'),
     );
 
     // Contexte client connecté
