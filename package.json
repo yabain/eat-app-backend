@@ -2,9 +2,12 @@
   "name": "food-delivery-backend",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "build": "nest build",
-    "start": "nest start",
+    "start": "node dist/main.js",
     "start:dev": "nest start --watch",
     "seed:admin": "ts-node src/scripts/seed-admin.ts"
   },
@@ -31,7 +34,7 @@
     "cookie-parser": "^1.4.7",
     "dotenv": "^16.4.5",
     "mongoose": "^8.6.1",
-    "multer": "^1.4.5-lts.1",
+    "multer": "2.0.2",
     "nodemailer": "^8.0.6",
     "openai": "^6.45.0",
     "passport": "^0.7.0",
