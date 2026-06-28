@@ -92,6 +92,11 @@ export class UpdatePlatformSettingsDto {
   @ValidateNested({ each: true })
   @Type(() => PlatformSocialLinkDto)
   socialLinks?: PlatformSocialLinkDto[];
+
+  @ApiPropertyOptional({ example: true, description: 'Activer/désactiver Merlin' })
+  @IsOptional()
+  @IsBoolean()
+  merlinEnabled?: boolean;
 }
 
 export class CreatePartnerDto {

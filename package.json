@@ -9,6 +9,7 @@
     "seed:admin": "ts-node src/scripts/seed-admin.ts"
   },
   "dependencies": {
+    "@angular/service-worker": "^16.2.12",
     "@nestjs/cli": "^10.4.5",
     "@nestjs/common": "^10.4.2",
     "@nestjs/config": "^3.2.3",

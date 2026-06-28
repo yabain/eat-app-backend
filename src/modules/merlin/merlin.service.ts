@@ -22,6 +22,7 @@ export class MerlinService implements OnModuleInit {
   private readonly openai: OpenAI;
   private readonly modelName: string;
   private recipesResource = '';
+  private routesResource = '';
 
   constructor(
     @InjectModel(MerlinConversation.name)
@@ -39,11 +40,18 @@ export class MerlinService implements OnModuleInit {
 
   onModuleInit() {
     try {
-      const filePath = path.join(__dirname, 'prompts/recettes_camerounaises_eat_app.txt');
-      this.recipesResource = fs.readFileSync(filePath, 'utf-8');
+      const recipesPath = path.join(__dirname, 'prompts/recettes_camerounaises_eat_app.txt');
+      this.recipesResource = fs.readFileSync(recipesPath, 'utf-8');
       this.logger.log('Recettes camerounaises chargées');
     } catch {
       this.logger.warn('Fichier de recettes non trouvé');
+    }
+    try {
+      const routesPath = path.join(__dirname, 'prompts/routes_eat_app.txt');
+      this.routesResource = fs.readFileSync(routesPath, 'utf-8');
+      this.logger.log('Routes Eat App chargées');
+    } catch {
+      this.logger.warn('Fichier de routes non trouvé');
     }
   }
 
@@ -92,7 +100,10 @@ export class MerlinService implements OnModuleInit {
     const supportEmail = contact.contactEmail || '';
     const contactInfo = `\n\nCoordonnées de support Eat App :\n- Téléphone : ${supportPhone || 'Non disponible'}\n- Email : ${supportEmail || 'Non disponible'}`;
 
-    let systemContent = `${MERLIN_SYSTEM_PROMPT}${contactInfo}\n\nContexte actuel :\n${businessContext}`;
+    const routesSection = this.routesResource
+      ? `\n\n--- ROUTES DE LA PLATEFORME (utilise ces liens pour orienter l'utilisateur) ---\n${this.routesResource}\n--- FIN DES ROUTES ---`
+      : '';
+    let systemContent = `${MERLIN_SYSTEM_PROMPT}${contactInfo}${routesSection}\n\nContexte actuel :\n${businessContext}`;
 
     if (this.recipesResource && RECIPE_KEYWORDS.test(dto.message)) {
       systemContent += `\n\n--- BASE DE RECETTES CAMEROUNAISES (consulte cette ressource si l'utilisateur demande une recette) ---\n${this.recipesResource}\n--- FIN DES RECETTES ---`;

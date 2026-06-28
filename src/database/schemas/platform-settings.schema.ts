@@ -81,6 +81,9 @@ export class PlatformSettings {
 
   @Prop({ type: [PlatformTestimonialSchema], default: [] })
   testimonials: PlatformTestimonial[];
+
+  @Prop({ default: true })
+  merlinEnabled: boolean;
 }
 
 export const PlatformSettingsSchema = SchemaFactory.createForClass(PlatformSettings);

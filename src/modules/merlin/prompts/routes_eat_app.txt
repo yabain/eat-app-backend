@@ -1,0 +1,73 @@
+=== ROUTES EAT APP ===
+Ces liens sont cliquables : l'URL de base est https://eat.yaba-in.com.
+
+--- PAGES PUBLIQUES (aucune connexion requise) ---
+  Accueil        : /                        → Découvre les restaurants, partenaires, témoignages
+  Recherche      : /rechercher              → Cherche un restaurant ou un plat
+  Comment ça marche : /comment-ca-marche    → Explication du fonctionnement
+  Restaurant     : /restaurant/:id          → Détail d'un restaurant (menus, infos)
+  Plat           : /menu-item/:id           → Détail d'un plat
+  Avis           : /feedbacks/:entityId     → Voir/donner un avis sur un restaurant ou plat
+  Pages légales  : /pages/:slug             → Pages d'information (CGV, confidentialité, etc.)
+  Chat Merlin    : /merlin                  → Page plein écran de l'assistant IA
+
+--- PAGES D'AUTHENTIFICATION ---
+  Connexion      : /login                   → Se connecter (redirige vers l'accueil si déjà connecté)
+  Inscription    : /register                → Créer un compte (redirige vers l'accueil si déjà connecté)
+  Mot de passe oublié : /forgot-password    → Demander un lien de réinitialisation
+  Réinitialisation    : /reset-password     → Définir un nouveau mot de passe
+  Compléter profil   : /complete-profile    → Compléter les infos après inscription (nécessite connexion)
+
+--- PAGES CLIENT (connexion requise, rôle 'client') ---
+  Panier         : /cart                    → Voir le panier et modifier les quantités
+  Paiement       : /checkout                → Finaliser la commande et payer
+  Favoris        : /favorites               → Plats favoris
+  Commandes      : /orders                  → Historique et suivi des commandes
+  Profil         : /profile                 → Modifier ses informations personnelles
+
+--- PAGES ADMIN (connexion requise, rôle 'admin') ---
+  Tableau de bord   : /admin/overview             → Statistiques et indicateurs
+  Restaurants       : /admin/restaurants          → Gérer la liste des restaurants
+  - Ajouter         : /admin/restaurants/new      → Nouveau restaurant
+  - Modifier        : /admin/restaurants/:id/edit → Éditer un restaurant
+  - Détail          : /admin/restaurants/:id      → Voir un restaurant
+  Utilisateurs      : /admin/users                → Gérer les utilisateurs
+  - Ajouter         : /admin/users/new            → Nouvel utilisateur
+  - Modifier        : /admin/users/:id/edit       → Éditer un utilisateur
+  - Détail          : /admin/users/:id            → Voir un utilisateur
+  Catégories        : /admin/categories           → Gérer les catégories de plats
+  - Ajouter         : /admin/categories/new       → Nouvelle catégorie
+  - Modifier        : /admin/categories/:id/edit  → Éditer une catégorie
+  Articles          : /admin/menu-items           → Gérer les articles du menu
+  Zones de livraison : /admin/zones               → Gérer les zones
+  Promotions        : /admin/promos               → Gérer les codes promo
+  Commandes         : /admin/orders               → Toutes les commandes
+  - Dispatch        : /admin/dispatch             → Commandes prêtes à livrer
+  Transactions      : /admin/transactions         → Historique des transactions
+  Audit logs        : /admin/audit-logs           → Traces d'activité
+  Paramètres        : /admin/settings             → Paramètres de la plateforme
+  Annonces          : /admin/announcements        → Gérer les annonces
+  WhatsApp          : /admin/whatsapp             → Statut WhatsApp
+  Prospects         : /admin/prospects            → Gérer les prospects
+  Tracking          : /admin/tracking             → Statistiques de visites
+
+--- PAGES MANAGER (connexion requise, rôles 'manager' ou 'employee') ---
+  Tableau de bord   : /manager/overview           → Statistiques du restaurant
+  Restaurant        : /manager/restaurant         → Infos du restaurant (manager et employee)
+  - Modifier        : /manager/restaurant/edit    → Éditer le restaurant (manager seulement)
+  Menu              : /manager/menu               → Gérer le menu
+  - Ajouter plat    : /manager/menu/new           → Nouveau plat
+  - Modifier plat   : /manager/menu/:id/edit      → Éditer un plat
+  Équipe            : /manager/team               → Gérer l'équipe (manager seulement)
+  Commandes         : /manager/orders             → Commandes du restaurant
+  Transactions      : /manager/transactions       → Transactions du restaurant
+
+--- PAGES DRIVER (connexion requise, rôle 'driver') ---
+  Commandes         : /driver                     → Commandes à livrer
+  Transactions      : /driver/transactions        → Transactions du livreur
+
+--- AUTRE ---
+  Retrait           : /withdrawal                 → Demandes de retrait (admin, manager, driver)
+
+Quand tu recommandes une page à l'utilisateur, présente le lien en Markdown cliquable :
+  Exemple : [Accueil](https://eat.yaba-in.com/)

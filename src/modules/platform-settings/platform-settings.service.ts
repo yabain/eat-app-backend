@@ -63,6 +63,10 @@ export class PlatformSettingsService {
       }
     }
 
+    if (dto.merlinEnabled !== undefined) {
+      set.merlinEnabled = dto.merlinEnabled;
+    }
+
     if (dto.socialLinks) {
       set.socialLinks = dto.socialLinks.map((link, index) => ({
         name: (link.name || '').trim(),
