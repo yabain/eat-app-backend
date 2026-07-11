@@ -9,7 +9,8 @@
     "build": "nest build",
     "start": "node dist/main.js",
     "start:dev": "nest start --watch",
-    "seed:admin": "ts-node src/scripts/seed-admin.ts"
+    "seed:admin": "ts-node src/scripts/seed-admin.ts",
+    "fix:balances": "ts-node src/scripts/fix-balance-transactions.ts"
   },
   "dependencies": {
     "@angular/service-worker": "^16.2.12",

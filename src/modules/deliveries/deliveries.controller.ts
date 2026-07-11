@@ -9,6 +9,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { DeliveryResponseDto, PaginatedDeliveriesResponseDto } from './dto/delivery-response.dto';
+import { ReassignDeliveryDto } from './dto/reassign-delivery.dto';
 import { UpdateAutoDispatchDto } from './dto/update-auto-dispatch.dto';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -23,6 +24,16 @@ export class DeliveriesController {
   @ApiBody({ type: AssignDeliveryDto })
   @ApiOkResponse({ description: 'Livraison assignée', type: DeliveryResponseDto })
   assign(@Body() dto: AssignDeliveryDto, @Req() req: any) { return this.service.assign(dto, req.user); }
+
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @Post(':id/reassign')
+  @ApiOperation({ summary: 'Changer le livreur d\'une livraison' })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiBody({ type: ReassignDeliveryDto })
+  @ApiOkResponse({ description: 'Livreur réassigné', type: DeliveryResponseDto })
+  reassign(@Param('id') id: string, @Body() dto: ReassignDeliveryDto, @Req() req: any) {
+    return this.service.reassignDriver(id, dto, req.user);
+  }
 
   @Roles(UserRole.ADMIN)
   @Get('auto-dispatch')

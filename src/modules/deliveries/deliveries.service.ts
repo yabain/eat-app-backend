@@ -15,6 +15,7 @@ import { UserRole } from '../../common/enums/roles.enum';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { orderStatusForDeliveryStatus } from '../../common/utils/delivery-order-status.util';
 import { AssignDeliveryDto } from './dto/assign-delivery.dto';
+import { ReassignDeliveryDto } from './dto/reassign-delivery.dto';
 import { UpdateDeliveryStatusDto } from './dto/update-delivery-status.dto';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { DispatchSettings, DispatchSettingsDocument } from '../../database/schemas/dispatch-settings.schema';
@@ -148,6 +149,77 @@ export class DeliveriesService {
         }], { session });
       });
       await this.notifyDeliveryAssigned(delivery);
+      return delivery;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async reassignDriver(deliveryId: string, dto: ReassignDeliveryDto, actor: any) {
+    const session = await this.connection.startSession();
+    try {
+      let delivery: DeliveryDocument | null = null;
+      await session.withTransaction(async () => {
+        delivery = await this.deliveryModel.findById(deliveryId).session(session);
+        if (!delivery) throw new NotFoundException('Delivery not found');
+        if (delivery.status !== DeliveryStatus.ASSIGNED) {
+          throw new BadRequestException('Le livreur ne peut être changé que si la course n\'a pas commencé');
+        }
+
+        const order = await this.orderModel.findById(delivery.orderId).session(session);
+        if (!order) throw new NotFoundException('Order not found');
+
+        const oldDriverId = delivery.driverId;
+        const newDriver = await this.userModel.findById(dto.driverId).session(session);
+        if (!newDriver) throw new NotFoundException('New driver not found');
+        if (newDriver.role !== UserRole.DRIVER) throw new BadRequestException('Assigned user must be a driver');
+        if (newDriver.isActive === false) throw new BadRequestException('New driver is inactive');
+
+        // Vérifier que le nouveau livreur n'a pas déjà une livraison active pour cette commande
+        const existingDelivery = await this.deliveryModel.findOne({
+          orderId: order._id,
+          driverId: newDriver._id,
+          status: { $in: [DeliveryStatus.ASSIGNED, DeliveryStatus.PICKED_UP, DeliveryStatus.OUT_FOR_DELIVERY] },
+          _id: { $ne: delivery._id },
+        }).session(session);
+        if (existingDelivery) {
+          throw new BadRequestException('New driver already has an active delivery for this order');
+        }
+
+        // Mettre à jour la delivery
+        delivery.driverId = newDriver._id;
+        delivery.assignedAt = new Date();
+        await delivery.save({ session });
+
+        // Mettre à jour la commande
+        order.assignedDriverId = newDriver._id;
+        await order.save({ session });
+
+        // Ancien livreur : libérer s'il n'a plus d'autres livraisons actives
+        const oldDriverActiveCount = await this.deliveryModel.countDocuments({
+          driverId: oldDriverId,
+          _id: { $ne: delivery._id },
+          status: { $in: [DeliveryStatus.ASSIGNED, DeliveryStatus.PICKED_UP, DeliveryStatus.OUT_FOR_DELIVERY] },
+        }).session(session);
+        if (oldDriverActiveCount === 0) {
+          await this.userModel.updateOne(
+            { _id: oldDriverId, role: UserRole.DRIVER },
+            { $set: { isDriverAvailable: true } },
+            { session },
+          );
+        }
+
+        // Nouveau livreur : marquer indisponible
+        await this.userModel.updateOne(
+          { _id: newDriver._id, role: UserRole.DRIVER },
+          { $set: { isDriverAvailable: false } },
+          { session },
+        );
+      });
+
+      if (delivery) {
+        await this.notifyDeliveryAssigned(delivery);
+      }
       return delivery;
     } finally {
       await session.endSession();

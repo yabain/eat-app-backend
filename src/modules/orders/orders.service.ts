@@ -10,12 +10,14 @@ import { DeliveryZone, DeliveryZoneDocument } from '../../database/schemas/deliv
 import { PromoCode, PromoCodeDocument } from '../../database/schemas/promo-code.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Cart, CartDocument } from '../../database/schemas/cart.schema';
+import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.schema';
 import { PreviewOrderDto } from './dto/preview-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { CheckoutFromCartDto } from './dto/checkout-from-cart.dto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MenuInventoryService } from '../menu/menu-inventory.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { PaymentsService } from '../payments/payments.service';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
@@ -41,9 +43,11 @@ export class OrdersService {
     @InjectModel(Cart.name) private cartModel: Model<CartDocument>,
     @InjectModel(PromoCodeRedemption.name)
     private promoRedemptionModel: Model<PromoCodeRedemptionDocument>,
+    @InjectModel(Delivery.name) private deliveryModel: Model<DeliveryDocument>,
     private notifications: NotificationsService,
     private inventory: MenuInventoryService,
     private platformSettings: PlatformSettingsService,
+    private payments: PaymentsService,
     private auditLogs: AuditLogsService,
   ) {}
 
@@ -660,25 +664,88 @@ export class OrdersService {
     const order = await this.orderModel.findById(id);
     if (!order) throw new NotFoundException('Order not found');
 
-    if ([UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role) && String(order.restaurantId) !== String(actor.restaurantId)) {
+    const actorRole = actor.role as UserRole;
+
+    if ([UserRole.MANAGER, UserRole.EMPLOYEE].includes(actorRole) && String(order.restaurantId) !== String(actor.restaurantId)) {
       throw new ForbiddenException('You can only update orders from your restaurant');
     }
-    if (![UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role)) {
+    if (![UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE].includes(actorRole)) {
       throw new ForbiddenException('Les statuts de livraison doivent être modifiés depuis la livraison assignée');
     }
 
     const currentStatus = order.orderStatus as OrderStatus;
-    if (!canManuallyTransitionOrderStatus(currentStatus, dto.orderStatus)) {
-      const allowed = allowedManualOrderStatuses(currentStatus);
+    if (!canManuallyTransitionOrderStatus(currentStatus, dto.orderStatus, actorRole)) {
+      const allowed = allowedManualOrderStatuses(currentStatus, actorRole);
       throw new BadRequestException(
         allowed.length
           ? `Transition de commande invalide. Statut autorisé: ${allowed.join(', ')}`
-          : `Aucune transition manuelle n’est autorisée depuis le statut ${currentStatus}`,
+          : `Aucune transition manuelle n'est autorisée depuis le statut ${currentStatus}`,
       );
     }
     if (order.paymentStatus !== PaymentStatus.PAID) {
       throw new BadRequestException('La commande doit être payée avant de poursuivre sa préparation');
     }
+
+    // Transitions liées à la livraison : mettre à jour la Delivery également
+    if ([OrderStatus.ASSIGNED, OrderStatus.OUT_FOR_DELIVERY, OrderStatus.DELIVERED].includes(currentStatus)) {
+      const delivery = await this.deliveryModel.findOne({
+        orderId: order._id,
+        status: { $in: ['assigned', 'picked_up', 'out_for_delivery'] },
+      });
+      if (!delivery) {
+        throw new BadRequestException('Aucune livraison active trouvée pour cette commande');
+      }
+
+      if (dto.orderStatus === OrderStatus.OUT_FOR_DELIVERY) {
+        delivery.status = 'out_for_delivery';
+        delivery.outForDeliveryAt = delivery.outForDeliveryAt || new Date();
+        order.outForDeliveryAt = order.outForDeliveryAt || delivery.outForDeliveryAt;
+      } else if (dto.orderStatus === OrderStatus.DELIVERED) {
+        delivery.status = 'delivered';
+        delivery.deliveredAt = delivery.deliveredAt || new Date();
+        order.paymentConfirmedAt = order.paymentConfirmedAt || new Date();
+
+        // Libérer le livreur s'il n'a plus d'autres livraisons actives
+        const remainingActive = await this.deliveryModel.countDocuments({
+          driverId: delivery.driverId,
+          _id: { $ne: delivery._id },
+          status: { $in: ['assigned', 'picked_up', 'out_for_delivery'] },
+        });
+        if (remainingActive === 0) {
+          await this.userModel.updateOne(
+            { _id: delivery.driverId, role: UserRole.DRIVER },
+            { $set: { isDriverAvailable: true } },
+          );
+        }
+      }
+
+      await delivery.save();
+      order.orderStatus = dto.orderStatus;
+      await order.save();
+
+      // Créditer le solde du livreur si livré
+      if (dto.orderStatus === OrderStatus.DELIVERED) {
+        await this.payments.ensurePaidOrderBalances(order, delivery.driverId).catch(() => undefined);
+      }
+
+      const user = await this.userModel.findById(order.userId);
+      if (user) await this.notifications.sendStatusChanged(user.email, user.phone, order.orderNumber, order.orderStatus);
+      this.auditLogs.record({
+        actorId: actor.sub,
+        actorEmail: actor.email,
+        actorRole: actor.role,
+        action: 'order.update_status',
+        resourceType: 'order',
+        resourceId: id,
+        resourceLabel: order.orderNumber,
+        metadata: { from: currentStatus, to: dto.orderStatus, deliveryId: String(delivery._id), restaurantId: String(order.restaurantId) },
+        method: 'PATCH',
+        path: `/orders/${id}/status`,
+        statusCode: 200,
+      });
+      return order;
+    }
+
     order.orderStatus = dto.orderStatus;
     await order.save();
 

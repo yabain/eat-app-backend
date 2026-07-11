@@ -1003,7 +1003,7 @@ export class PaymentsService implements OnModuleInit {
     if (filter.restaurantId) filter.restaurantId = new Types.ObjectId(String(filter.restaurantId));
     if (filter.userId) filter.userId = new Types.ObjectId(String(filter.userId));
 
-    const { amount: _amount, note: _note, currency: _currency, ...insertOnlyDoc } = doc;
+    const { note: _note, currency: _currency, ...insertOnlyDoc } = doc;
 
     await this.transactionModel.updateOne(
       filter,
