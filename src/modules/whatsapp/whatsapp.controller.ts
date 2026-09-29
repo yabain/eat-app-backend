@@ -22,6 +22,13 @@ export class WhatsappController {
     return this.whatsappService.getStatus();
   }
 
+  @Get('health')
+  @ApiOperation({ summary: 'Métriques santé du gateway WhatsApp (admin)' })
+  @ApiOkResponse({ description: 'Métriques : uptime, statut WhatsApp, mémoire' })
+  health() {
+    return this.whatsappService.getHealth();
+  }
+
   @Get('qr')
   @ApiOperation({ summary: 'QR code WhatsApp à scanner (admin)' })
   @ApiOkResponse({ description: 'QR code courant si WhatsApp attend une authentification' })

@@ -186,6 +186,18 @@ export class CreateTestimonialDto {
   order?: number;
 }
 
+export class UpdateWhatsappGatewayDto {
+  @ApiPropertyOptional({ example: 'https://mon-gateway.com/api/whatsapp', description: 'URL du gateway WhatsApp distant' })
+  @IsOptional()
+  @IsString()
+  url?: string;
+
+  @ApiPropertyOptional({ example: 'MonMotDePasse123', description: 'Mot de passe du gateway WhatsApp (sera chiffré en base)' })
+  @IsOptional()
+  @IsString()
+  password?: string;
+}
+
 export class UpdateTestimonialDto {
   @ApiPropertyOptional({ example: 'Mirana Marci' })
   @IsOptional()

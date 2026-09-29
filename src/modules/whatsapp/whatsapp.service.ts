@@ -4,6 +4,24 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
 import { isAbsolute, join } from 'path';
 import * as QRCode from 'qrcode';
 import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+
+export interface WhatsappGatewayHealth {
+  status: string;
+  uptime: number;
+  whatsapp: {
+    status: string;
+    lastError: string | null;
+    connectedSince: string | null;
+    messagesSent: number;
+    messagesFailed: number;
+  };
+  memory: {
+    rss: string;
+    heapUsed: string;
+    heapTotal: string;
+  };
+}
 
 type WhatsappConnectionStatus = 'initializing' | 'qr' | 'authenticated' | 'ready' | 'disconnected' | 'failed';
 
@@ -19,11 +37,18 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private initializing = false;
   private readyWatchdog: NodeJS.Timeout | null = null;
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly platformSettingsService: PlatformSettingsService,
+  ) {}
+
+  private async loadGwFromDb(): Promise<{ url: string; decryptedPassword: string } | null> {
+    return this.platformSettingsService.getWhatsappGatewayFromDb();
+  }
 
   async onModuleInit() {
-    if (this.useGateway()) {
-      this.logger.log(`WhatsApp gateway enabled: ${this.gatewayBaseUrl()}`);
+    if (await this.useGateway()) {
+      this.logger.log(`WhatsApp gateway enabled: ${await this.gatewayBaseUrl()}`);
       return;
     }
     if (this.configService.get<string>('WHATSAPP_AUTO_INIT', 'true') === 'false') return;
@@ -39,7 +64,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getStatus() {
-    if (this.useGateway()) return this.safeGatewayStatus('status');
+    if (await this.useGateway()) return this.safeGatewayStatus('status');
     await this.refreshRuntimeState();
     return {
       status: this.status,
@@ -50,8 +75,56 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  async getHealth(): Promise<WhatsappGatewayHealth> {
+    if (await this.useGateway()) {
+      try {
+        const baseUrl = await this.gatewayBaseUrl();
+        const origin = this.extractOrigin(baseUrl);
+        const healthUrl = `${origin}/api/health`;
+        const password = await this.gatewayPassword();
+        const response = await fetch(healthUrl, {
+          headers: {
+            'Content-Type': 'application/json',
+            'x-whatsapp-password': password,
+          },
+        });
+        const text = await response.text();
+        if (!response.ok) {
+          throw new Error(`Health check failed (${response.status})`);
+        }
+        return this.parseGatewayJson(text);
+      } catch (error: any) {
+        return {
+          status: 'unreachable',
+          uptime: 0,
+          whatsapp: { status: 'unknown', lastError: error?.message || 'Gateway inaccessible', connectedSince: null, messagesSent: 0, messagesFailed: 0 },
+          memory: { rss: '0MB', heapUsed: '0MB', heapTotal: '0MB' },
+        };
+      }
+    }
+    await this.refreshRuntimeState();
+    const mem = process.memoryUsage();
+    const formatMB = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(0)}MB`;
+    return {
+      status: this.status === 'ready' ? 'ok' : 'degraded',
+      uptime: Math.floor(process.uptime()),
+      whatsapp: {
+        status: this.status,
+        lastError: this.lastError,
+        connectedSince: this.status === 'ready' ? new Date().toISOString() : null,
+        messagesSent: 0,
+        messagesFailed: 0,
+      },
+      memory: {
+        rss: formatMB(mem.rss),
+        heapUsed: formatMB(mem.heapUsed),
+        heapTotal: formatMB(mem.heapTotal),
+      },
+    };
+  }
+
   async getQr() {
-    if (this.useGateway()) return this.safeGatewayStatus('qr');
+    if (await this.useGateway()) return this.safeGatewayStatus('qr');
     if (!this.client && !this.initializing) await this.initialize();
     await this.refreshRuntimeState();
     return {
@@ -65,7 +138,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async reset() {
-    if (this.useGateway()) return this.safeGatewayStatus('reset', { method: 'POST' });
+    if (await this.useGateway()) return this.safeGatewayStatus('reset', { method: 'POST' });
     await this.destroyClient();
     const authPath = this.getAuthDataPath();
     const removed = this.removeAuthData(authPath);
@@ -85,7 +158,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async sendText(phone: string, message: string) {
-    if (this.useGateway()) {
+    if (await this.useGateway()) {
       return this.gatewayRequest('send-text', {
         method: 'POST',
         body: JSON.stringify({ phone, message }),
@@ -128,7 +201,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       filename: attachment.filename || 'attachment',
     };
 
-    if (this.useGateway()) {
+    if (await this.useGateway()) {
       return this.gatewayRequest('send-media', {
         method: 'POST',
         body: JSON.stringify({ phone, message, ...media }),
@@ -198,20 +271,30 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private useGateway() {
-    return !!this.gatewayBaseUrl() && this.configService.get<string>('WHATSAPP_LOCAL_ENABLED', 'false') !== 'true';
+  private async useGateway() {
+    const dbGw = await this.loadGwFromDb();
+    const dbUrl = dbGw?.url || '';
+    const envUrl = this.configService.get<string>('WHATSAPP_GATEWAY_URL') || '';
+    const url = dbUrl || envUrl;
+    return !!url && this.configService.get<string>('WHATSAPP_LOCAL_ENABLED', 'false') !== 'true';
   }
 
-  private gatewayBaseUrl() {
-    return this.normalizeUrl(this.configService.get<string>('WHATSAPP_GATEWAY_URL'));
+  private async gatewayBaseUrl() {
+    const dbGw = await this.loadGwFromDb();
+    const dbUrl = dbGw?.url || '';
+    const envUrl = this.configService.get<string>('WHATSAPP_GATEWAY_URL') || '';
+    const rawUrl = dbUrl || envUrl;
+    return this.normalizeUrl(rawUrl);
   }
 
-  private gatewayPassword() {
+  private async gatewayPassword() {
+    const dbGw = await this.loadGwFromDb();
+    if (dbGw?.decryptedPassword) return dbGw.decryptedPassword;
     return this.configService.get<string>('WHATSAPP_GATEWAY_PASSWORD') || '123Whatsapp?';
   }
 
   private async gatewayRequest(path: string, init: RequestInit = {}) {
-    const baseUrl = this.gatewayBaseUrl();
+    const baseUrl = await this.gatewayBaseUrl();
     if (!baseUrl) throw new BadRequestException('WhatsApp gateway URL is not configured');
 
     let response: Response;
@@ -220,7 +303,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         ...init,
         headers: {
           'Content-Type': 'application/json',
-          'x-whatsapp-password': this.gatewayPassword(),
+          'x-whatsapp-password': await this.gatewayPassword(),
           ...(init.headers || {}),
         },
       });
@@ -266,6 +349,15 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     const value = String(url || '').trim().replace(/\/+$/, '');
     if (!value) return '';
     return /^https?:\/\//i.test(value) ? value : `https://${value}`;
+  }
+
+  private extractOrigin(url: string): string {
+    try {
+      const parsed = new URL(url);
+      return `${parsed.protocol}//${parsed.host}`;
+    } catch {
+      return url;
+    }
   }
 
   private registerEvents(client: Client) {

@@ -11,8 +11,10 @@ import {
   UpdatePartnerDto,
   UpdatePlatformSettingsDto,
   UpdateTestimonialDto,
+  UpdateWhatsappGatewayDto,
 } from './dto/platform-settings.dto';
 import { currentHourInTz, isOrderingOpen } from '../../common/utils/ordering-window.util';
+import { CryptoService } from '../../common/crypto/crypto.service';
 
 @Injectable()
 export class PlatformSettingsService {
@@ -20,6 +22,7 @@ export class PlatformSettingsService {
 
   constructor(
     @InjectModel(PlatformSettings.name) private readonly settingsModel: Model<PlatformSettingsDocument>,
+    private readonly cryptoService: CryptoService,
   ) {}
 
   async getPublicSettings() {
@@ -203,6 +206,68 @@ export class PlatformSettingsService {
     }
   }
 
+  async updateWhatsappGateway(dto: UpdateWhatsappGatewayDto) {
+    await this.getOrCreateSettings();
+    const set: Record<string, unknown> = {};
+
+    if (dto.url !== undefined) {
+      const url = String(dto.url || '').trim();
+      if (url && !/^https?:\/\//i.test(url)) {
+        throw new BadRequestException('WhatsApp gateway URL must start with http:// or https://');
+      }
+      set['whatsappGateway.url'] = url;
+    }
+
+    if (dto.password !== undefined) {
+      const password = String(dto.password || '');
+      if (!password) {
+        throw new BadRequestException('WhatsApp gateway password is required');
+      }
+      set['whatsappGateway.encryptedPassword'] = this.cryptoService.encrypt(password);
+    }
+
+    const updated = await this.settingsModel.findOneAndUpdate(
+      { key: this.settingsKey },
+      { $set: set },
+      { new: true, runValidators: true },
+    );
+    if (!updated) throw new NotFoundException('Platform settings not found');
+    return this.buildWhatsappGatewayResponse(updated);
+  }
+
+  async getWhatsappGateway() {
+    const settings = await this.getOrCreateSettings();
+    return this.buildWhatsappGatewayResponse(settings);
+  }
+
+  /**
+   * Retourne la config WhatsApp gateway depuis la DB, ou undefined si non configurée.
+   * Utilisée par WhatsappService.
+   */
+  async getWhatsappGatewayFromDb(): Promise<{ url: string; decryptedPassword: string } | null> {
+    const settings = await this.getOrCreateSettings();
+    const gw = settings.whatsappGateway as { url?: string; encryptedPassword?: string } | undefined;
+    if (!gw || !gw.url) return null;
+
+    let decryptedPassword = '';
+    if (gw.encryptedPassword) {
+      try {
+        decryptedPassword = this.cryptoService.decrypt(gw.encryptedPassword);
+      } catch {
+        // si jamais le déchiffrement échoue, on retourne une chaîne vide
+      }
+    }
+    return { url: gw.url, decryptedPassword };
+  }
+
+  private buildWhatsappGatewayResponse(settings: any) {
+    const gw = settings.whatsappGateway as { url?: string; encryptedPassword?: string } | undefined;
+    return {
+      url: gw?.url || '',
+      hasPassword: !!gw?.encryptedPassword,
+    };
+  }
+
   private async getOrCreateSettings() {
     const existing = await this.settingsModel.findOne({ key: this.settingsKey });
     if (existing) return existing;
@@ -222,6 +287,7 @@ export class PlatformSettingsService {
         { name: 'Instagram', icon: 'fa-brands fa-instagram', url: '#', isActive: false, order: 40 },
       ],
       partners: [],
+      whatsappGateway: { url: '', encryptedPassword: '' },
     });
   }
 

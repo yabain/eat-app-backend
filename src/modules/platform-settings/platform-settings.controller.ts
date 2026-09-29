@@ -10,6 +10,7 @@ import {
   UpdatePartnerDto,
   UpdatePlatformSettingsDto,
   UpdateTestimonialDto,
+  UpdateWhatsappGatewayDto,
 } from './dto/platform-settings.dto';
 import { PlatformSettingsService } from './platform-settings.service';
 
@@ -126,5 +127,28 @@ export class PlatformSettingsController {
   @ApiOkResponse({ description: 'Témoignage supprimé' })
   deleteTestimonial(@Param('testimonialId') testimonialId: string) {
     return this.settingsService.deleteTestimonial(testimonialId);
+  }
+
+  // ── WhatsApp Gateway ─────────────────────────────────────────────────────
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth('bearer')
+  @Get('whatsapp-gateway')
+  @ApiOperation({ summary: 'Récupérer la configuration WhatsApp gateway (admin)' })
+  @ApiOkResponse({ description: 'URL et indication si un mot de passe est défini' })
+  getWhatsappGateway() {
+    return this.settingsService.getWhatsappGateway();
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth('bearer')
+  @Patch('whatsapp-gateway')
+  @ApiOperation({ summary: 'Mettre à jour la configuration WhatsApp gateway (admin)' })
+  @ApiBody({ type: UpdateWhatsappGatewayDto })
+  @ApiOkResponse({ description: 'Configuration mise à jour' })
+  updateWhatsappGateway(@Body() dto: UpdateWhatsappGatewayDto) {
+    return this.settingsService.updateWhatsappGateway(dto);
   }
 }

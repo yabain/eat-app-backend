@@ -63,6 +63,14 @@ export class PlatformOrderingSettings {
 
 export const PlatformOrderingSettingsSchema = SchemaFactory.createForClass(PlatformOrderingSettings);
 
+@Schema({ _id: false })
+export class PlatformWhatsappGateway {
+  @Prop({ default: '' }) url: string;
+  @Prop({ default: '' }) encryptedPassword: string;
+}
+
+export const PlatformWhatsappGatewaySchema = SchemaFactory.createForClass(PlatformWhatsappGateway);
+
 @Schema({ timestamps: true })
 export class PlatformSettings {
   @Prop({ unique: true, default: 'public' }) key: string;
@@ -84,6 +92,9 @@ export class PlatformSettings {
 
   @Prop({ default: true })
   merlinEnabled: boolean;
+
+  @Prop({ type: PlatformWhatsappGatewaySchema, default: () => ({}) })
+  whatsappGateway: PlatformWhatsappGateway;
 }
 
 export const PlatformSettingsSchema = SchemaFactory.createForClass(PlatformSettings);

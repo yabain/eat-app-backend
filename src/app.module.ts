@@ -27,6 +27,7 @@ import { TrackingModule } from './modules/tracking/tracking.module';
 import { FavoritesModule } from './modules/favorites/favorites.module';
 import { MerlinModule } from './modules/merlin/merlin.module';
 import { CronLeaseModule } from './common/cron-lease/cron-lease.module';
+import { CryptoModule } from './common/crypto/crypto.module';
 
 @Module({
   imports: [
@@ -63,6 +64,7 @@ import { CronLeaseModule } from './common/cron-lease/cron-lease.module';
     FavoritesModule,
     MerlinModule,
     CronLeaseModule,
+    CryptoModule,
   ],
 })
 export class AppModule {}
