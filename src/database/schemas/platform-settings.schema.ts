@@ -71,6 +71,19 @@ export class PlatformWhatsappGateway {
 
 export const PlatformWhatsappGatewaySchema = SchemaFactory.createForClass(PlatformWhatsappGateway);
 
+@Schema({ _id: false })
+export class PlatformMerlinConfig {
+  @Prop({ default: true }) enabled: boolean;
+  @Prop({ default: true }) visible: boolean;
+  @Prop({ default: '' }) logo: string;
+  @Prop({ default: '' }) welcomeImage: string;
+  @Prop({ default: '' }) openRouterApiKey: string;
+  @Prop({ default: 0.7 }) temperature: number;
+  @Prop({ type: String, enum: ['low', 'medium', 'high'], default: 'medium' }) reasoningLevel: string;
+}
+
+export const PlatformMerlinConfigSchema = SchemaFactory.createForClass(PlatformMerlinConfig);
+
 @Schema({ timestamps: true })
 export class PlatformSettings {
   @Prop({ unique: true, default: 'public' }) key: string;
@@ -92,6 +105,9 @@ export class PlatformSettings {
 
   @Prop({ default: true })
   merlinEnabled: boolean;
+
+  @Prop({ type: PlatformMerlinConfigSchema, default: () => ({}) })
+  merlin: PlatformMerlinConfig;
 
   @Prop({ type: PlatformWhatsappGatewaySchema, default: () => ({}) })
   whatsappGateway: PlatformWhatsappGateway;

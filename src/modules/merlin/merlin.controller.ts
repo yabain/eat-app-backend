@@ -1,8 +1,12 @@
-import { Body, Controller, Get, Logger, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Logger, Param, Post, Put, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../../common/enums/roles.enum';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { OptionalJwtAuthGuard } from '../../common/guards/optional-jwt-auth.guard';
+import { UpdateMerlinConfigDto } from '../platform-settings/dto/platform-settings.dto';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { AskMerlinDto } from './dto/ask-merlin.dto';
 import { MerlinService } from './merlin.service';
 
@@ -11,7 +15,29 @@ import { MerlinService } from './merlin.service';
 export class MerlinController {
   private readonly logger = new Logger(MerlinController.name);
 
-  constructor(private readonly merlinService: MerlinService) {}
+  constructor(
+    private readonly merlinService: MerlinService,
+    private readonly platformSettings: PlatformSettingsService,
+  ) {}
+
+  @UseGuards(JwtAuthGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth('bearer')
+  @Get('settings')
+  @ApiOperation({ summary: 'Récupérer la configuration Merlin (admin).' })
+  getSettings() {
+    return this.platformSettings.getMerlinConfig();
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth('bearer')
+  @Put('settings')
+  @ApiOperation({ summary: 'Mettre à jour la configuration Merlin (admin).' })
+  @ApiBody({ type: UpdateMerlinConfigDto })
+  updateSettings(@Body() dto: UpdateMerlinConfigDto) {
+    return this.platformSettings.updateMerlinConfig(dto);
+  }
 
   @UseGuards(OptionalJwtAuthGuard)
   @Post('ask')

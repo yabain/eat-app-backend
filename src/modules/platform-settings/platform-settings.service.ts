@@ -8,6 +8,7 @@ import {
 import {
   CreatePartnerDto,
   CreateTestimonialDto,
+  UpdateMerlinConfigDto,
   UpdatePartnerDto,
   UpdatePlatformSettingsDto,
   UpdateTestimonialDto,
@@ -27,7 +28,18 @@ export class PlatformSettingsService {
 
   async getPublicSettings() {
     const settings = await this.getOrCreateSettings();
-    return this.sortSettings(settings.toObject());
+    const obj = settings.toObject() as any;
+    if (obj.merlin) {
+      obj.merlin = {
+        enabled: obj.merlin.enabled ?? true,
+        visible: obj.merlin.visible ?? true,
+        logo: obj.merlin.logo || '',
+        welcomeImage: obj.merlin.welcomeImage || '',
+        temperature: typeof obj.merlin.temperature === 'number' ? obj.merlin.temperature : 0.7,
+        reasoningLevel: obj.merlin.reasoningLevel || 'medium',
+      };
+    }
+    return this.sortSettings(obj);
   }
 
   async updateSettings(dto: UpdatePlatformSettingsDto) {
@@ -268,6 +280,97 @@ export class PlatformSettingsService {
     };
   }
 
+  // ── Merlin IA Config ──────────────────────────────────────────────────────
+
+  async getMerlinConfig() {
+    const settings = await this.getOrCreateSettings();
+    const merlin = (settings.toObject() as any).merlin || {};
+    return {
+      enabled: merlin.enabled ?? true,
+      visible: merlin.visible ?? true,
+      logo: merlin.logo || '',
+      welcomeImage: merlin.welcomeImage || '',
+      openRouterApiKey: merlin.openRouterApiKey
+        ? this.cryptoService.decrypt(merlin.openRouterApiKey)
+        : '',
+      temperature: typeof merlin.temperature === 'number' ? merlin.temperature : 0.7,
+      reasoningLevel: merlin.reasoningLevel || 'medium',
+    };
+  }
+
+  async updateMerlinConfig(dto: UpdateMerlinConfigDto) {
+    await this.getOrCreateSettings();
+    const set: Record<string, unknown> = {};
+
+    if (dto.enabled !== undefined) set['merlin.enabled'] = dto.enabled;
+    if (dto.visible !== undefined) set['merlin.visible'] = dto.visible;
+    if (dto.logo !== undefined) set['merlin.logo'] = dto.logo || '';
+    if (dto.welcomeImage !== undefined) set['merlin.welcomeImage'] = dto.welcomeImage || '';
+    if (dto.temperature !== undefined) {
+      const t = Math.max(0, Math.min(2, Number(dto.temperature)));
+      if (Number.isFinite(t)) set['merlin.temperature'] = t;
+    }
+    if (dto.reasoningLevel !== undefined) {
+      const rl = String(dto.reasoningLevel).trim().toLowerCase();
+      set['merlin.reasoningLevel'] = (rl === 'low' || rl === 'high') ? rl : 'medium';
+    }
+    if (dto.openRouterApiKey !== undefined) {
+      const raw = String(dto.openRouterApiKey || '').trim();
+      set['merlin.openRouterApiKey'] = raw ? this.cryptoService.encrypt(raw) : '';
+    }
+
+    const updated = await this.settingsModel.findOneAndUpdate(
+      { key: this.settingsKey },
+      { $set: set },
+      { new: true, runValidators: true },
+    );
+    if (!updated) throw new NotFoundException('Platform settings not found');
+
+    const merlin = (updated.toObject() as any).merlin || {};
+    return {
+      enabled: merlin.enabled ?? true,
+      visible: merlin.visible ?? true,
+      logo: merlin.logo || '',
+      welcomeImage: merlin.welcomeImage || '',
+      openRouterApiKey: merlin.openRouterApiKey
+        ? this.cryptoService.decrypt(merlin.openRouterApiKey)
+        : '',
+      temperature: typeof merlin.temperature === 'number' ? merlin.temperature : 0.7,
+      reasoningLevel: merlin.reasoningLevel || 'medium',
+    };
+  }
+
+  async getMerlinRuntimeConfig(): Promise<{
+    enabled: boolean;
+    visible: boolean;
+    logo: string;
+    welcomeImage: string;
+    openRouterApiKey: string;
+    temperature: number;
+    reasoningLevel: 'low' | 'medium' | 'high';
+  }> {
+    const settings = await this.getOrCreateSettings();
+    const merlin = (settings.toObject() as any).merlin || {};
+    let apiKey = '';
+    if (merlin.openRouterApiKey) {
+      try {
+        apiKey = this.cryptoService.decrypt(merlin.openRouterApiKey);
+      } catch {}
+    }
+    return {
+      enabled: merlin.enabled ?? true,
+      visible: merlin.visible ?? true,
+      logo: merlin.logo || '',
+      welcomeImage: merlin.welcomeImage || '',
+      openRouterApiKey: apiKey,
+      temperature: typeof merlin.temperature === 'number' ? merlin.temperature : 0.7,
+      reasoningLevel:
+        merlin.reasoningLevel === 'low' || merlin.reasoningLevel === 'high'
+          ? merlin.reasoningLevel
+          : 'medium',
+    };
+  }
+
   private async getOrCreateSettings() {
     const existing = await this.settingsModel.findOne({ key: this.settingsKey });
     if (existing) return existing;
@@ -287,6 +390,7 @@ export class PlatformSettingsService {
         { name: 'Instagram', icon: 'fa-brands fa-instagram', url: '#', isActive: false, order: 40 },
       ],
       partners: [],
+      merlin: { enabled: true, visible: true, logo: '', welcomeImage: '', openRouterApiKey: '', temperature: 0.7, reasoningLevel: 'medium' },
       whatsappGateway: { url: '', encryptedPassword: '' },
     });
   }

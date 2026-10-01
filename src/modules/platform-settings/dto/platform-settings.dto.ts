@@ -198,6 +198,43 @@ export class UpdateWhatsappGatewayDto {
   password?: string;
 }
 
+export class UpdateMerlinConfigDto {
+  @ApiPropertyOptional({ example: true, description: 'Activer/désactiver Merlin' })
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+
+  @ApiPropertyOptional({ example: true, description: 'Afficher le bouton Merlin sur le front' })
+  @IsOptional()
+  @IsBoolean()
+  visible?: boolean;
+
+  @ApiPropertyOptional({ example: '', description: 'Logo Merlin (URL)' })
+  @IsOptional()
+  @IsString()
+  logo?: string;
+
+  @ApiPropertyOptional({ example: '', description: "Image d'accueil Merlin (URL)" })
+  @IsOptional()
+  @IsString()
+  welcomeImage?: string;
+
+  @ApiPropertyOptional({ example: 'sk-or-v1-...', description: "Clé API OpenRouter (sera chiffrée en base)" })
+  @IsOptional()
+  @IsString()
+  openRouterApiKey?: string;
+
+  @ApiPropertyOptional({ example: 0.7, description: 'Température du modèle (0-2)' })
+  @IsOptional()
+  @IsNumber()
+  temperature?: number;
+
+  @ApiPropertyOptional({ example: 'medium', description: "Niveau de raisonnement ('low' | 'medium' | 'high')" })
+  @IsOptional()
+  @IsString()
+  reasoningLevel?: string;
+}
+
 export class UpdateTestimonialDto {
   @ApiPropertyOptional({ example: 'Mirana Marci' })
   @IsOptional()
