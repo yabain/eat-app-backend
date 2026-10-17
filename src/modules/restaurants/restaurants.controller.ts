@@ -6,6 +6,7 @@ import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
+import { convertUploadToWebp } from '../../common/utils/convert-image.util';
 import { RestaurantsService } from './restaurants.service';
 import { AssignManagerDto } from './dto/assign-manager.dto';
 import { CreateRestaurantDto } from './dto/create-restaurant.dto';
@@ -166,8 +167,10 @@ export class RestaurantsController {
     },
   })
   @ApiOkResponse({ description: 'Logo restaurant mis à jour', type: RestaurantMediaResponseDto })
-  uploadLogo(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Req() req: any) {
-    const relativePath = `/uploads/restaurants/${file.filename}`;
+  async uploadLogo(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Req() req: any) {
+    const dest = resolveUploadDir('restaurants');
+    const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
+    const relativePath = `/uploads/restaurants/${filename}`;
     const appUrl = (process.env.APP_URL || '').replace(/\/+$/, '');
     const logo = appUrl ? `${appUrl}${relativePath}` : relativePath;
     return this.service.updateMedia(id, { logo }, req.user);
@@ -197,8 +200,10 @@ export class RestaurantsController {
     },
   })
   @ApiOkResponse({ description: 'Bannière restaurant mise à jour', type: RestaurantMediaResponseDto })
-  uploadBanner(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Req() req: any) {
-    const relativePath = `/uploads/restaurants/${file.filename}`;
+  async uploadBanner(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Req() req: any) {
+    const dest = resolveUploadDir('restaurants');
+    const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
+    const relativePath = `/uploads/restaurants/${filename}`;
     const appUrl = (process.env.APP_URL || '').replace(/\/+$/, '');
     const bannerImage = appUrl ? `${appUrl}${relativePath}` : relativePath;
     return this.service.updateMedia(id, { bannerImage }, req.user);

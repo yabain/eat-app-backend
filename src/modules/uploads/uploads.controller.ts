@@ -3,6 +3,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOkResponse, ApiParam, ApiTags } from '@nestjs/swagger';
+import { convertUploadToWebp } from '../../common/utils/convert-image.util';
 import { UploadStorageService } from './upload-storage.service';
 import { UploadResponseDto } from '../../common/dto/response.dto';
 
@@ -26,10 +27,12 @@ export class UploadsController {
     },
   })
   @ApiOkResponse({ description: 'Fichier uploadé', type: UploadResponseDto })
-  uploadRoot(@Req() req: any, @UploadedFile() file: Express.Multer.File) {
+  async uploadRoot(@Req() req: any, @UploadedFile() file: Express.Multer.File) {
     this.storage.assertUploadAllowed(req.user);
-    const path = this.storage.publicPath(file.filename);
-    return { path, filename: file.filename };
+    const dest = this.storage.resolveDestination();
+    const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
+    const path = this.storage.publicPath(filename);
+    return { path, filename };
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -47,9 +50,11 @@ export class UploadsController {
     },
   })
   @ApiOkResponse({ description: 'Fichier uploadé dans un dossier', type: UploadResponseDto })
-  uploadInFolder(@Req() req: any, @Param('folder') folder: string, @UploadedFile() file: Express.Multer.File) {
+  async uploadInFolder(@Req() req: any, @Param('folder') folder: string, @UploadedFile() file: Express.Multer.File) {
     this.storage.assertUploadAllowed(req.user, folder);
-    const path = this.storage.publicPath(file.filename, folder);
-    return { path, filename: file.filename };
+    const dest = this.storage.resolveDestination(folder);
+    const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
+    const path = this.storage.publicPath(filename, folder);
+    return { path, filename };
   }
 }

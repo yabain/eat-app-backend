@@ -29,6 +29,7 @@ import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
+import { convertUploadToWebp } from '../../common/utils/convert-image.util';
 import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
@@ -124,7 +125,10 @@ export class CategoriesController {
     },
   })
   @ApiOkResponse({ description: 'Image catégorie uploadée et enregistrée', type: CategoryResponseDto })
-  uploadImage(@Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+  async uploadImage(@Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+    const dest = resolveUploadDir('categories');
+    const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
+    file.filename = filename;
     const image = this.buildCategoryImageUrl(file);
     return this.service.updateImage(id, image);
   }

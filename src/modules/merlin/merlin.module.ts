@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
 import { MongooseModule } from '@nestjs/mongoose';
 import {
   MerlinConversation,
@@ -21,6 +22,7 @@ import { ContextBuilder } from './prompts/context.builder';
       { name: Order.name, schema: OrderSchema },
     ]),
     PlatformSettingsModule,
+    ScheduleModule.forRoot(),
   ],
   controllers: [MerlinController],
   providers: [MerlinService, ContextBuilder],

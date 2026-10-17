@@ -22,6 +22,7 @@ import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
+import { convertUploadToWebp } from '../../common/utils/convert-image.util';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -218,7 +219,10 @@ export class UsersController {
     },
   })
   @ApiOkResponse({ description: 'Image de profil uploadée et enregistrée', type: UserResponseDto })
-  uploadMyProfileImage(@Req() req: any, @UploadedFile() file: Express.Multer.File) {
+  async uploadMyProfileImage(@Req() req: any, @UploadedFile() file: Express.Multer.File) {
+    const dest = resolveUploadDir('profiles');
+    const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
+    file.filename = filename;
     const profileImage = this.buildProfileImageUrl(file);
     return this.usersService.updateMyProfileImage(req.user.sub, profileImage);
   }
@@ -283,7 +287,10 @@ export class UsersController {
     },
   })
   @ApiOkResponse({ description: 'Image de profil uploadée et enregistrée', type: UserResponseDto })
-  uploadProfileImage(@Req() req: any, @Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+  async uploadProfileImage(@Req() req: any, @Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+    const dest = resolveUploadDir('profiles');
+    const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
+    file.filename = filename;
     const profileImage = this.buildProfileImageUrl(file);
     return this.usersService.updateProfileImageForActor(req.user, id, profileImage);
   }

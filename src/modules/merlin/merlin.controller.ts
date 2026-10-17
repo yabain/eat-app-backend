@@ -78,6 +78,21 @@ export class MerlinController {
     }
   }
 
+  @UseGuards(OptionalJwtAuthGuard)
+  @Get('visitor/:visitorId')
+  @ApiOperation({ summary: 'Reprise du fil de discussion d\'un visiteur non connecté.' })
+  getVisitorConversation(
+    @Param('visitorId') visitorId: string,
+    @Query('skip') skip?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.merlinService.getVisitorConversation(
+      visitorId,
+      Number(skip) || 0,
+      Math.min(Number(limit) || 20, 50),
+    );
+  }
+
   @UseGuards(JwtAuthGuard)
   @Get('conversation/:id')
   @ApiBearerAuth('bearer')

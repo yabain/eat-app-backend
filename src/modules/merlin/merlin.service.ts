@@ -1,6 +1,7 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Model, Types } from 'mongoose';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -23,6 +24,8 @@ const DEFAULT_MODELS = [
   'cohere/north-mini-code:free',
   'thinkingmachines/inkling-small:free',
 ];
+const PURGE_TIMEZONE = process.env.MERLIN_CRON_TIMEZONE || 'Africa/Douala';
+const EMPTY_PAGE = { messages: [], total: 0 };
 
 class MerlinUpstreamError extends Error {
   constructor(
@@ -36,7 +39,7 @@ class MerlinUpstreamError extends Error {
 }
 
 @Injectable()
-export class MerlinService implements OnModuleInit {
+export class MerlinService implements OnModuleInit, OnApplicationBootstrap {
   private readonly logger = new Logger(MerlinService.name);
   private recipesResource = '';
   private routesResource = '';
@@ -84,6 +87,59 @@ export class MerlinService implements OnModuleInit {
         `Merlin prêt — ${models.length} modèle(s) [${models.join(' → ')}], stratégie « ${this.modelStrategy} », exécution ${this.enabled ? 'activée' : 'DÉSACTIVÉE'}`,
       );
     });
+  }
+
+  async onApplicationBootstrap(): Promise<void> {
+    try {
+      const result = await this.conversationModel.deleteMany({
+        userId: null,
+        $or: [{ visitorDate: { $lt: this.today() } }, { visitorDate: null }],
+      });
+      if (result.deletedCount) {
+        this.logger.log(
+          `Purge au démarrage : ${result.deletedCount} conversation(s) de visiteur(s) d'un jour précédent supprimée(s).`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Purge au démarrage ignorée : ${(error as Error).message}`,
+      );
+    }
+  }
+
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, {
+    name: 'merlin-visitor-purge',
+    timeZone: PURGE_TIMEZONE,
+  })
+  async purgeVisitorConversations(): Promise<void> {
+    try {
+      const result = await this.conversationModel.deleteMany({ userId: null });
+      this.logger.log(
+        `Purge de minuit : ${result.deletedCount ?? 0} conversation(s) de visiteur(s) supprimée(s).`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Purge des conversations visiteurs impossible : ${(error as Error).message}`,
+      );
+    }
+  }
+
+  private get timeZone(): string {
+    return (this.config.get<string>('MERLIN_CRON_TIMEZONE') || 'Africa/Douala').trim();
+  }
+
+  private today(): string {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: this.timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+  }
+
+  private visitorDateOf(visitorId: string): string | null {
+    const match = /(\d{4}-\d{2}-\d{2})/.exec(visitorId);
+    return match ? match[1] : null;
   }
 
   private get enabled(): boolean {
@@ -194,6 +250,75 @@ export class MerlinService implements OnModuleInit {
   private numberOf(key: string, fallback: number): number {
     const value = Number(this.config.get<string>(key));
     return Number.isFinite(value) && value > 0 ? value : fallback;
+  }
+
+  private resolveUserId(user: any): Types.ObjectId | undefined {
+    const raw = user?.sub ?? user?.userId ?? user?._id ?? user?.id;
+    return raw && Types.ObjectId.isValid(String(raw))
+      ? new Types.ObjectId(String(raw))
+      : undefined;
+  }
+
+  private async resolveConversation(
+    conversationId: string | undefined,
+    userId: Types.ObjectId | undefined,
+    visitorId: string | undefined,
+    restaurantId: Types.ObjectId | undefined,
+  ): Promise<MerlinConversationDocument> {
+    if (conversationId && Types.ObjectId.isValid(conversationId)) {
+      const existing = await this.conversationModel.findById(conversationId);
+      if (existing && this.canContinue(existing, userId, visitorId)) {
+        return existing;
+      }
+    }
+
+    if (visitorId) {
+      const owned = await this.conversationModel
+        .findOne({ visitorId, userId: null })
+        .sort({ updatedAt: -1 });
+      if (owned) return owned;
+    }
+
+    if (userId) {
+      const owned = await this.conversationModel
+        .findOne({ userId })
+        .sort({ updatedAt: -1 });
+      if (owned) return owned;
+    }
+
+    return this.createConversation(conversationId, userId, visitorId, restaurantId);
+  }
+
+  private canContinue(
+    conversation: MerlinConversationDocument,
+    userId: Types.ObjectId | undefined,
+    visitorId: string | undefined,
+  ): boolean {
+    if (conversation.userId) {
+      return !!userId && conversation.userId.toString() === userId.toString();
+    }
+    return !!visitorId && conversation.visitorId === visitorId;
+  }
+
+  private async createConversation(
+    forcedId: string | undefined,
+    userId: Types.ObjectId | undefined,
+    visitorId: string | undefined,
+    restaurantId: Types.ObjectId | undefined,
+  ): Promise<MerlinConversationDocument> {
+    return this.conversationModel.create({
+      ...(forcedId && Types.ObjectId.isValid(forcedId)
+        ? { _id: new Types.ObjectId(forcedId) }
+        : {}),
+      userId,
+      role: userId ? 'authenticated' : 'visitor',
+      visitorId,
+      visitorDate: visitorId
+        ? (this.visitorDateOf(visitorId) ?? this.today())
+        : undefined,
+      restaurantId,
+      messages: [],
+    });
   }
 
   private describeUpstreamError(status: number, detail: string): string {
@@ -396,37 +521,24 @@ export class MerlinService implements OnModuleInit {
       throw new Error("Merlin n'est pas encore configuré (clé d'API manquante).");
     }
 
-    const role = user?.role || 'visitor';
-    const userId = user?.sub ? new Types.ObjectId(user.sub) : undefined;
+    const userId = this.resolveUserId(user);
+    const visitorId = userId ? undefined : dto.visitorId || undefined;
     const restaurantId = user?.restaurantId
       ? new Types.ObjectId(user.restaurantId)
       : undefined;
 
-    let conversation: MerlinConversationDocument;
-    if (dto.conversationId && Types.ObjectId.isValid(dto.conversationId)) {
-      conversation = await this.conversationModel.findById(dto.conversationId);
-      if (!conversation) {
-        conversation = await this.conversationModel.create({
-          _id: new Types.ObjectId(dto.conversationId),
-          userId,
-          role,
-          restaurantId,
-          messages: [],
-        });
-      }
-    } else {
-      conversation = await this.conversationModel.create({
-        userId,
-        role,
-        restaurantId,
-        messages: [],
-      });
-    }
+    const conversation = await this.resolveConversation(
+      dto.conversationId,
+      userId,
+      visitorId,
+      restaurantId,
+    );
 
     conversation.messages.push({
       role: 'user',
       content: dto.message,
       createdAt: new Date(),
+      visitorId,
     });
 
     const businessContext = await this.contextBuilder.build(user);
@@ -448,9 +560,10 @@ export class MerlinService implements OnModuleInit {
     }
 
     const systemMessage = { role: 'system', content: systemContent };
+    const contextMessages = this.numberOf('MERLIN_CONTEXT_MESSAGES', 10);
 
     const recentMessages: { role: string; content: string }[] = conversation.messages
-      .slice(-10)
+      .slice(-contextMessages)
       .map((m) => ({
         role: m.role === 'assistant' ? 'assistant' : 'user',
         content: m.content,
@@ -480,16 +593,28 @@ export class MerlinService implements OnModuleInit {
           role: 'assistant',
           content: answer.trim() || 'Je ne parviens pas à répondre pour le moment.',
           createdAt: new Date(),
+          visitorId: conversation.visitorId,
         });
-        if (conversation.messages.length > 50) {
-          conversation.messages = conversation.messages.slice(-50);
-        }
-        await conversation.save();
+        await this.persist(conversation);
         controller.close();
       },
     });
 
     return { stream, conversationId: conversation._id.toString() };
+  }
+
+  private async persist(conversation: MerlinConversationDocument): Promise<void> {
+    const maxHistory = this.numberOf('MERLIN_MAX_HISTORY', 50);
+    if (conversation.messages.length > maxHistory) {
+      conversation.messages = conversation.messages.slice(-maxHistory);
+    }
+    try {
+      await conversation.save();
+    } catch (error) {
+      this.logger.error(
+        `Enregistrement de la conversation impossible : ${(error as Error).message}`,
+      );
+    }
   }
 
   async getConversation(
@@ -505,7 +630,11 @@ export class MerlinService implements OnModuleInit {
     if (!conversation) {
       return { messages: [], total: 0 };
     }
-    if (conversation.userId && user?.sub && conversation.userId.toString() !== user.sub) {
+    const requester = this.resolveUserId(user);
+    if (
+      conversation.userId &&
+      (!requester || conversation.userId.toString() !== requester.toString())
+    ) {
       return { messages: [], total: 0 };
     }
     const all = conversation.messages || [];
@@ -522,9 +651,10 @@ export class MerlinService implements OnModuleInit {
     skip = 0,
     limit = 20,
   ): Promise<{ id: string; messages: { role: string; content: string; createdAt: Date }[]; total: number } | null> {
-    if (!user?.sub) return null;
+    const requester = this.resolveUserId(user);
+    if (!requester) return null;
     const conversation = await this.conversationModel
-      .findOne({ userId: new Types.ObjectId(user.sub) })
+      .findOne({ userId: requester })
       .sort({ updatedAt: -1 })
       .lean();
     if (!conversation) return null;
@@ -534,6 +664,33 @@ export class MerlinService implements OnModuleInit {
     return {
       id: conversation._id.toString(),
       messages: all.slice(start, end),
+      total: all.length,
+    };
+  }
+
+  async getVisitorConversation(
+    visitorId: string,
+    skip = 0,
+    limit = 20,
+  ) {
+    if (!visitorId?.trim()) return EMPTY_PAGE;
+
+    const conversation = await this.conversationModel
+      .findOne({
+        visitorId: visitorId.trim(),
+        userId: null,
+        visitorDate: this.visitorDateOf(visitorId) ?? this.today(),
+      })
+      .sort({ updatedAt: -1 })
+      .lean();
+    if (!conversation) return EMPTY_PAGE;
+
+    const all = (conversation as any).messages || [];
+    const end = all.length - skip;
+    const start = Math.max(0, end - limit);
+    return {
+      id: (conversation as any)._id.toString(),
+      messages: all.slice(start, Math.max(0, end)),
       total: all.length,
     };
   }
