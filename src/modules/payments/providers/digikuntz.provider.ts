@@ -37,6 +37,47 @@ export class DigikuntzProvider {
     }
   }
 
+  async initiateDirectCharge(input: {
+    estimation: number;
+    userPhone: string;
+    userEmail?: string;
+    userCountry?: string;
+    senderName: string;
+    paymentMethodCode?: 'MTN' | 'ORANGEMONEY';
+    callbackUrl?: string;
+    raisonForTransfer?: string;
+  }) {
+    const res = await this.fetchWithTimeout(`${this.baseUrl}/dev/direct-charge`, {
+      method: 'POST',
+      headers: this.headers,
+      body: JSON.stringify({
+        estimation: input.estimation,
+        userPhone: input.userPhone,
+        userEmail: input.userEmail ?? '',
+        userCountry: input.userCountry || 'Cameroon',
+        senderName: input.senderName,
+        paymentMethodCode: input.paymentMethodCode || 'MTN',
+        callbackUrl: input.callbackUrl ?? '',
+        raisonForTransfer: input.raisonForTransfer ?? 'Payment',
+      }),
+    });
+
+    if (!res.ok) {
+      throw this.buildProviderError(res, await res.text(), 'DigiKuntz direct charge');
+    }
+
+    const data = await this.readJsonResponse(res, 'DigiKuntz direct charge');
+    return {
+      providerRef: data.id,
+      transactionRef: data.data?.transactionRef,
+      amount: data.data?.estimation,
+      paymentWithTaxes: data.data?.paymentWithTaxes,
+      invoiceTaxes: data.data?.invoiceTaxes,
+      status: data.status,
+      raw: data,
+    };
+  }
+
   async initiatePayment(orderNumber: string, amount: number, userPhone?: string, userEmail?: string) {
     const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
     const callbackUrl = frontendUrl ? `${frontendUrl}/orders` : '';
