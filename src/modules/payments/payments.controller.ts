@@ -86,6 +86,21 @@ export class PaymentsController {
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT)
+  @Post('initiate-direct/:orderId')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({
+    summary: 'Initier un paiement mobile money direct (sans lien de redirection)',
+    description:
+      'Envoie une demande de paiement directement au numéro de téléphone de l’utilisateur. Le client confirme sur son téléphone ; le statut est mis à jour via webhook et polling.',
+  })
+  @ApiParam({ name: 'orderId', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiOkResponse({ description: 'Paiement direct initié', type: PaymentInitiateResponseDto })
+  initiateDirect(@Param('orderId') orderId: string, @Req() req: any) {
+    return this.service.initiateDirectPayment(orderId, req.user);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT)
   @Post('sync/:orderRef')
   @ApiBearerAuth('bearer')
   @ApiOperation({ summary: 'Synchroniser manuellement le statut DigiKuntz d’une commande' })

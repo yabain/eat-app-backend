@@ -528,6 +528,136 @@ export class PaymentsService implements OnModuleInit {
     }
   }
 
+  private detectMobileMoneyOperator(phone?: string): 'MTN' | 'ORANGEMONEY' {
+    const digits = String(phone || '').replace(/\D/g, '');
+    const local = digits.startsWith('237') ? digits.slice(3) : digits;
+    const prefix3 = local.slice(0, 3);
+    const prefix2 = local.slice(0, 2);
+    // Orange Cameroun : 655-659 et 690-699 ; MTN : 650-654, 67x, 680-689
+    if (['655', '656', '657', '658', '659'].includes(prefix3) || prefix2 === '69') {
+      return 'ORANGEMONEY';
+    }
+    return 'MTN';
+  }
+
+  async initiateDirectPayment(orderId: string, actor: any) {
+    const order = await this.orderModel.findById(orderId);
+    if (!order) throw new NotFoundException('Order not found');
+    this.assertOrderAccess(order, actor);
+    if (order.paymentStatus === PaymentStatus.PAID) throw new BadRequestException('Order already paid');
+    if (!this.isOrderFromCurrentCameroonDay(order)) {
+      throw new BadRequestException('Le paiement est autorisé uniquement pour les commandes du jour.');
+    }
+
+    const existingPayment = await this.paymentModel
+      .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
+      .sort({ createdAt: -1 });
+    if (existingPayment) {
+      const reused = await this.reuseProcessingPayment(existingPayment, order);
+      if (reused) return reused;
+    }
+
+    const user = await this.userModel.findById(order.userId);
+    const phone = String(user?.phone || '').trim();
+    if (!phone) {
+      throw new BadRequestException('Numéro de téléphone requis pour le paiement mobile money.');
+    }
+
+    const paymentAmount = this.orderPaymentAmount(order);
+    if (paymentAmount <= 0) throw new BadRequestException('Invalid order payment amount');
+
+    const paymentMethodCode = this.detectMobileMoneyOperator(phone);
+    const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+
+    let payment: PaymentDocument;
+    try {
+      payment = await this.paymentModel.create({
+        orderId: order._id,
+        amount: paymentAmount,
+        provider: 'digikuntz',
+        currency: 'XAF',
+        status: PaymentStatus.PROCESSING,
+        paymentMethod: 'direct_charge',
+        initiatedAt: new Date(),
+      });
+    } catch (error: any) {
+      if (error?.code !== 11000) throw error;
+      const concurrentPayment = await this.paymentModel
+        .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
+        .sort({ createdAt: -1 });
+      if (!concurrentPayment) throw new ConflictException('Une initiation de paiement est déjà en cours');
+      const reused = await this.reuseProcessingPayment(concurrentPayment, order, true);
+      if (reused) return reused;
+      throw new ConflictException('Une initiation de paiement est déjà en cours');
+    }
+
+    try {
+      const response = await this.provider.initiateDirectCharge({
+        estimation: paymentAmount,
+        userPhone: phone,
+        userEmail: user?.email,
+        userCountry: 'Cameroon',
+        senderName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || order.orderNumber,
+        paymentMethodCode,
+        callbackUrl: frontendUrl ? `${frontendUrl}/orders` : undefined,
+        raisonForTransfer: `Commande ${order.orderNumber}`,
+      });
+
+      payment.providerRef = response.providerRef;
+      payment.transactionRef = response.transactionRef;
+      payment.paymentWithTaxes = response.paymentWithTaxes;
+      payment.invoiceTaxes = response.invoiceTaxes;
+      await payment.save();
+
+      order.paymentStatus = PaymentStatus.PROCESSING;
+      await order.save();
+
+      this.auditLogs.record({
+        actorId: actor.sub,
+        actorEmail: actor.email,
+        actorRole: actor.role,
+        action: 'payment.initiate_direct',
+        resourceType: 'payment',
+        resourceId: String(payment._id),
+        metadata: {
+          amount: paymentAmount,
+          orderId: String(order._id),
+          orderNumber: order.orderNumber,
+          operator: paymentMethodCode,
+          provider: 'digikuntz',
+        },
+        method: 'POST',
+        path: `/payments/initiate-direct/${orderId}`,
+        statusCode: 200,
+      });
+
+      return { payment, directCharge: true, operator: paymentMethodCode, phone };
+    } catch (error: any) {
+      if (error instanceof ServiceUnavailableException) {
+        await this.paymentModel.deleteOne({
+          _id: payment._id,
+          status: PaymentStatus.PROCESSING,
+          providerRef: { $exists: false },
+        });
+        throw error;
+      }
+      await this.paymentModel.updateOne(
+        { _id: payment._id, status: PaymentStatus.PROCESSING },
+        {
+          $set: {
+            status: PaymentStatus.FAILED,
+            completedAt: new Date(),
+            callbackPayload: {
+              reason: 'direct_charge_initiation_failed',
+              error: error?.message || String(error),
+            },
+          },
+        },
+      );
+      throw error;
+    }
+  }
+
   private async reuseProcessingPayment(
     initialPayment: PaymentDocument,
     order: OrderDocument,
@@ -577,10 +707,11 @@ export class PaymentsService implements OnModuleInit {
     }
 
     const checkout = this.buildCheckoutFromPayment(payment, remote);
-    if (!checkout.paymentLink) {
+    const isDirectCharge = (payment as any).paymentMethod === 'direct_charge';
+    if (!checkout.paymentLink && !isDirectCharge) {
       throw new ConflictException('Le lien de paiement est en cours de génération. Réessayez dans quelques secondes.');
     }
-    return { payment, checkout };
+    return isDirectCharge ? { payment, checkout, directCharge: true } : { payment, checkout };
   }
 
   private async waitForPaymentInitialization(paymentId: any): Promise<PaymentDocument> {

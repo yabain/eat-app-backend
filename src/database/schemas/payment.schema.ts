@@ -13,6 +13,7 @@ export class Payment {
   @Prop() providerRef?: string;
   @Prop() transactionRef?: string;
   @Prop() paymentLink?: string;
+  @Prop() paymentMethod?: string;
   @Prop() paymentWithTaxes?: number;
   @Prop() invoiceTaxes?: number;
   @Prop({ type: Object }) callbackPayload?: Record<string, any>;
