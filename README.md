@@ -19,6 +19,31 @@ npm run start:dev
 - email: `admin@example.com`
 - password: `Admin@12345`
 
+## Paiement mobile money (DigiKuntz)
+
+### Variables d'environnement
+- `DIGIKUNTZ_BASE_URL`, `DIGIKUNTZ_USER_ID`, `DIGIKUNTZ_API_KEY`, `DIGIKUNTZ_WEBHOOK_SECRET` : identifiants fournisseur (secrets, jamais exposés au client).
+- `DIGIKUNTZ_REQUEST_TIMEOUT_MS` : délai maximal d'un appel DigiKuntz (défaut `12000`). Au-delà, l'issue est considérée comme inconnue.
+- `MOBILE_MONEY_USSD_ORANGE` : code USSD de confirmation Orange affiché au client (défaut `#150*50#`). Variable vide : aucun code affiché.
+- `MOBILE_MONEY_USSD_MTN` : code USSD de confirmation MTN affiché au client (défaut `*126#`). Variable vide : aucun code affiché.
+- Les valeurs contenant `#` doivent être entre guillemets dans `.env`.
+
+### Endpoints
+- `POST /api/payments/initiate-direct/:orderId` : **client propriétaire uniquement**. Envoie une demande de confirmation sur le téléphone du client (Orange ou MTN, numéro lu côté serveur). Réponse `201` : `outcome` = `prompt_sent` (demande envoyée) ou `refused` (DigiKuntz refuse le direct : ouvrir `paymentLink`, lien hébergé https). Codes d'erreur : `PAYMENT_PHONE_MISSING`, `PAYMENT_PHONE_INVALID`, `PAYMENT_OPERATOR_UNSUPPORTED`, `PAYMENT_METHOD_UNAVAILABLE`, `PAYMENT_AMOUNT_OUT_OF_RANGE`, `PAYMENT_LIMIT_EXCEEDED`, `PAYMENT_REJECTED`, `PAYMENT_DIRECT_DISABLED`, `PAYMENT_IN_PROGRESS`, `PAYMENT_OUTCOME_UNKNOWN`, `INSUFFICIENT_STOCK`.
+- `POST /api/payments/initiate/:orderId` : paiement hébergé (page sécurisée), disponible pour le staff et pour les clients (voie de secours).
+  - `409 PAYMENT_OUTCOME_UNKNOWN` : DigiKuntz n'a pas répondu de façon certaine, la demande a peut-être été reçue. **Ne pas relancer** : le paiement reste en attente de vérification (la commande n'est ni relancée ni expirée automatiquement).
+  - `409 PAYMENT_IN_PROGRESS` : un paiement direct est déjà en cours sur la commande. Confirmer la demande sur le téléphone avant de relancer.
+- `GET /api/payments/:orderId/status` : vue client du dernier paiement (`id`, `status`, `amount`, `outcome`, `operator`, `paymentLink` si valide, dates). Aucune donnée fournisseur (`callbackPayload`, `providerRef`, `transactionRef`) n'est renvoyée.
+- `POST /api/payments/:id/resolve` : **administrateur**. Force l'issue d'un paiement ambigu (`outcome` = `paid` ou `failed`) via le même chemin atomique que le webhook, avec journal d'audit. Refuse une transition déjà appliquée.
+
+### Règles de sécurité des paiements
+- Une demande directe `prompt_sent` encore `processing` n'est jamais expirée automatiquement : la synchronisation DigiKuntz la résout en `payin_success`, `payin_error` ou `payin_closed`.
+- Un paiement dont l'issue est inconnue (`unknown`) n'est jamais supprimé, libéré ni relancé automatiquement.
+- Les transitions terminales sont appliquées par claim atomique : un webhook et le cron concurrents ne peuvent ni créditer deux fois ni restituer deux fois le stock.
+- Si DigiKuntz est indisponible au moment de l'expiration, la commande reste ouverte (fail-closed) au lieu d'être annulée à tort.
+- Un succès reçu après expiration re-réserve le stock ; s'il est insuffisant, la commande est marquée `paid_without_stock` (remboursement manuel, aucun crédit restaurant).
+- Une commande `payment_failed` peut être repayée en direct uniquement si le stock est encore disponible : le stock est réservé à nouveau dans la même transaction que la reprise de la commande (`409 INSUFFICIENT_STOCK` sinon).
+
 ## Notes
 - Payments are wired through a DigiKuntz adapter with a mock initiation response.
 - Webhook endpoint: `POST /api/payments/webhook/digikuntz`
