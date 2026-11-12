@@ -160,7 +160,7 @@ export class PaymentsController {
 
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
+  @Roles(UserRole.ADMIN)
   @Post(':id/resolve')
   @ApiBearerAuth('bearer')
   @ApiOperation({
