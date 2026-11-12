@@ -1232,7 +1232,7 @@ export class PaymentsService implements OnModuleInit {
 
   private getOrderPaymentTimeoutMs(): number {
     const minutes = Number(process.env.ORDER_PAYMENT_TIMEOUT_MINUTES || process.env.PAYMENT_TIMEOUT_MINUTES);
-    const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 10;
+    const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 30;
     return safeMinutes * 60 * 1000;
   }
 
@@ -1324,7 +1324,7 @@ export class PaymentsService implements OnModuleInit {
 
   private getHostedFallbackTimeoutMs(): number {
     const minutes = Number(process.env.PAYMENT_HOSTED_FALLBACK_TIMEOUT_MINUTES);
-    const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 60;
+    const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 30;
     return safeMinutes * 60 * 1000;
   }
 
@@ -1372,7 +1372,7 @@ export class PaymentsService implements OnModuleInit {
     await this.restoreReservedStockIfCurrentCameroonDay(transitioned, 'payment_timeout');
 
     this.logger.log(
-      `Order ${transitioned.orderNumber} expired (PENDING_PAYMENT > ${process.env.ORDER_PAYMENT_TIMEOUT_MINUTES || 10}min)`,
+      `Order ${transitioned.orderNumber} expired (PENDING_PAYMENT > ${Math.round(this.getOrderPaymentTimeoutMs() / 60000)}min)`,
     );
   }
 

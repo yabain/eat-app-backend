@@ -594,6 +594,15 @@ describe('PaymentsService — paiement mobile money direct', () => {
       return (service as any).expireStalePendingOrders();
     }
 
+    it('TTL par défaut : 30 min pour la commande et pour la fenêtre de secours', () => {
+      delete process.env.ORDER_PAYMENT_TIMEOUT_MINUTES;
+      delete process.env.PAYMENT_TIMEOUT_MINUTES;
+      delete process.env.PAYMENT_HOSTED_FALLBACK_TIMEOUT_MINUTES;
+
+      expect((service as any).getOrderPaymentTimeoutMs()).toBe(30 * 60 * 1000);
+      expect((service as any).getHostedFallbackTimeoutMs()).toBe(30 * 60 * 1000);
+    });
+
     it.each(['unknown', 'calling'])('commande dont le dernier Payment est %s : jamais expirée', async (outcome) => {
       orderModel.find.mockResolvedValue([order]);
       setExistingPayment(makeStoredPayment({ directChargeOutcome: outcome, providerRef: undefined }));

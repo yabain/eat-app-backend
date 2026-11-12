@@ -26,7 +26,8 @@ npm run start:dev
 - `DIGIKUNTZ_REQUEST_TIMEOUT_MS` : délai maximal d'un appel DigiKuntz (défaut `12000`). Au-delà, l'issue est considérée comme inconnue.
 - `MOBILE_MONEY_USSD_ORANGE` : code USSD de confirmation Orange affiché au client (défaut `#150*50#`). Variable vide : aucun code affiché.
 - `MOBILE_MONEY_USSD_MTN` : code USSD de confirmation MTN affiché au client (défaut `*126#`). Variable vide : aucun code affiché.
-- `PAYMENT_HOSTED_FALLBACK_TIMEOUT_MINUTES` : durée pendant laquelle une commande dont le direct charge a été refusé avec lien hébergé reste ouverte (défaut `60`). DigiKuntz garde la transaction en `payin_pending` : le stock n'est pas libéré tant que ce lien peut encore être payé.
+- `PAYMENT_HOSTED_FALLBACK_TIMEOUT_MINUTES` : durée pendant laquelle une commande dont le direct charge a été refusé avec lien hébergé reste ouverte (défaut `30`). DigiKuntz garde la transaction en `payin_pending` : le stock n'est pas libéré tant que ce lien peut encore être payé. La fenêtre est mesurée depuis la tentative de paiement, pas depuis la création de la commande.
+- `ORDER_PAYMENT_TIMEOUT_MINUTES` : délai au-delà duquel une commande `PENDING_PAYMENT` sans paiement confirmé est annulée et son stock restitué (défaut `30`).
 - Les valeurs contenant `#` doivent être entre guillemets dans `.env`.
 
 ### Endpoints
