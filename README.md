@@ -26,6 +26,7 @@ npm run start:dev
 - `DIGIKUNTZ_REQUEST_TIMEOUT_MS` : délai maximal d'un appel DigiKuntz (défaut `12000`). Au-delà, l'issue est considérée comme inconnue.
 - `MOBILE_MONEY_USSD_ORANGE` : code USSD de confirmation Orange affiché au client (défaut `#150*50#`). Variable vide : aucun code affiché.
 - `MOBILE_MONEY_USSD_MTN` : code USSD de confirmation MTN affiché au client (défaut `*126#`). Variable vide : aucun code affiché.
+- `PAYMENT_HOSTED_FALLBACK_TIMEOUT_MINUTES` : durée pendant laquelle une commande dont le direct charge a été refusé avec lien hébergé reste ouverte (défaut `60`). DigiKuntz garde la transaction en `payin_pending` : le stock n'est pas libéré tant que ce lien peut encore être payé.
 - Les valeurs contenant `#` doivent être entre guillemets dans `.env`.
 
 ### Endpoints
@@ -38,6 +39,7 @@ npm run start:dev
 
 ### Règles de sécurité des paiements
 - Une demande directe `prompt_sent` encore `processing` n'est jamais expirée automatiquement : la synchronisation DigiKuntz la résout en `payin_success`, `payin_error` ou `payin_closed`.
+- Un direct charge refusé avec `paymentLink` reste une transaction ouverte chez DigiKuntz (`payin_pending`) : la commande n'est pas expirée et le stock n'est pas libéré pendant la fenêtre `PAYMENT_HOSTED_FALLBACK_TIMEOUT_MINUTES`.
 - Un paiement dont l'issue est inconnue (`unknown`) n'est jamais supprimé, libéré ni relancé automatiquement.
 - Les transitions terminales sont appliquées par claim atomique : un webhook et le cron concurrents ne peuvent ni créditer deux fois ni restituer deux fois le stock.
 - Si DigiKuntz est indisponible au moment de l'expiration, la commande reste ouverte (fail-closed) au lieu d'être annulée à tort.

@@ -613,6 +613,38 @@ describe('PaymentsService — paiement mobile money direct', () => {
 
       expect(orderModel.findOneAndUpdate).toHaveBeenCalledTimes(1);
     });
+
+    it('direct charge refusé + lien hébergé encore actif (payin_pending) : commande conservée', async () => {
+      orderModel.find.mockResolvedValue([order]);
+      setExistingPayment(makeStoredPayment({
+        directChargeOutcome: 'refused',
+        providerRef: 'PROV-1',
+        paymentLink: VALID_LINK,
+        createdAt: new Date(Date.now() - 15 * 60 * 1000),
+      }));
+      provider.getTransactionStatus.mockResolvedValue({ id: 'PROV-1', status: 'payin_pending', data: {} });
+
+      await runExpire();
+
+      expect(provider.getTransactionStatus).toHaveBeenCalledWith('PROV-1');
+      expect(orderModel.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('direct charge refusé + lien hébergé au-delà de la fenêtre : expirée normalement', async () => {
+      orderModel.find.mockResolvedValue([order]);
+      orderModel.findOneAndUpdate.mockResolvedValue({ ...order, orderStatus: 'payment_failed' });
+      setExistingPayment(makeStoredPayment({
+        directChargeOutcome: 'refused',
+        providerRef: 'PROV-1',
+        paymentLink: VALID_LINK,
+        createdAt: new Date(Date.now() - 90 * 60 * 1000),
+      }));
+      provider.getTransactionStatus.mockResolvedValue({ id: 'PROV-1', status: 'payin_pending', data: {} });
+
+      await runExpire();
+
+      expect(orderModel.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('flux hébergé POST /payments/initiate (B7)', () => {

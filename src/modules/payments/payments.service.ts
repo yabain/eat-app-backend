@@ -1256,6 +1256,7 @@ export class PaymentsService implements OnModuleInit {
     ).slice(0, safeBatchLimit);
 
     let heldByDirectCharge = 0;
+    let heldByHostedFallback = 0;
     for (const order of staleOrders) {
       try {
         const latestPayment = await this.paymentModel
@@ -1286,6 +1287,14 @@ export class PaymentsService implements OnModuleInit {
             await this.applyPayinStatus(latestPayment, order, remote.status, remote);
             continue;
           }
+
+          // Refus direct suivi d'un lien hébergé : DigiKuntz laisse la
+          // transaction en `payin_pending`, le client peut encore payer.
+          // On ne libère donc pas le stock pendant la fenêtre de secours.
+          if (this.isHostedFallbackStillOpen(latestPayment)) {
+            heldByHostedFallback += 1;
+            continue;
+          }
         }
 
         await this.expireOrderForTimeout(order, latestPayment);
@@ -1296,6 +1305,9 @@ export class PaymentsService implements OnModuleInit {
 
     if (heldByDirectCharge > 0) {
       this.logger.debug(`${heldByDirectCharge} commande(s) conservée(s) : paiement direct en attente ou issue inconnue`);
+    }
+    if (heldByHostedFallback > 0) {
+      this.logger.debug(`${heldByHostedFallback} commande(s) conservée(s) : lien hébergé de secours encore actif`);
     }
   }
 
@@ -1308,6 +1320,31 @@ export class PaymentsService implements OnModuleInit {
       && outcome === 'prompt_sent'
       && payment.status === PaymentStatus.PROCESSING
     );
+  }
+
+  private getHostedFallbackTimeoutMs(): number {
+    const minutes = Number(process.env.PAYMENT_HOSTED_FALLBACK_TIMEOUT_MINUTES);
+    const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 60;
+    return safeMinutes * 60 * 1000;
+  }
+
+  /**
+   * Un direct charge refusé n'est pas une transaction échouée : DigiKuntz laisse
+   * la transaction en `payin_pending` et fournit un lien hébergé que le client
+   * peut encore régler. Tant que le provider confirme `payin_pending`, on garde
+   * la commande (et son stock) ouverte pendant une fenêtre dédiée, plus longue
+   * que le TTL standard. Passé ce délai, l'expiration normale reprend.
+   */
+  private isHostedFallbackStillOpen(payment: any): boolean {
+    if (!payment) return false;
+    if (payment.status !== PaymentStatus.PROCESSING) return false;
+    if (payment.paymentMethod !== PAYMENT_METHOD_DIRECT_CHARGE) return false;
+    if (payment.directChargeOutcome !== 'refused') return false;
+    if (!isAllowedPaymentLink(payment.paymentLink)) return false;
+
+    const createdAt = payment.createdAt ? new Date(payment.createdAt).getTime() : NaN;
+    if (!Number.isFinite(createdAt)) return false;
+    return Date.now() - createdAt < this.getHostedFallbackTimeoutMs();
   }
 
   private async expireOrderForTimeout(order: any, payment: any | null) {
