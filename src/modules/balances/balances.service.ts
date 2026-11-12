@@ -933,6 +933,7 @@ export class BalancesService {
       accountBankCode,
       receiverName: this.userDisplayName(requester),
       narration: `Retrait Eat App ${withdrawalId}`,
+      idempotencyKey: String(withdrawalId),
     });
 
     // 2) Selon la réponse de DigiKuntz, on enregistre la transaction.
@@ -1048,6 +1049,7 @@ export class BalancesService {
     accountBankCode: 'MTN' | 'ORANGEMONEY';
     receiverName: string;
     narration: string;
+    idempotencyKey?: string;
   }): Promise<
     | {
         kind: 'success';
@@ -1066,6 +1068,7 @@ export class BalancesService {
         accountBankCode: input.accountBankCode,
         receiverName: input.receiverName,
         narration: input.narration,
+        idempotencyKey: input.idempotencyKey,
       });
       return {
         kind: 'success',
@@ -1103,6 +1106,7 @@ export class BalancesService {
         || 'MTN',
       receiverName: this.userDisplayName(requester),
       narration: `Retrait Eat App ${withdrawal._id}`,
+      idempotencyKey: String(withdrawal._id),
     });
 
     if (outcome.kind === 'gateway_unavailable') {

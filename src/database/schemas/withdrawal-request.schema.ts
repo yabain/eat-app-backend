@@ -33,6 +33,7 @@ export class WithdrawalRequest {
   @Prop() transactionRef?: string;
   @Prop() providerStatus?: string;
   @Prop({ type: Object }) providerPayload?: Record<string, any>;
+  @Prop() payoutOutcome?: 'success' | 'gateway_unavailable' | 'provider_error' | 'unknown' | 'failed';
   @Prop() note?: string;
   @Prop({ type: Types.ObjectId, ref: 'User' }) processedBy?: Types.ObjectId;
   @Prop() processedAt?: Date;

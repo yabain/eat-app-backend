@@ -1,7 +1,38 @@
-import { Injectable, InternalServerErrorException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { DigikuntzDirectChargeError } from '../errors/direct-charge.errors';
+import type { DirectChargeOperator } from '../utils/mobile-money.util';
+import { normalizeDigikuntzStatus } from '../../../common/utils/digikuntz-status.util';
+
+export interface DirectChargeInput {
+  estimation: number;
+  userPhone: string;
+  userEmail?: string;
+  userCountry?: string;
+  senderName: string;
+  paymentMethodCode: DirectChargeOperator;
+  callbackUrl?: string;
+  raisonForTransfer?: string;
+  idempotencyKey?: string;
+}
+
+/** Résultat strictement interne au service : jamais le corps brut fournisseur. */
+export interface DirectChargeResult {
+  providerRef: string;
+  transactionRef?: string;
+  paymentWithTaxes?: number;
+  invoiceTaxes?: number;
+  paymentMethodCode?: string;
+  refused: boolean;
+  paymentLink?: string;
+  refusalReason?: string;
+}
+
+const PROVIDER_CODE_PATTERN = /^[A-Za-z0-9_]{1,50}$/;
+const REFUSAL_REASON_PATTERN = /^[A-Z_]{1,50}$/;
 
 @Injectable()
 export class DigikuntzProvider {
+  private readonly logger = new Logger(DigikuntzProvider.name);
   private readonly baseUrl = process.env.DIGIKUNTZ_BASE_URL;
   private readonly userId = process.env.DIGIKUNTZ_USER_ID;
   private readonly secretKey = process.env.DIGIKUNTZ_API_KEY;
@@ -15,6 +46,12 @@ export class DigikuntzProvider {
       'x-user-id': this.userId,
       'x-secret-key': this.secretKey,
     };
+  }
+
+  private headersWithIdempotency(idempotencyKey?: string) {
+    const base = this.headers;
+    if (!idempotencyKey) return base;
+    return { ...base, 'Idempotency-Key': idempotencyKey.slice(0, 255) };
   }
 
   /**
@@ -37,53 +74,124 @@ export class DigikuntzProvider {
     }
   }
 
-  async initiateDirectCharge(input: {
-    estimation: number;
-    userPhone: string;
-    userEmail?: string;
-    userCountry?: string;
-    senderName: string;
-    paymentMethodCode?: 'MTN' | 'ORANGEMONEY';
-    callbackUrl?: string;
-    raisonForTransfer?: string;
-  }) {
-    const res = await this.fetchWithTimeout(`${this.baseUrl}/dev/direct-charge`, {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify({
-        estimation: input.estimation,
-        userPhone: input.userPhone,
-        userEmail: input.userEmail ?? '',
-        userCountry: input.userCountry || 'Cameroon',
-        senderName: input.senderName,
-        paymentMethodCode: input.paymentMethodCode || 'MTN',
-        callbackUrl: input.callbackUrl ?? '',
-        raisonForTransfer: input.raisonForTransfer ?? 'Payment',
-      }),
+  /**
+   * Demande de paiement mobile money direct. Ne lève que `DigikuntzDirectChargeError` :
+   * - `rejected` : DigiKuntz a refusé la demande, rien n'est débité ;
+   * - `unknown` : issue inconnue (timeout, 5xx, réseau, réponse illisible) : ne jamais supprimer le paiement.
+   * Le corps brut n'est jamais renvoyé ni inclus dans un message.
+   */
+  async initiateDirectCharge(input: DirectChargeInput): Promise<DirectChargeResult> {
+    const { status, ok, json } = await this.postDirectCharge({
+      estimation: input.estimation,
+      currency: 'XAF',
+      userPhone: input.userPhone,
+      userEmail: input.userEmail ?? '',
+      userCountry: input.userCountry || 'Cameroon',
+      senderName: input.senderName,
+      paymentMethodCode: input.paymentMethodCode,
+      callbackUrl: input.callbackUrl ?? '',
+      raisonForTransfer: input.raisonForTransfer ?? 'Payment',
+      idempotencyKey: input.idempotencyKey,
     });
 
-    if (!res.ok) {
-      throw this.buildProviderError(res, await res.text(), 'DigiKuntz direct charge');
+    if (!ok) throw this.classifyDirectChargeFailure(status, json);
+    return this.parseDirectChargeSuccess(json);
+  }
+
+  private async postDirectCharge(
+    body: Record<string, unknown>,
+    options?: { idempotencyKey?: string },
+  ): Promise<{ status: number; ok: boolean; json: any }> {
+    // Aucune requête n'est partie si la configuration est absente : c'est un rejet certain, pas une issue inconnue.
+    if (!this.baseUrl) {
+      this.logger.error('DIGIKUNTZ_BASE_URL is not configured — direct charge not sent');
+      throw new DigikuntzDirectChargeError('rejected');
     }
 
-    const data = await this.readJsonResponse(res, 'DigiKuntz direct charge');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/dev/direct-charge`, {
+        method: 'POST',
+        headers: this.headersWithIdempotency(options?.idempotencyKey),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      return { status: res.status, ok: res.ok, json: this.parseJsonSafely(text) };
+    } catch {
+      // Réseau, DNS, abort (timeout) pendant l'envoi ou la lecture : la demande peut avoir été reçue.
+      throw new DigikuntzDirectChargeError('unknown');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private parseJsonSafely(text: string): any {
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+
+  private classifyDirectChargeFailure(status: number, body: any): DigikuntzDirectChargeError {
+    const rawCode = body?.errors?.[0]?.code;
+    const providerCode = typeof rawCode === 'string' && PROVIDER_CODE_PATTERN.test(rawCode) ? rawCode : undefined;
+    this.logger.warn(`DigiKuntz direct charge HTTP ${status}${providerCode ? ` (${providerCode})` : ''}`);
+
+    if (status === 503 && providerCode === 'DIRECT_CHARGE_DISABLED') {
+      return new DigikuntzDirectChargeError('rejected', providerCode, status);
+    }
+    // 409 = clé d'idempotence déjà en cours / conflit fournisseur : l'issue est
+    // ambiguë. Ne jamais le classer comme un rejet certain, sinon le service
+    // créerait un nouveau paiement alors que la demande précédente peut aboutir.
+    if (status === 409) {
+      return new DigikuntzDirectChargeError('unknown', providerCode, status);
+    }
+    const isClientError = status >= 400 && status < 500 && status !== 408 && status !== 429;
+    if (isClientError) return new DigikuntzDirectChargeError('rejected', providerCode, status);
+    return new DigikuntzDirectChargeError('unknown', providerCode, status);
+  }
+
+  private parseDirectChargeSuccess(json: any): DirectChargeResult {
+    if (!json || typeof json !== 'object' || !json.id) {
+      this.logger.warn('DigiKuntz direct charge returned an unreadable 2xx response');
+      throw new DigikuntzDirectChargeError('unknown');
+    }
+
+    const data = json.data && typeof json.data === 'object' ? json.data : {};
+    // Code de refus contrôlé (ex. DIRECT_CHARGE_REFUSED) : tout texte libre fournisseur est écarté.
+    const rawReason = data.fallback?.reason;
+    const refusalReason = typeof rawReason === 'string' && REFUSAL_REASON_PATTERN.test(rawReason) ? rawReason : undefined;
+    const refused = data.chargeStatus === 'failed' || refusalReason === 'DIRECT_CHARGE_REFUSED';
+    const paymentLink = data.paymentLink ?? data.redirect_url;
+
     return {
-      providerRef: data.id,
-      transactionRef: data.data?.transactionRef,
-      amount: data.data?.estimation,
-      paymentWithTaxes: data.data?.paymentWithTaxes,
-      invoiceTaxes: data.data?.invoiceTaxes,
-      status: data.status,
-      raw: data,
+      providerRef: String(json.id),
+      transactionRef: data.transactionRef,
+      paymentWithTaxes: data.paymentWithTaxes,
+      invoiceTaxes: data.invoiceTaxes,
+      paymentMethodCode: typeof data.paymentMethodCode === 'string' ? data.paymentMethodCode : undefined,
+      refused,
+      paymentLink: typeof paymentLink === 'string' ? paymentLink : undefined,
+      refusalReason,
     };
   }
 
-  async initiatePayment(orderNumber: string, amount: number, userPhone?: string, userEmail?: string) {
+  async initiatePayment(
+    orderNumber: string,
+    amount: number,
+    userPhone?: string,
+    userEmail?: string,
+    options?: { idempotencyKey?: string },
+  ) {
     const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
     const callbackUrl = frontendUrl ? `${frontendUrl}/orders` : '';
     const res = await this.fetchWithTimeout(`${this.baseUrl}/dev/transaction`, {
       method: 'POST',
-      headers: this.headers,
+      headers: this.headersWithIdempotency(options?.idempotencyKey),
       body: JSON.stringify({
         estimation: amount,
         raisonForTransfer: `Commande ${orderNumber}`,
@@ -96,7 +204,7 @@ export class DigikuntzProvider {
     });
 
     if (!res.ok) {
-      throw this.buildProviderError(res, await res.text(), 'DigiKuntz payment');
+      throw this.buildHostedPaymentError(res);
     }
 
     const data = await this.readJsonResponse(res, 'DigiKuntz payment');
@@ -125,22 +233,75 @@ export class DigikuntzProvider {
     return this.fetchTransaction(`/dev/transaction-by-ref?transactionRef=${encodeURIComponent(transactionRef)}`);
   }
 
+  /**
+   * Lecture d'une transaction avec timeout (`requestTimeoutMs`). Cron/webhook : tout échec → `null`.
+   */
   private async fetchTransaction(path: string): Promise<{ id: string; status: string; data: any } | null> {
     try {
-      const res = await fetch(`${this.baseUrl}${path}`, {
+      return await this.fetchTransactionOrThrow(path);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Variante stricte pour le chemin de requête client (réutilisation d'un paiement direct) :
+   * tout échec (timeout, réseau, réponse non OK, corps invalide) lève `unknown`, jamais `null`.
+   * Un statut inconnu ne doit JAMAIS conduire à une nouvelle demande de paiement.
+   */
+  async getTransactionStatusOrThrow(transactionId: string): Promise<{ id: string; status: string; data: any }> {
+    try {
+      return await this.fetchTransactionOrThrow(
+        `/dev/transaction?transactionId=${encodeURIComponent(transactionId)}`,
+      );
+    } catch (error) {
+      if (error instanceof DigikuntzDirectChargeError) throw error;
+      throw new DigikuntzDirectChargeError('unknown');
+    }
+  }
+
+  private async fetchTransactionOrThrow(path: string): Promise<{ id: string; status: string; data: any }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, {
         method: 'GET',
         headers: this.headers,
+        signal: controller.signal,
       });
-      if (!res.ok) return null;
+      if (!res.ok) throw new DigikuntzDirectChargeError('unknown', undefined, res.status);
       // DigiKuntz peut renvoyer une chaîne brute (« Unauthorized », « no
       // transaction found »…) en cas de mismatch credentials/scopes. On ne
       // valide la réponse qu'à condition qu'elle ait la forme `{id, status}`.
       const body: any = await res.json().catch(() => null);
-      if (!body || typeof body !== 'object' || !body.status) return null;
-      return body;
-    } catch {
-      return null;
+      if (!body || typeof body !== 'object' || !body.status) {
+        throw new DigikuntzDirectChargeError('unknown', undefined, res.status);
+      }
+      // Les listes / historique renvoient `transaction_payin_*` alors que les GET
+      // unitaires renvoient `payin_*` : on normalise systématiquement.
+      return { ...body, status: normalizeDigikuntzStatus(body.status)! };
+    } catch (error) {
+      if (error instanceof DigikuntzDirectChargeError) throw error;
+      throw new DigikuntzDirectChargeError('unknown');
+    } finally {
+      clearTimeout(timer);
     }
+  }
+
+  /**
+   * Erreur du flux hébergé : aucun corps fournisseur dans le message (jamais exposé au client).
+   * Les 5xx / 408 / 429 restent une indisponibilité, comme avant.
+   */
+  private buildHostedPaymentError(res: Response) {
+    const isUnavailable = res.status >= 500 || res.status === 408 || res.status === 429;
+    if (isUnavailable) {
+      return new ServiceUnavailableException(
+        'Service de paiement temporairement indisponible. Réessayez dans quelques minutes.',
+      );
+    }
+    this.logger.warn(`DigiKuntz hosted payment HTTP ${res.status}`);
+    return new InternalServerErrorException('Le paiement n’a pas pu être initié. Réessayez ou contactez le support.');
   }
 
   async initiatePayout(input: {
@@ -150,10 +311,11 @@ export class DigikuntzProvider {
     receiverName: string;
     narration: string;
     callbackUrl?: string;
+    idempotencyKey?: string;
   }) {
     const res = await this.fetchWithTimeout(`${this.baseUrl}/dev/payout`, {
       method: 'POST',
-      headers: this.headers,
+      headers: this.headersWithIdempotency(input.idempotencyKey),
       body: JSON.stringify({
         amount: input.amount,
         accountBankCode: input.accountBankCode,

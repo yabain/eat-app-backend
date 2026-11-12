@@ -1,7 +1,7 @@
 export type CameroonMobileMoneyOperator = 'MTN' | 'ORANGEMONEY';
 
-const MTN_PHONE_PATTERN = /^(?:67\d{7}|65[0-4]\d{6}|68[0-3]\d{6})$/;
-const ORANGE_PHONE_PATTERN = /^(?:69\d{7}|65[5-9]\d{6}|68[5-9]\d{6})$/;
+const MTN_PHONE_PATTERN = /^(?:67\d{7}|65[0-4]\d{6}|68[0-5]\d{6})$/;
+const ORANGE_PHONE_PATTERN = /^(?:69\d{7}|65[5-9]\d{6}|68[6-9]\d{6})$/;
 
 export function normalizeCameroonPhone(phone: string): string {
   const digits = String(phone || '').replace(/\D/g, '');

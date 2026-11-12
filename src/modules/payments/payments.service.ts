@@ -1,15 +1,21 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { isValidObjectId, Model, Types } from 'mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { ClientSession, Connection, isValidObjectId, Model, Types } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { timingSafeEqual } from 'crypto';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
-import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
+import { Payment, PaymentDocument, PAYMENT_METHOD_DIRECT_CHARGE } from '../../database/schemas/payment.schema';
 import { Balance, BalanceDocument, BalanceAccountType } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
 import { WithdrawalRequest, WithdrawalRequestDocument } from '../../database/schemas/withdrawal-request.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
-import { DigikuntzProvider } from './providers/digikuntz.provider';
+import { DigikuntzProvider, DirectChargeResult } from './providers/digikuntz.provider';
+import { DigikuntzDirectChargeError, directChargeCodeForProviderError, directChargeException } from './errors/direct-charge.errors';
+import { DirectChargeInitiateResponseDto } from './dto/payment-response.dto';
+import { DirectChargeOperator, detectMobileMoneyOperator, normalizeCmPhoneForDirectCharge } from './utils/mobile-money.util';
+import { isAllowedPaymentLink } from './utils/payment-link.util';
+import { getConfirmationUssd } from './config/mobile-money-ussd';
+import { ClientPaymentView, toClientPaymentView } from './utils/client-payment-view.util';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CronLeaseService } from '../../common/cron-lease/cron-lease.service';
 import { User, UserDocument } from '../../database/schemas/user.schema';
@@ -21,6 +27,10 @@ import { MenuInventoryService } from '../menu/menu-inventory.service';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
 import { buildContainsRegex } from '../../common/utils/search.util';
 import { buildTimeSeriesStats } from '../../common/stats/time-series-stats';
+import { normalizeDigikuntzStatus } from '../../common/utils/digikuntz-status.util';
+
+/** Fenêtre pendant laquelle un appel direct `calling` est considéré comme encore en cours. */
+const DIRECT_CHARGE_IN_PROGRESS_MS = 60 * 1000;
 
 @Injectable()
 export class PaymentsService implements OnModuleInit {
@@ -40,6 +50,7 @@ export class PaymentsService implements OnModuleInit {
     private notifications: NotificationsService,
     private readonly cronLease: CronLeaseService,
     private auditLogs: AuditLogsService,
+    @InjectConnection() private readonly connection: Connection,
   ) {}
 
   async onModuleInit() {
@@ -464,6 +475,7 @@ export class PaymentsService implements OnModuleInit {
         paymentAmount,
         user?.phone,
         user?.email,
+        { idempotencyKey: `payin-${payment._id}` },
       );
 
       payment.providerRef = response.providerRef;
@@ -496,18 +508,12 @@ export class PaymentsService implements OnModuleInit {
 
       return { payment, checkout: response };
     } catch (error: any) {
-      // Gateway DigiKuntz indisponible → on supprime le Payment temporaire
-      // pour ne laisser AUCUNE trace en base (rien à réessayer, rien à
-      // historiser) et on remonte une erreur 503 explicite au client.
+      // Gateway DigiKuntz indisponible : issue inconnue (la demande a peut-être été reçue).
+      // Le Payment n'est JAMAIS supprimé ; il est marqué unknown et le client doit vérifier avant toute relance.
       if (error instanceof ServiceUnavailableException) {
-        await this.paymentModel.deleteOne({
-          _id: payment._id,
-          status: PaymentStatus.PROCESSING,
-          providerRef: { $exists: false },
-        });
-        throw new ServiceUnavailableException(
-          'Le service de paiement est temporairement indisponible. Réessayez dans quelques minutes.',
-        );
+        await this.markPaymentOutcomeUnknown(payment, 'hosted_provider_outcome_unknown');
+        this.logger.warn(`Hosted payment outcome unknown for payment ${payment._id} (order ${order._id})`);
+        throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
       }
       // Autres erreurs (validation provider, 4xx…) : on garde le Payment
       // en FAILED pour audit.
@@ -528,56 +534,259 @@ export class PaymentsService implements OnModuleInit {
     }
   }
 
-  private detectMobileMoneyOperator(phone?: string): 'MTN' | 'ORANGEMONEY' {
-    const digits = String(phone || '').replace(/\D/g, '');
-    const local = digits.startsWith('237') ? digits.slice(3) : digits;
-    const prefix3 = local.slice(0, 3);
-    const prefix2 = local.slice(0, 2);
-    // Orange Cameroun : 655-659 et 690-699 ; MTN : 650-654, 67x, 680-689
-    if (['655', '656', '657', '658', '659'].includes(prefix3) || prefix2 === '69') {
-      return 'ORANGEMONEY';
-    }
-    return 'MTN';
+  /** Réservé au client propriétaire de la commande (le staff garde le paiement hébergé). */
+  private assertDirectChargeOwner(order: OrderDocument | any, actor: any) {
+    if (actor?.role === UserRole.CLIENT && this.refId(order.userId) === String(actor.sub)) return;
+    throw new ForbiddenException('Seul le client propriétaire de la commande peut lancer ce paiement.');
   }
 
-  async initiateDirectPayment(orderId: string, actor: any) {
+  /** Téléphone lu côté serveur uniquement. Toute validation échoue AVANT la création du Payment. */
+  private resolveDirectChargePhone(user: any): { phone: string; operator: DirectChargeOperator } {
+    const raw = String(user?.phone || '').trim();
+    if (!raw) throw directChargeException('PAYMENT_PHONE_MISSING');
+    const phone = normalizeCmPhoneForDirectCharge(raw);
+    if (!phone) throw directChargeException('PAYMENT_PHONE_INVALID');
+    const operator = detectMobileMoneyOperator(phone);
+    if (!operator) throw directChargeException('PAYMENT_OPERATOR_UNSUPPORTED');
+    return { phone, operator };
+  }
+
+  private directChargeOperatorOrNull(value: unknown): DirectChargeOperator | null {
+    return value === 'ORANGEMONEY' || value === 'MTN' ? value : null;
+  }
+
+  /** L'opérateur renvoyé par DigiKuntz fait foi ; une divergence avec la table locale est journalisée (sans téléphone). */
+  private resolveProviderOperator(
+    providerOperator: unknown,
+    localOperator: DirectChargeOperator,
+    paymentId: any,
+  ): DirectChargeOperator {
+    const fromProvider = this.directChargeOperatorOrNull(providerOperator);
+    if (!fromProvider) return localOperator;
+    if (fromProvider !== localOperator) {
+      this.logger.warn(
+        `Direct charge operator mismatch for payment ${paymentId}: local=${localOperator} provider=${fromProvider}`,
+      );
+    }
+    return fromProvider;
+  }
+
+  private buildDirectChargeResponse(
+    payment: any,
+    order: any,
+    outcome: 'prompt_sent' | 'refused',
+    operator: DirectChargeOperator,
+  ): DirectChargeInitiateResponseDto {
+    const refused = outcome === 'refused';
+    return {
+      paymentId: String(payment._id),
+      orderId: String(order._id),
+      amount: Number(payment.amount),
+      currency: 'XAF',
+      status: payment.status,
+      operator,
+      outcome,
+      fallback: refused,
+      paymentLink: refused && isAllowedPaymentLink(payment.paymentLink) ? payment.paymentLink : null,
+      ussdCode: getConfirmationUssd(operator),
+    };
+  }
+
+  /** Issue inconnue : le Payment reste PROCESSING et n'est jamais supprimé ni libéré automatiquement. */
+  private async markPaymentOutcomeUnknown(payment: any, reason: string) {
+    try {
+      await this.paymentModel.updateOne(
+        { _id: payment._id, status: PaymentStatus.PROCESSING },
+        { $set: { directChargeOutcome: 'unknown', callbackPayload: { reason } } },
+      );
+    } catch (error: any) {
+      this.logger.error(`Unable to mark payment ${payment._id} with unknown outcome: ${error?.message || error}`);
+    }
+  }
+
+  /** Identifiant de commande au format ObjectId strict (400 sinon, avant toute requête base). */
+  private assertValidObjectId(id: string) {
+    if (!isValidObjectId(id) || !/^[a-fA-F0-9]{24}$/.test(String(id))) {
+      throw new BadRequestException('Identifiant de commande invalide.');
+    }
+  }
+
+  /** Commandes payables en direct : en attente de paiement, ou échec de paiement (relance avec stock revérifié). */
+  private assertDirectChargeOrderStatus(order: any) {
+    if (order.orderStatus === OrderStatus.PENDING_PAYMENT || order.orderStatus === OrderStatus.PAYMENT_FAILED) return;
+    throw new BadRequestException('Cette commande ne peut plus être payée.');
+  }
+
+  /**
+   * Une issue `unknown` n'est jamais libérée (vérification manuelle requise). Un appel `calling`
+   * récent (< 60 s) est en cours ; au-delà il devient `unknown`. Ne renvoie que si l'issue est résolue.
+   */
+  private async assertPaymentOutcomeResolvable(payment: any) {
+    const outcome = payment.directChargeOutcome;
+    if (outcome === 'unknown') throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+    if (outcome !== 'calling') return;
+    const startedAt = new Date(payment.initiatedAt || payment.createdAt || 0).getTime();
+    if (startedAt && Date.now() - startedAt < DIRECT_CHARGE_IN_PROGRESS_MS) {
+      throw directChargeException('PAYMENT_IN_PROGRESS');
+    }
+    await this.markPaymentOutcomeUnknown(payment, 'direct_charge_stale_calling');
+    throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+  }
+
+  /**
+   * Réutilisation idempotente d'un Payment PROCESSING de la commande (D9).
+   * Renvoie la réponse à rejouer (demande en attente, lien de secours), ou `null` UNIQUEMENT quand
+   * DigiKuntz confirme un échec (payin_error / payin_closed) : l'appelant crée alors une nouvelle tentative.
+   * Toute autre issue (statut inconnu, vérification impossible) lève PAYMENT_OUTCOME_UNKNOWN : jamais de nouvelle demande.
+   */
+  private async reuseDirectPayment(payment: any, order: any): Promise<DirectChargeInitiateResponseDto | null> {
+    if (payment.paymentMethod !== PAYMENT_METHOD_DIRECT_CHARGE) {
+      throw directChargeException('PAYMENT_IN_PROGRESS', 'Un autre paiement est déjà en cours pour cette commande.');
+    }
+
+    const outcome: string | undefined = payment.directChargeOutcome;
+    if (outcome && !['calling', 'prompt_sent', 'refused'].includes(outcome)) {
+      throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+    }
+    await this.assertPaymentOutcomeResolvable(payment);
+    if (!outcome && !payment.providerRef) {
+      // Ancien paiement direct sans référence : on ne sait rien, on ne relance pas et on ne libère pas.
+      throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+    }
+
+    if (payment.providerRef) {
+      let remote: { id: string; status: string; data: any };
+      try {
+        remote = await this.provider.getTransactionStatusOrThrow(payment.providerRef);
+      } catch {
+        // Statut non vérifiable depuis le chemin client : issue inconnue, jamais une nouvelle demande.
+        throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+      }
+
+      if (remote.status === 'payin_success') {
+        await this.applyPayinStatus(payment, order, remote.status, remote);
+        throw new BadRequestException('Order already paid');
+      }
+      if (remote.status === 'payin_error' || remote.status === 'payin_closed') {
+        // Seul échec confirmé par DigiKuntz : la commande peut recevoir une nouvelle tentative.
+        await this.applyPayinStatus(payment, order, remote.status, remote);
+        return null;
+      }
+      if (remote.status !== 'payin_pending') {
+        throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+      }
+    }
+
+    const operator = this.directChargeOperatorOrNull(payment.directChargeOperator);
+    if (!operator) throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+
+    return this.buildDirectChargeResponse(payment, order, outcome === 'refused' ? 'refused' : 'prompt_sent', operator);
+  }
+
+  /**
+   * Relance sur une commande PAYMENT_FAILED : le stock est réservé de nouveau, dans la MÊME transaction
+   * que la transition PAYMENT_FAILED → PENDING_PAYMENT et que la création du Payment « calling ».
+   * Un échec quelconque annule l'ensemble (aucun décrément orphelin, aucun Payment sans stock).
+   * Une commande PENDING_PAYMENT garde le comportement d'origine (stock déjà réservé).
+   */
+  private async openDirectAttempt(order: any, attempt: Record<string, unknown>): Promise<PaymentDocument> {
+    if (order.orderStatus !== OrderStatus.PAYMENT_FAILED) {
+      const [payment] = await this.paymentModel.create([attempt]);
+      return payment;
+    }
+
+    const session = await this.connection.startSession();
+    try {
+      let payment: PaymentDocument | undefined;
+      await session.withTransaction(async () => {
+        await this.reserveStockForRetry(order, session);
+        [payment] = await this.paymentModel.create([attempt], { session });
+      });
+      return payment as PaymentDocument;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  /**
+   * Décrémente le stock de chaque article (`adjustStock` conditionnel, atomique par document) puis
+   * transitionne la commande PAYMENT_FAILED → PENDING_PAYMENT par une écriture conditionnelle.
+   * Un seul appel gagne la transition ; les autres abandonnent et leur transaction est annulée.
+   */
+  private async reserveStockForRetry(order: any, session: ClientSession) {
+    for (const item of order.items || []) {
+      const quantity = Number(item.quantity) || 0;
+      try {
+        await this.inventory.adjustStock(item.menuItemId, -quantity, session);
+      } catch (error: any) {
+        if (!/Insufficient stock/i.test(String(error?.message || ''))) throw error;
+        throw directChargeException(
+          'INSUFFICIENT_STOCK',
+          `« ${item.name} » n'est plus disponible dans la quantité demandée.`,
+          {
+            items: [{
+              menuItemId: String(item.menuItemId),
+              name: item.name,
+              requested: quantity,
+              available: 0,
+              reason: 'insufficient',
+            }],
+          },
+        );
+      }
+    }
+
+    const transitioned = await this.orderModel.findOneAndUpdate(
+      { _id: order._id, orderStatus: OrderStatus.PAYMENT_FAILED, paymentStatus: { $ne: PaymentStatus.PAID } },
+      { $set: { orderStatus: OrderStatus.PENDING_PAYMENT, paymentStatus: PaymentStatus.PENDING } },
+      { new: true, session },
+    );
+    if (!transitioned) throw directChargeException('PAYMENT_IN_PROGRESS');
+    order.orderStatus = transitioned.orderStatus;
+    order.paymentStatus = transitioned.paymentStatus;
+  }
+
+  /**
+   * Initiation du paiement mobile money direct (DigiKuntz Direct Charge).
+   * Ordre : contrôle d'accès → réutilisation → téléphone/opérateur → Payment `calling` → appel provider
+   * → issue (prompt_sent | refused | rejected | unknown). Aucune suppression de Payment.
+   */
+  async initiateDirectPayment(orderId: string, actor: any): Promise<DirectChargeInitiateResponseDto> {
+    this.assertValidObjectId(orderId);
     const order = await this.orderModel.findById(orderId);
     if (!order) throw new NotFoundException('Order not found');
-    this.assertOrderAccess(order, actor);
+    this.assertDirectChargeOwner(order, actor);
     if (order.paymentStatus === PaymentStatus.PAID) throw new BadRequestException('Order already paid');
     if (!this.isOrderFromCurrentCameroonDay(order)) {
       throw new BadRequestException('Le paiement est autorisé uniquement pour les commandes du jour.');
     }
+    this.assertDirectChargeOrderStatus(order);
 
     const existingPayment = await this.paymentModel
       .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
       .sort({ createdAt: -1 });
     if (existingPayment) {
-      const reused = await this.reuseProcessingPayment(existingPayment, order);
+      const reused = await this.reuseDirectPayment(existingPayment, order);
       if (reused) return reused;
     }
 
     const user = await this.userModel.findById(order.userId);
-    const phone = String(user?.phone || '').trim();
-    if (!phone) {
-      throw new BadRequestException('Numéro de téléphone requis pour le paiement mobile money.');
-    }
+    const { phone, operator } = this.resolveDirectChargePhone(user);
 
     const paymentAmount = this.orderPaymentAmount(order);
     if (paymentAmount <= 0) throw new BadRequestException('Invalid order payment amount');
 
-    const paymentMethodCode = this.detectMobileMoneyOperator(phone);
-    const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
-
     let payment: PaymentDocument;
     try {
-      payment = await this.paymentModel.create({
+      payment = await this.openDirectAttempt(order, {
         orderId: order._id,
         amount: paymentAmount,
         provider: 'digikuntz',
         currency: 'XAF',
         status: PaymentStatus.PROCESSING,
-        paymentMethod: 'direct_charge',
+        paymentMethod: PAYMENT_METHOD_DIRECT_CHARGE,
+        directChargeOperator: operator,
+        directChargeOutcome: 'calling',
         initiatedAt: new Date(),
       });
     } catch (error: any) {
@@ -585,77 +794,129 @@ export class PaymentsService implements OnModuleInit {
       const concurrentPayment = await this.paymentModel
         .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
         .sort({ createdAt: -1 });
-      if (!concurrentPayment) throw new ConflictException('Une initiation de paiement est déjà en cours');
-      const reused = await this.reuseProcessingPayment(concurrentPayment, order, true);
+      const reused = concurrentPayment ? await this.reuseDirectPayment(concurrentPayment, order) : null;
       if (reused) return reused;
-      throw new ConflictException('Une initiation de paiement est déjà en cours');
+      throw directChargeException('PAYMENT_IN_PROGRESS');
     }
 
+    const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+    let response: DirectChargeResult;
     try {
-      const response = await this.provider.initiateDirectCharge({
+      response = await this.provider.initiateDirectCharge({
         estimation: paymentAmount,
         userPhone: phone,
         userEmail: user?.email,
         userCountry: 'Cameroon',
         senderName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || order.orderNumber,
-        paymentMethodCode,
+        paymentMethodCode: operator,
         callbackUrl: frontendUrl ? `${frontendUrl}/orders` : undefined,
         raisonForTransfer: `Commande ${order.orderNumber}`,
+        // Clé stable liée au Payment local : un retry réseau ne crée pas une
+        // seconde demande chez DigiKuntz (TTL fournisseur 24 h).
+        idempotencyKey: String(payment._id),
       });
+    } catch (error: any) {
+      if (error instanceof DigikuntzDirectChargeError && error.kind === 'rejected') {
+        await this.paymentModel.updateOne(
+          { _id: payment._id, status: PaymentStatus.PROCESSING },
+          {
+            $set: {
+              status: PaymentStatus.FAILED,
+              completedAt: new Date(),
+              directChargeOutcome: 'rejected',
+              callbackPayload: { reason: 'direct_charge_rejected', providerCode: error.providerCode ?? null },
+            },
+          },
+        );
+        this.logger.warn(
+          `Direct charge rejected for payment ${payment._id} (order ${order._id}): ${error.providerCode ?? 'no_code'} HTTP ${error.httpStatus ?? 'n/a'}`,
+        );
+        throw directChargeException(directChargeCodeForProviderError(error.providerCode));
+      }
 
-      payment.providerRef = response.providerRef;
-      payment.transactionRef = response.transactionRef;
-      payment.paymentWithTaxes = response.paymentWithTaxes;
-      payment.invoiceTaxes = response.invoiceTaxes;
-      await payment.save();
-
-      order.paymentStatus = PaymentStatus.PROCESSING;
-      await order.save();
-
+      // Issue inconnue : la demande a peut-être été reçue. Jamais de suppression, jamais de relance automatique.
+      await this.markPaymentOutcomeUnknown(payment, 'direct_charge_outcome_unknown');
+      this.logger.warn(`Direct charge outcome unknown for payment ${payment._id} (order ${order._id})`);
       this.auditLogs.record({
         actorId: actor.sub,
         actorEmail: actor.email,
         actorRole: actor.role,
-        action: 'payment.initiate_direct',
+        action: 'payment.initiate_direct_unknown',
         resourceType: 'payment',
         resourceId: String(payment._id),
-        metadata: {
-          amount: paymentAmount,
-          orderId: String(order._id),
-          orderNumber: order.orderNumber,
-          operator: paymentMethodCode,
-          provider: 'digikuntz',
-        },
+        metadata: { orderId: String(order._id), orderNumber: order.orderNumber, operator, outcome: 'unknown', provider: 'digikuntz' },
         method: 'POST',
         path: `/payments/initiate-direct/${orderId}`,
-        statusCode: 200,
+        statusCode: 409,
       });
+      throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+    }
 
-      return { payment, directCharge: true, operator: paymentMethodCode, phone };
-    } catch (error: any) {
-      if (error instanceof ServiceUnavailableException) {
-        await this.paymentModel.deleteOne({
-          _id: payment._id,
-          status: PaymentStatus.PROCESSING,
-          providerRef: { $exists: false },
-        });
-        throw error;
-      }
+    const refused = response.refused === true;
+    if (refused && !isAllowedPaymentLink(response.paymentLink)) {
       await this.paymentModel.updateOne(
         { _id: payment._id, status: PaymentStatus.PROCESSING },
         {
           $set: {
             status: PaymentStatus.FAILED,
             completedAt: new Date(),
-            callbackPayload: {
-              reason: 'direct_charge_initiation_failed',
-              error: error?.message || String(error),
-            },
+            directChargeOutcome: 'rejected',
+            providerRef: response.providerRef,
+            transactionRef: response.transactionRef,
+            callbackPayload: { reason: 'direct_charge_refused_without_valid_link' },
           },
         },
       );
-      throw error;
+      this.logger.warn(`Direct charge refused without a valid payment link for payment ${payment._id}`);
+      throw directChargeException('PAYMENT_REJECTED');
     }
+
+    const outcome: 'prompt_sent' | 'refused' = refused ? 'refused' : 'prompt_sent';
+    const resolvedOperator = this.resolveProviderOperator(response.paymentMethodCode, operator, payment._id);
+
+    try {
+      payment.providerRef = response.providerRef;
+      payment.transactionRef = response.transactionRef;
+      payment.paymentWithTaxes = response.paymentWithTaxes;
+      payment.invoiceTaxes = response.invoiceTaxes;
+      payment.directChargeOperator = resolvedOperator;
+      payment.directChargeOutcome = outcome;
+      if (refused) payment.paymentLink = response.paymentLink;
+      await payment.save();
+
+      order.paymentStatus = PaymentStatus.PROCESSING;
+      await order.save();
+    } catch (error: any) {
+      // DigiKuntz a accepté la demande mais la persistance locale échoue : issue inconnue, rien ne doit être supprimé.
+      this.logger.error(
+        `Direct charge accepted but local persistence failed (payment ${payment._id}, providerRef ${response.providerRef}): ${error?.message || error}`,
+      );
+      await this.markPaymentOutcomeUnknown(payment, 'direct_charge_persistence_failed');
+      throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+    }
+
+    this.auditLogs.record({
+      actorId: actor.sub,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      action: 'payment.initiate_direct',
+      resourceType: 'payment',
+      resourceId: String(payment._id),
+      metadata: {
+        amount: paymentAmount,
+        orderId: String(order._id),
+        orderNumber: order.orderNumber,
+        operator: resolvedOperator,
+        outcome,
+        refusalReason: response.refusalReason ?? null,
+        provider: 'digikuntz',
+      },
+      method: 'POST',
+      path: `/payments/initiate-direct/${orderId}`,
+      statusCode: 201,
+    });
+
+    return this.buildDirectChargeResponse(payment, order, outcome, resolvedOperator);
   }
 
   private async reuseProcessingPayment(
@@ -663,6 +924,17 @@ export class PaymentsService implements OnModuleInit {
     order: OrderDocument,
     waitForInitialization = false,
   ) {
+    // Un paiement direct en cours ne doit pas recevoir un lien hébergé par-dessus.
+    if (initialPayment.paymentMethod === PAYMENT_METHOD_DIRECT_CHARGE) {
+      throw directChargeException(
+        'PAYMENT_IN_PROGRESS',
+        'Un paiement mobile money direct est déjà en cours pour cette commande. Confirmez-le sur votre téléphone avant de relancer un paiement.',
+      );
+    }
+
+    // Issue `unknown` (ou appel `calling` périmé) : jamais libérée par le verrou périmé.
+    await this.assertPaymentOutcomeResolvable(initialPayment);
+
     let payment = initialPayment;
     if (waitForInitialization && !payment.providerRef && !payment.paymentLink) {
       payment = await this.waitForPaymentInitialization(payment._id);
@@ -681,6 +953,7 @@ export class PaymentsService implements OnModuleInit {
             status: PaymentStatus.PROCESSING,
             providerRef: { $exists: false },
             paymentLink: { $exists: false },
+            directChargeOutcome: { $nin: ['unknown', 'calling'] },
           },
           {
             $set: {
@@ -707,11 +980,10 @@ export class PaymentsService implements OnModuleInit {
     }
 
     const checkout = this.buildCheckoutFromPayment(payment, remote);
-    const isDirectCharge = (payment as any).paymentMethod === 'direct_charge';
-    if (!checkout.paymentLink && !isDirectCharge) {
+    if (!checkout.paymentLink) {
       throw new ConflictException('Le lien de paiement est en cours de génération. Réessayez dans quelques secondes.');
     }
-    return isDirectCharge ? { payment, checkout, directCharge: true } : { payment, checkout };
+    return { payment, checkout };
   }
 
   private async waitForPaymentInitialization(paymentId: any): Promise<PaymentDocument> {
@@ -729,11 +1001,14 @@ export class PaymentsService implements OnModuleInit {
     return payment;
   }
 
-  async paymentStatus(orderId: string, actor: any) {
+  /** Vue client du dernier paiement (projection : pas de callbackPayload, providerRef ni transactionRef). */
+  async paymentStatus(orderId: string, actor: any): Promise<ClientPaymentView | null> {
+    this.assertValidObjectId(orderId);
     const order = await this.orderModel.findById(orderId);
     if (!order) throw new NotFoundException('Order not found');
     this.assertOrderAccess(order, actor);
-    return this.paymentModel.findOne({ orderId }).sort({ createdAt: -1 });
+    const payment = await this.paymentModel.findOne({ orderId }).sort({ createdAt: -1 });
+    return payment ? toClientPaymentView(payment) : null;
   }
 
   async syncOrderPayment(orderRef: string, actor: any) {
@@ -767,8 +1042,8 @@ export class PaymentsService implements OnModuleInit {
     };
   }
 
-  async webhook(payload: any, providedToken?: string, options: { allowMissingToken?: boolean } = {}) {
-    this.assertWebhookAuthenticated(providedToken, options.allowMissingToken);
+  async webhook(payload: any, providedToken?: string) {
+    this.assertWebhookAuthenticated(providedToken);
 
     if (!payload?.id) throw new BadRequestException('Missing transaction id');
 
@@ -777,8 +1052,10 @@ export class PaymentsService implements OnModuleInit {
 
     // Idempotence stricte : une transaction PAID ou FAILED ne doit pas être rejouée
     // par un retry de DigiKuntz qui voudrait nous renvoyer un autre statut.
+    // Le payload peut être préfixé (`transaction_payin_*`) : on normalise avant comparaison.
+    const payloadStatus = normalizeDigikuntzStatus(payload.status) || payload.status;
     if (payment.status === PaymentStatus.PAID) return { ok: true, idempotent: true };
-    if (payment.status === PaymentStatus.FAILED && ['payin_error', 'payin_closed'].includes(payload.status)) {
+    if (payment.status === PaymentStatus.FAILED && ['payin_error', 'payin_closed'].includes(payloadStatus)) {
       return { ok: true, idempotent: true };
     }
 
@@ -815,9 +1092,68 @@ export class PaymentsService implements OnModuleInit {
     return { ok: true };
   }
 
-  private assertWebhookAuthenticated(providedToken?: string, allowMissingToken = false) {
+  /**
+   * Résolution manuelle d'une issue ambiguë (`unknown` / `calling`) par un administrateur.
+   * Réutilise `applyPayinStatus` pour conserver l'atomicité et les effets de bord
+   * (crédit restaurant, notification, restitution du stock).
+   */
+  async resolvePaymentOutcome(id: string, actor: any, outcome: 'paid' | 'failed') {
+    if (!['paid', 'failed'].includes(outcome)) {
+      throw new BadRequestException('Issue invalide : `paid` ou `failed` attendu.');
+    }
+
+    const payment = await this.paymentModel.findOne({
+      $or: [{ providerRef: id }, { _id: isValidObjectId(id) ? id : null }],
+    });
+    if (!payment) throw new NotFoundException(`Paiement ${id} introuvable`);
+
+    if (payment.status === PaymentStatus.PAID) {
+      throw new BadRequestException('Le paiement est déjà PAID ; aucune action requise.');
+    }
+    if (
+      payment.status === PaymentStatus.FAILED
+      && outcome === 'paid'
+      && !payment.providerRef
+    ) {
+      throw new BadRequestException('Paiement sans référence fournisseur : résolution impossible.');
+    }
+
+    const order = await this.orderModel.findById(payment.orderId);
+    if (!order) throw new NotFoundException(`Commande ${payment.orderId} introuvable`);
+
+    const resolvedStatus = outcome === 'paid' ? 'payin_success' : 'payin_error';
+    const applied = await this.applyPayinStatus(payment, order, resolvedStatus, {
+      id: payment.providerRef,
+      status: resolvedStatus,
+      resolvedManually: true,
+    });
+    if (!applied) {
+      throw new BadRequestException('Cette transition a déjà été appliquée ou n’est pas autorisée pour ce paiement.');
+    }
+
+    await this.auditLogs.record({
+      actorId: actor?.sub,
+      actorEmail: actor?.email,
+      actorRole: actor?.role,
+      action: 'payment.resolve_outcome',
+      resourceType: 'payment',
+      resourceId: String(payment._id),
+      metadata: {
+        outcome,
+        orderId: String(order._id),
+        paymentId: String(payment._id),
+        providerRef: payment.providerRef ?? null,
+      },
+      method: 'POST',
+      path: '/payments/:id/resolve',
+      statusCode: 200,
+    });
+
+    return { ok: true, paymentId: String(payment._id), outcome };
+  }
+
+  private assertWebhookAuthenticated(providedToken?: string) {
     const expected = process.env.DIGIKUNTZ_WEBHOOK_SECRET;
-    if (allowMissingToken && !providedToken) return;
     if (!expected) {
       if (process.env.NODE_ENV === 'production') {
         this.logger.error('DIGIKUNTZ_WEBHOOK_SECRET is not configured — refusing webhook in production');
@@ -908,20 +1244,43 @@ export class PaymentsService implements OnModuleInit {
    */
   private async expireStalePendingOrders() {
     const cutoff = new Date(Date.now() - this.getOrderPaymentTimeoutMs());
-    const staleOrders = await this.orderModel.find({
-      orderStatus: OrderStatus.PENDING_PAYMENT,
-      createdAt: { $lt: cutoff },
-    });
+    const batchLimit = Number(process.env.PAYMENT_EXPIRY_BATCH_LIMIT || 200);
+    const safeBatchLimit = Number.isFinite(batchLimit) && batchLimit > 0 ? batchLimit : 200;
+    // `.slice()` plutôt que `.limit()` : la requête reste lisible et bornée, et
+    // le tableau n'est jamais `undefined` si le driver change.
+    const staleOrders = (
+      await this.orderModel.find({
+        orderStatus: OrderStatus.PENDING_PAYMENT,
+        createdAt: { $lt: cutoff },
+      })
+    ).slice(0, safeBatchLimit);
 
+    let heldByDirectCharge = 0;
     for (const order of staleOrders) {
       try {
         const latestPayment = await this.paymentModel
           .findOne({ orderId: order._id })
           .sort({ createdAt: -1 });
 
+        // Paiement direct en attente (demande envoyée, appel en cours, issue inconnue) : jamais expiré
+        // automatiquement. La synchronisation résout la demande en payin_success / payin_error / payin_closed.
+        if (this.isHeldByDirectCharge(latestPayment)) {
+          heldByDirectCharge += 1;
+          continue;
+        }
+
         if (latestPayment?.providerRef) {
           const remote = await this.provider.getTransactionStatus(latestPayment.providerRef);
-          if (remote && remote.status !== 'payin_pending') {
+          if (!remote) {
+            // Fail-closed : provider indisponible → ne JAMAIS expirer la commande.
+            // Une panne DigiKuntz ne doit pas annuler une commande dont le
+            // paiement a peut-être abouti ; le prochain run tranchera.
+            this.logger.warn(
+              `Unable to read DigiKuntz status for payment ${latestPayment._id}; order ${order._id} left open`,
+            );
+            continue;
+          }
+          if (remote.status !== 'payin_pending') {
             // Issue connue par le provider — laisser applyPayinStatus gérer
             // (succès tardif OU échec déjà confirmé, qui restituera le stock).
             await this.applyPayinStatus(latestPayment, order, remote.status, remote);
@@ -934,6 +1293,21 @@ export class PaymentsService implements OnModuleInit {
         this.logger.error(`Failed to expire stale order ${order._id}: ${err?.message || err}`);
       }
     }
+
+    if (heldByDirectCharge > 0) {
+      this.logger.debug(`${heldByDirectCharge} commande(s) conservée(s) : paiement direct en attente ou issue inconnue`);
+    }
+  }
+
+  private isHeldByDirectCharge(payment: any): boolean {
+    if (!payment) return false;
+    const outcome = payment.directChargeOutcome;
+    if (outcome === 'calling' || outcome === 'unknown') return true;
+    return (
+      payment.paymentMethod === PAYMENT_METHOD_DIRECT_CHARGE
+      && outcome === 'prompt_sent'
+      && payment.status === PaymentStatus.PROCESSING
+    );
   }
 
   private async expireOrderForTimeout(order: any, payment: any | null) {
@@ -1282,46 +1656,193 @@ export class PaymentsService implements OnModuleInit {
     return { ok: true };
   }
 
-  private async applyPayinStatus(payment: any, order: any, status: string, payload: any) {
+  /**
+   * Applique un statut payin de façon idempotente et concurrente-sûre.
+   *
+   * Le premier appelant (webhook, cron de sync, résolution admin) qui « claim »
+   * la transition terminale est le seul à appliquer les effets de bord :
+   * crédit des soldes, notifications, restitution/réservation du stock.
+   * Les suivants voient un `findOneAndUpdate` conditionnel vide et ne rejouent rien.
+   */
+  private async applyPayinStatus(payment: any, order: any, rawStatus: string, payload: any): Promise<boolean> {
+    const status = normalizeDigikuntzStatus(rawStatus) || rawStatus;
     const pending = status === 'payin_pending';
     const success = status === 'payin_success';
     const failed = ['payin_error', 'payin_closed'].includes(status);
-    if (!pending && !success && !failed) return;
-    if (payment.status === PaymentStatus.PAID && !success) return;
+    if (!pending && !success && !failed) return false;
 
-    const wasAlreadyPaid = payment.status === PaymentStatus.PAID;
-    const wasAlreadyFailed = payment.status === PaymentStatus.FAILED;
+    // Rien à faire : un paiement PAID ne redevient jamais pending/failed.
+    if (payment.status === PaymentStatus.PAID && !success) return false;
 
-    payment.status = pending
-      ? PaymentStatus.PROCESSING
-      : success
-        ? PaymentStatus.PAID
-        : PaymentStatus.FAILED;
-    payment.callbackPayload = payload;
-    if (!pending) payment.completedAt = new Date();
-    await payment.save();
-
-    order.paymentStatus = payment.status;
-    order.orderStatus = pending
-      ? OrderStatus.PENDING_PAYMENT
-      : success
-        ? OrderStatus.PAID
-        : OrderStatus.PAYMENT_FAILED;
-    if (success && !order.paymentConfirmedAt) order.paymentConfirmedAt = new Date();
-    await order.save();
-
-    if (success && !wasAlreadyPaid) {
-      // Stock déjà décrémenté dans la transaction de création de commande
-      // (cf. OrdersService.placeOrderWithinSession). On ne re-décrémente pas ici.
-      await this.creditOrderBalances(order, payment);
-      const user = await this.userModel.findById(order.userId);
-      if (user) await this.notifications.sendOrderConfirmed(user.email, user.phone, order.orderNumber);
-      await this.notifyRestaurantStaffOrderConfirmed(order);
+    if (pending) {
+      const updated = await this.paymentModel.findOneAndUpdate(
+        { _id: payment._id, status: { $in: [PaymentStatus.PENDING, PaymentStatus.PROCESSING] } },
+        { $set: { status: PaymentStatus.PROCESSING, callbackPayload: payload } },
+        { new: true },
+      );
+      if (updated) {
+        payment.status = updated.status;
+        payment.callbackPayload = updated.callbackPayload;
+      }
+      return !!updated;
     }
 
-    if (failed && !wasAlreadyFailed && !wasAlreadyPaid) {
-      // Restitution du stock réservé à la création de la commande
-      await this.restoreReservedStockIfCurrentCameroonDay(order, 'payment_failed');
+    const targetStatus = success ? PaymentStatus.PAID : PaymentStatus.FAILED;
+
+    // Claim atomique. Un succès peut annuler un échec purement local dû à
+    // l'expiration (`payment_timeout`) : le provider reste la source de vérité
+    // pour un paiement réellement encaissé. En revanche un échec provider
+    // confirmé (payin_error/payin_closed) n'est jamais écrasé par un succès.
+    const claimFilter: Record<string, any> = success
+      ? {
+          _id: payment._id,
+          $or: [
+            { status: { $in: [PaymentStatus.PENDING, PaymentStatus.PROCESSING] } },
+            { status: PaymentStatus.FAILED, 'callbackPayload.reason': 'payment_timeout' },
+          ],
+        }
+      : { _id: payment._id, status: { $in: [PaymentStatus.PENDING, PaymentStatus.PROCESSING] } };
+
+    const claimed = await this.paymentModel.findOneAndUpdate(
+      claimFilter,
+      {
+        $set: {
+          status: targetStatus,
+          callbackPayload: payload,
+          completedAt: new Date(),
+        },
+      },
+      { new: true },
+    );
+
+    if (!claimed) {
+      // Transition déjà appliquée par un autre chemin : resynchroniser l'instance
+      // appelante sans rejouer le moindre effet de bord.
+      const current = await this.paymentModel.findById(payment._id);
+      if (current) {
+        payment.status = current.status;
+        payment.callbackPayload = current.callbackPayload;
+        payment.completedAt = current.completedAt;
+      }
+      return false;
+    }
+
+    payment.status = targetStatus;
+    payment.callbackPayload = claimed.callbackPayload;
+    payment.completedAt = claimed.completedAt;
+
+    const currentOrder = (await this.orderModel.findById(order._id)) || order;
+    order.paymentStatus = currentOrder.paymentStatus;
+    order.orderStatus = currentOrder.orderStatus;
+    order.paymentConfirmedAt = currentOrder.paymentConfirmedAt;
+    order.paymentAnomaly = currentOrder.paymentAnomaly;
+
+    // Une commande déjà payée par un autre paiement ne doit jamais être
+    // rétrogradée ni recréditée.
+    if (currentOrder.paymentStatus === PaymentStatus.PAID) return true;
+
+    if (failed) {
+      const transitioned = await this.orderModel.findOneAndUpdate(
+        { _id: currentOrder._id, paymentStatus: { $ne: PaymentStatus.PAID } },
+        { $set: { paymentStatus: PaymentStatus.FAILED, orderStatus: OrderStatus.PAYMENT_FAILED } },
+        { new: true },
+      );
+      if (!transitioned) return true;
+
+      order.paymentStatus = transitioned.paymentStatus;
+      order.orderStatus = transitioned.orderStatus;
+
+      // Restitution du stock réservé à la création de la commande.
+      await this.restoreReservedStockIfCurrentCameroonDay(transitioned, 'payment_failed');
+      return true;
+    }
+
+    // Succès. Si la commande avait expiré, le stock a déjà été restitué :
+    // il faut le réserver de nouveau avant de valider la commande.
+    const expiredLocally = currentOrder.orderStatus === OrderStatus.PAYMENT_FAILED;
+    let restocked = true;
+    if (expiredLocally) {
+      restocked = await this.tryReserveStockForLatePayment(currentOrder);
+    }
+
+    const orderUpdate: Record<string, any> = { paymentStatus: PaymentStatus.PAID };
+    if (restocked) {
+      orderUpdate.orderStatus = OrderStatus.PAID;
+      if (!currentOrder.paymentConfirmedAt) orderUpdate.paymentConfirmedAt = new Date();
+    } else {
+      // Paiement réellement reçu mais commande non honorable : remboursement manuel.
+      orderUpdate.paymentAnomaly = 'paid_without_stock';
+    }
+
+    const transitioned = await this.orderModel.findOneAndUpdate(
+      { _id: currentOrder._id, paymentStatus: { $ne: PaymentStatus.PAID } },
+      { $set: orderUpdate },
+      { new: true },
+    );
+
+    if (!transitioned) {
+      // La commande a été payée par un autre chemin entre-temps : annuler la
+      // réservation tardive pour ne pas laisser un stock décrémenté sans commande.
+      if (expiredLocally && restocked) {
+        await this.restoreReservedStockIfCurrentCameroonDay(currentOrder, 'late_payment_duplicate');
+      }
+      return true;
+    }
+
+    order.paymentStatus = transitioned.paymentStatus;
+    order.orderStatus = transitioned.orderStatus;
+    order.paymentConfirmedAt = transitioned.paymentConfirmedAt;
+    order.paymentAnomaly = transitioned.paymentAnomaly;
+
+    if (!restocked) {
+      this.logger.error(
+        `Payment ${payment._id} received for expired order ${currentOrder._id} without enough stock — manual refund required`,
+      );
+      return true;
+    }
+
+    await this.creditOrderBalances(order, payment);
+    const user = await this.userModel.findById(order.userId);
+    if (user) await this.notifications.sendOrderConfirmed(user.email, user.phone, order.orderNumber);
+    await this.notifyRestaurantStaffOrderConfirmed(order);
+    return true;
+  }
+
+  /**
+   * Tentative de re-réservation du stock pour un paiement reçu après expiration.
+   * Tout ou rien : si un article manque, toutes les décrémentations sont annulées.
+   */
+  private async tryReserveStockForLatePayment(order: any): Promise<boolean> {
+    if (!order?.items?.length) return true;
+
+    const session = await this.connection.startSession();
+    try {
+      let insufficient = false;
+      await session.withTransaction(async () => {
+        for (const item of order.items) {
+          try {
+            await this.inventory.adjustStock(item.menuItemId, -Number(item.quantity || 0), session);
+          } catch (error: any) {
+            if (!/Insufficient stock/i.test(String(error?.message || ''))) throw error;
+            insufficient = true;
+            // Abandon de la transaction : les décréments déjà effectués
+            // dans cette session sont annulés.
+            throw error;
+          }
+        }
+      });
+      return true;
+    } catch (error: any) {
+      if (/Insufficient stock/i.test(String(error?.message || ''))) {
+        this.logger.warn(
+          `Late payment stock reservation failed for order ${order?._id}: insufficient stock`,
+        );
+        return false;
+      }
+      this.logger.error(`Late payment stock reservation error for order ${order?._id}: ${error?.message || error}`);
+      throw error;
+    } finally {
+      await session.endSession();
     }
   }
 
@@ -1338,6 +1859,8 @@ export class PaymentsService implements OnModuleInit {
       try {
         const order = await this.orderModel.findById(payment.orderId);
         if (!order || order.paymentStatus !== PaymentStatus.PAID) continue;
+        // Paiement reçu sans stock : remboursement manuel, jamais de crédit restaurant.
+        if (order.paymentAnomaly) continue;
         const driverId = order.orderStatus === OrderStatus.DELIVERED ? order.assignedDriverId : undefined;
         await this.creditOrderBalances(order, payment, driverId);
       } catch (err: any) {

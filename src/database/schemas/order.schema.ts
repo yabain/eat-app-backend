@@ -56,5 +56,7 @@ export class Order {
   @Prop() paymentConfirmedAt?: Date;
   @Prop() preparationReminderSentAt?: Date;
   @Prop() deliveryStartedWhatsappSentAt?: Date;
+  /** Paiement reçu après expiration sans stock suffisant : à rembourser manuellement (paiement réel, commande non honorable). */
+  @Prop({ enum: ['paid_without_stock'] }) paymentAnomaly?: string;
 }
 export const OrderSchema = SchemaFactory.createForClass(Order);

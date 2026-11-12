@@ -1,5 +1,18 @@
 import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiBearerAuth,
+  ApiBody,
+  ApiConflictResponse,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiParam,
+  ApiQuery,
+  ApiServiceUnavailableResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { PaymentsService } from './payments.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { DigikuntzWebhookDto } from './dto/digikuntz-webhook.dto';
@@ -9,7 +22,15 @@ import { UserRole } from '../../common/enums/roles.enum';
 import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { OkResponseDto } from '../../common/dto/response.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
-import { PaginatedPaymentsResponseDto, PaymentInitiateResponseDto, PaymentStatusResponseDto, PaymentSyncResponseDto } from './dto/payment-response.dto';
+import {
+  DirectChargeErrorDto,
+  ClientPaymentStatusDto,
+  DirectChargeInitiateResponseDto,
+  PaginatedPaymentsResponseDto,
+  PaymentInitiateResponseDto,
+  PaymentStatusResponseDto,
+  PaymentSyncResponseDto,
+} from './dto/payment-response.dto';
 
 @ApiTags('webhooks')
 @Controller('webhook')
@@ -26,7 +47,7 @@ export class DigikuntzWebhookController {
   @ApiBody({ type: DigikuntzWebhookDto })
   @ApiOkResponse({ description: 'Webhook traité', type: OkResponseDto })
   webhook(@Body() body: DigikuntzWebhookDto, @Query('token') token?: string) {
-    return this.service.webhook(body, token, { allowMissingToken: true });
+    return this.service.webhook(body, token);
   }
 }
 
@@ -82,19 +103,27 @@ export class PaymentsController {
     description: 'Paiement initialisé',
     type: PaymentInitiateResponseDto,
   })
+  @ApiConflictResponse({
+    description: 'PAYMENT_OUTCOME_UNKNOWN : demande possiblement reçue par le fournisseur, ne pas relancer avant vérification. PAYMENT_IN_PROGRESS : paiement direct déjà en cours sur la commande.',
+    type: DirectChargeErrorDto,
+  })
   initiate(@Param('orderId') orderId: string, @Req() req: any) { return this.service.initiate(orderId, req.user); }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT)
+  @Roles(UserRole.CLIENT)
   @Post('initiate-direct/:orderId')
   @ApiBearerAuth('bearer')
   @ApiOperation({
     summary: 'Initier un paiement mobile money direct (sans lien de redirection)',
     description:
-      'Envoie une demande de paiement directement au numéro de téléphone de l’utilisateur. Le client confirme sur son téléphone ; le statut est mis à jour via webhook et polling.',
+      'Réservé au client propriétaire de la commande. Envoie une demande de confirmation sur le téléphone du client (Orange ou MTN, numéro lu côté serveur). Si DigiKuntz refuse le direct, `outcome` vaut `refused` et `paymentLink` contient le lien hébergé. En cas d’issue inconnue (`PAYMENT_OUTCOME_UNKNOWN`), ne pas relancer le paiement avant vérification du statut de la commande.',
   })
   @ApiParam({ name: 'orderId', example: '665d58e63d7bfeb8f7f6172e' })
-  @ApiOkResponse({ description: 'Paiement direct initié', type: PaymentInitiateResponseDto })
+  @ApiCreatedResponse({ description: 'Demande directe traitée (demande envoyée ou refus avec lien)', type: DirectChargeInitiateResponseDto })
+  @ApiBadRequestResponse({ description: 'Téléphone, opérateur, montant ou moyen de paiement non acceptés (code : PAYMENT_*)', type: DirectChargeErrorDto })
+  @ApiForbiddenResponse({ description: 'Réservé au client propriétaire de la commande' })
+  @ApiConflictResponse({ description: 'Paiement déjà en cours (PAYMENT_IN_PROGRESS) ou issue inconnue (PAYMENT_OUTCOME_UNKNOWN)', type: DirectChargeErrorDto })
+  @ApiServiceUnavailableResponse({ description: 'Paiement mobile money direct désactivé côté fournisseur (PAYMENT_DIRECT_DISABLED)', type: DirectChargeErrorDto })
   initiateDirect(@Param('orderId') orderId: string, @Req() req: any) {
     return this.service.initiateDirectPayment(orderId, req.user);
   }
@@ -132,6 +161,26 @@ export class PaymentsController {
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
+  @Post(':id/resolve')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({
+    summary: 'Résoudre une issue de paiement ambiguë',
+    description:
+      'Réservé aux administrateurs. Force l’issue d’un paiement bloqué en `unknown` / `calling` (paiement réellement reçu ou définitivement échoué). Réutilise le même chemin atomique que le webhook et journalise l’action.',
+  })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e', description: 'providerRef DigiKuntz ou _id MongoDB du Payment.' })
+  @ApiOkResponse({ description: 'Issue appliquée', type: OkResponseDto })
+  @ApiBadRequestResponse({ description: 'Paiement introuvable ou état invalide' })
+  resolve(
+    @Param('id') id: string,
+    @Req() req: any,
+    @Body() body: { outcome: 'paid' | 'failed' },
+  ) {
+    return this.service.resolvePaymentOutcome(id, req.user, body.outcome);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
   @Get(':id')
   @ApiBearerAuth('bearer')
   @ApiOperation({ summary: 'Détail complet d’une transaction' })
@@ -148,8 +197,8 @@ export class PaymentsController {
   @ApiOperation({ summary: 'Statut paiement par commande' })
   @ApiParam({ name: 'orderId', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiOkResponse({
-    description: 'Dernier statut de paiement',
-    type: PaymentStatusResponseDto,
+    description: 'Dernier paiement de la commande (projection client, sans données fournisseur)',
+    type: ClientPaymentStatusDto,
   })
   status(@Param('orderId') orderId: string, @Req() req: any) { return this.service.paymentStatus(orderId, req.user); }
 }
