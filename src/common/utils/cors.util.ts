@@ -9,6 +9,8 @@ const CORS_HEADERS_BASE = [
   'Content-Type',
   'Accept',
   'Authorization',
+  'Cache-Control',
+  'Pragma',
 ] as const;
 
 function normalizeOrigin(origin: string): string {

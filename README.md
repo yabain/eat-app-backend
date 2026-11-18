@@ -50,6 +50,7 @@ npm run start:dev
 ## Notes
 - Payments are wired through a DigiKuntz adapter with a mock initiation response.
 - Webhook endpoint: `POST /api/payments/webhook/digikuntz`
+- Cache HTTP : les réponses `/api` sont envoyées avec `Cache-Control: no-store` (données dynamiques : stock, images, commandes). Si un reverse proxy (Apache/Hostinger, LiteSpeed, CDN) ajoute un `max-age` long, le retirer pour `/api` ; réserver le cache long aux fichiers `/uploads/...`, dont les noms sont uniques et immuables.
 - Swagger docs: `GET /api/docs`
 - Google sign-in:
   - Add `GOOGLE_CLIENT_ID` to `.env`.

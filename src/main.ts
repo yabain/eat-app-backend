@@ -69,6 +69,30 @@ async function bootstrap() {
   });
 
   app.use(cookieParser());
+
+  // Les réponses de l'API sont dynamiques (stock, images, commandes, sessions) :
+  // elles ne doivent jamais être servies depuis le cache du navigateur ou d'un proxy.
+  // Sans cet en-tête, un reverse proxy peut ajouter un `max-age` long et une liste
+  // chargée avant un upload reste périmée après l'upload.
+  app.use((req, res, next) => {
+    if (!req.path.startsWith('/api')) return next();
+
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+
+    // Défense supplémentaire : une réponse authentifiée ne doit jamais être
+    // réutilisée pour un autre utilisateur par un cache partagé.
+    const existingVary = res.getHeader('Vary');
+    const varyValue = Array.isArray(existingVary) ? existingVary.join(', ') : String(existingVary || '');
+    if (!/\bAuthorization\b/i.test(varyValue)) {
+      res.setHeader('Vary', varyValue ? `${varyValue}, Authorization` : 'Authorization');
+    }
+
+    next();
+  });
+
   app.setGlobalPrefix('api', {
     exclude: [{ path: 'webhook/digikuntz', method: RequestMethod.POST }],
   });
