@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, HttpException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, HttpException, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { Types } from 'mongoose';
 import { PaymentsService } from './payments.service';
 import { DigikuntzDirectChargeError } from './errors/direct-charge.errors';
@@ -1078,6 +1078,9 @@ describe('PaymentsService — paiement mobile money direct', () => {
       expect(payment.status).toBe('paid');
       expect(credit).toHaveBeenCalledTimes(1);
       expect(notifyRestaurant).toHaveBeenCalledTimes(1);
+      // Le paiement canonique est figé sur la commande : la réconciliation
+      // ne pourra pas créditer une seconde tentative.
+      expect(orderModel.findOneAndUpdate.mock.calls[0][1].$set.paidPaymentId).toBe(payment._id);
 
       // 2e appelant (webhook/cron concurrent) : claim perdu → aucun nouvel effet.
       paymentModel.findOneAndUpdate.mockResolvedValueOnce(null);
@@ -1092,6 +1095,27 @@ describe('PaymentsService — paiement mobile money direct', () => {
       expect(credit).toHaveBeenCalledTimes(1);
       expect(notifyRestaurant).toHaveBeenCalledTimes(1);
       expect(orderModel.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it('ensurePaidOrderBalances utilise le paiement canonique paidPaymentId', async () => {
+      const driverId = new Types.ObjectId();
+      const canonical = makeStoredPayment({ status: 'paid' });
+      const order = makeOrder({
+        paymentStatus: 'paid',
+        paidPaymentId: canonical._id,
+      });
+      paymentModel.findOne.mockResolvedValueOnce(canonical);
+      const creditSpy = jest
+        .spyOn(service as any, 'creditOrderBalances')
+        .mockResolvedValue(undefined);
+
+      await service.ensurePaidOrderBalances(order, driverId);
+
+      expect(paymentModel.findOne).toHaveBeenCalledWith({
+        _id: canonical._id,
+        status: 'paid',
+      });
+      expect(creditSpy).toHaveBeenCalledWith(order, canonical, driverId);
     });
 
     it('succès tardif après expiration : re-réserve le stock avant de créditer', async () => {
@@ -1199,6 +1223,180 @@ describe('PaymentsService — paiement mobile money direct', () => {
 
       await (service as any).applyPayinStatus(payment, order, 'payin_error', { status: 'payin_error' });
       expect(restore).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('creditOrderBalances — idempotence par commande', () => {
+    const driverId = new Types.ObjectId();
+    const otherDriverId = new Types.ObjectId();
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    function v3Order(overrides: Record<string, any> = {}) {
+      return makeOrder({
+        restaurantId: RESTAURANT_ID,
+        pricingSnapshot: {
+          itemsSubtotal: 5000,
+          packagingTotal: 400,
+          deliveryFee: 1500,
+          categorySystemFeeTotal: 300,
+          promoDiscount: 0,
+          platformFee: 345,
+          paymentAmount: 7245,
+          grandTotal: 7245,
+          balanceDistributionVersion: 3,
+        },
+        ...overrides,
+      });
+    }
+
+    function mockExisting(rows: any[]) {
+      const lean = jest.fn().mockResolvedValue(rows);
+      const select = jest.fn().mockReturnValue({ lean });
+      const find = jest.fn().mockReturnValue({ select });
+      (service as any).transactionModel = { find };
+      return { find, select, lean };
+    }
+
+    it('ne crédite que les parts absentes (idempotence par commande)', async () => {
+      mockExisting([
+        { reason: 'order_system_share', userId: null },
+        { reason: 'order_restaurant_share', userId: null },
+      ]);
+      const record = jest
+        .spyOn(service as any, 'recordOrderBalanceTransaction')
+        .mockResolvedValue(true);
+      const order = v3Order();
+
+      const inserted = await (service as any).creditOrderBalances(
+        order,
+        makeStoredPayment({ status: 'paid' }),
+        driverId,
+      );
+
+      expect(inserted).toBe(1);
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(record.mock.calls[0][0]).toMatchObject({
+        reason: 'order_delivery_share',
+        ownerType: 'user',
+      });
+      expect(orderModel.updateOne).toHaveBeenCalledWith(
+        { _id: order._id },
+        { $set: { driverShareSettledAt: expect.any(Date) } },
+        { session },
+      );
+    });
+
+    it('refuse une répartition v3 qui ne couvre pas le montant encaissé', async () => {
+      mockExisting([]);
+      const record = jest
+        .spyOn(service as any, 'recordOrderBalanceTransaction')
+        .mockResolvedValue(true);
+      const order = makeOrder({
+        pricingSnapshot: {
+          deliveryFee: 0,
+          categorySystemFeeTotal: 0,
+          promoDiscount: 0,
+          platformFee: 0,
+          paymentAmount: 4200,
+          balanceDistributionVersion: 3,
+        },
+      });
+
+      const inserted = await (service as any).creditOrderBalances(
+        order,
+        makeStoredPayment({ status: 'paid' }),
+        driverId,
+      );
+
+      expect(inserted).toBe(0);
+      expect(record).not.toHaveBeenCalled();
+      // La commande est marquée pour sortir des crons de reprise.
+      expect(orderModel.updateOne).toHaveBeenCalledWith(
+        { _id: order._id, settlementError: null },
+        {
+          $set: {
+            settlementError: 'inconsistent_distribution',
+            driverShareSettledAt: expect.any(Date),
+          },
+        },
+      );
+    });
+
+    it('ne paie pas une seconde fois un livreur différent et signale l’anomalie', async () => {
+      mockExisting([
+        { reason: 'order_system_share', userId: null },
+        { reason: 'order_restaurant_share', userId: null },
+        { reason: 'order_delivery_share', userId: otherDriverId },
+      ]);
+      const record = jest
+        .spyOn(service as any, 'recordOrderBalanceTransaction')
+        .mockResolvedValue(true);
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const order = v3Order();
+
+      const inserted = await (service as any).creditOrderBalances(
+        order,
+        makeStoredPayment({ status: 'paid' }),
+        driverId,
+      );
+
+      expect(inserted).toBe(0);
+      expect(record).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('another driver'));
+      expect(orderModel.updateOne).toHaveBeenCalled();
+    });
+  });
+
+  describe('crons de réconciliation', () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('reconcilePaidOrderBalances ne crédite qu’une fois par commande', async () => {
+      (service as any).cronLease = { acquire: jest.fn().mockResolvedValue(true) };
+      const first = makeStoredPayment({ status: 'paid' });
+      const second = makeStoredPayment({ status: 'paid' });
+      const limit = jest.fn().mockResolvedValue([first, second]);
+      const sort = jest.fn().mockReturnValue({ limit });
+      paymentModel.find.mockReturnValue({ sort });
+
+      const canonical = makeStoredPayment({ status: 'paid' });
+      paymentModel.findOne.mockResolvedValueOnce(canonical);
+      const order = makeOrder({
+        paymentStatus: 'paid',
+        paidPaymentId: canonical._id,
+      });
+      orderModel.findById.mockResolvedValue(order);
+      const credit = jest
+        .spyOn(service as any, 'creditOrderBalances')
+        .mockResolvedValue(1);
+
+      await service.reconcilePaidOrderBalances();
+
+      expect(credit).toHaveBeenCalledTimes(1);
+      expect(credit).toHaveBeenCalledWith(order, canonical, undefined);
+    });
+
+    it('le cron livreur ne prend que les commandes non réglées, de la plus ancienne à la plus récente', async () => {
+      (service as any).cronLease = { acquire: jest.fn().mockResolvedValue(true) };
+      const select = jest.fn().mockResolvedValue([]);
+      const limit = jest.fn().mockReturnValue({ select });
+      const sort = jest.fn().mockReturnValue({ limit });
+      orderModel.find.mockReturnValue({ sort });
+
+      await service.reconcileDeliveredDriverBalances();
+
+      expect(orderModel.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          driverShareSettledAt: null,
+          settlementError: null,
+        }),
+      );
+      expect(sort).toHaveBeenCalledWith({ updatedAt: 1 });
+      expect(limit).toHaveBeenCalledWith(200);
     });
   });
 });

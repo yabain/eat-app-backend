@@ -1,8 +1,8 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { timingSafeEqual } from 'crypto';
+import { createHash, timingSafeEqual } from 'crypto';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { Balance, BalanceAccountType, BalanceDocument } from '../../database/schemas/balance.schema';
 import { BalanceTransaction, BalanceTransactionDocument } from '../../database/schemas/balance-transaction.schema';
@@ -14,7 +14,10 @@ import { CronLeaseService } from '../../common/cron-lease/cron-lease.service';
 import { Payment, PaymentDocument } from '../../database/schemas/payment.schema';
 import { UserRole } from '../../common/enums/roles.enum';
 import { buildPaginationMeta, normalizePagination } from '../../common/pagination/paginate';
-import { DigikuntzProvider } from '../payments/providers/digikuntz.provider';
+import {
+  DigikuntzIdempotencyInProgressError,
+  DigikuntzProvider,
+} from '../payments/providers/digikuntz.provider';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AdminBalanceOperationDto } from './dto/admin-balance-operation.dto';
 import { CreateWithdrawalDto } from './dto/create-withdrawal.dto';
@@ -23,6 +26,11 @@ import {
   detectCameroonMobileMoneyOperator,
   normalizeCameroonPhone,
 } from '../../common/utils/cameroon-mobile-money.util';
+
+function envDuration(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 @Injectable()
 export class BalancesService {
@@ -58,29 +66,6 @@ export class BalancesService {
     const userId = scope?.userId ? String(scope.userId) : '';
     return `${ownerType}|${restaurantId}|${userId}`;
   }
-
-  /**
-   * Renvoie l'ensemble des scopes ayant une withdrawal NON soldée
-   * (pending/gateway_unavailable/approved). Ces scopes ont leur solde « gelé »
-   * — tout cron de réconciliation doit les skipper pour ne pas écraser le
-   * débit/refund déjà appliqué par `$inc`.
-   */
-  async getScopesWithUnresolvedWithdrawals(): Promise<Set<string>> {
-    const rows = await this.withdrawalModel.aggregate([
-      { $match: { status: { $in: ['pending', 'gateway_unavailable', 'approved'] } } },
-      {
-        $group: {
-          _id: {
-            ownerType: '$ownerType',
-            restaurantId: '$restaurantId',
-            userId: '$userId',
-          },
-        },
-      },
-    ]);
-    return new Set(rows.map((row: any) => this.scopeKey(row._id)));
-  }
-
 
   private constantTimeEquals(a: string, b: string): boolean {
     const ba = Buffer.from(a, 'utf8');
@@ -323,12 +308,23 @@ export class BalancesService {
 
       const map = new Map<string, { scope: any; balance: number; currency?: string }>();
       for (const row of bts) {
-        const key = this.scopeKey(row._id);
-        map.set(key, {
-          scope: row._id,
-          balance: Number(row.balance || 0),
-          currency: row.currency,
-        });
+        // Le compte système est unique (`0000000`) : les lignes système
+        // peuvent porter un userId/restaurantId (financement admin), elles
+        // doivent donc être additionnées, jamais écrasées l'une par l'autre.
+        const scope = row._id.ownerType === 'system'
+          ? { ownerType: 'system', restaurantId: null, userId: null }
+          : row._id;
+        const key = this.scopeKey(scope);
+        const current = map.get(key);
+        if (current) {
+          current.balance += Number(row.balance || 0);
+        } else {
+          map.set(key, {
+            scope,
+            balance: Number(row.balance || 0),
+            currency: row.currency,
+          });
+        }
       }
 
       for (const { scope: scopeId, balance, currency } of map.values()) {
@@ -918,15 +914,136 @@ export class BalancesService {
       throw new BadRequestException('Unsupported MTN Mobile Money or Orange Money number');
     }
 
-    // Préchecking: solde suffisant côté Eat (hors transaction pour ne pas
-    // tenir un lock pendant l'appel réseau à DigiKuntz).
+    const actorId = this.oid(actor.sub);
+    // Sans clé client, une clé déterministe par minute protège aussi les
+    // double-clics concurrents (l'index unique tranche, pas un read-then-act).
+    if (String(dto.idempotencyKey || '').startsWith('svc:')) {
+      throw new BadRequestException('Reserved idempotency key prefix');
+    }
+    const idempotencyKey = String(dto.idempotencyKey || '').trim()
+      || this.autoIdempotencyKey(actorId, amount, dto.phone);
+
+    // 1) Rejeu idempotent : une même clé ne crée jamais un second retrait.
+    const existing = await this.withdrawalModel.findOne({
+      requestedBy: actorId,
+      idempotencyKey,
+    });
+    if (existing) {
+      const sameScope =
+        existing.ownerType === scope.ownerType &&
+        String(existing.restaurantId || '') === String(scope.restaurantId || '') &&
+        String(existing.userId || '') === String(scope.userId || '');
+      if (
+        !sameScope ||
+        Number(existing.amount) !== amount ||
+        existing.phone !== dto.phone ||
+        existing.accountBankCode !== accountBankCode
+      ) {
+        throw new ConflictException(
+          'Idempotency key already used with different withdrawal parameters',
+        );
+      }
+      return this.replayWithdrawal(existing, 'idempotent_replay');
+    }
+
+    // 2) Sans clé client, tant qu'un retrait identique est non résolu
+    //    (pending/gateway_unavailable/approved), on renvoie ce retrait au
+    //    lieu d'en créer un second. La fenêtre couvre toute la durée de
+    //    résolution, pas seulement 60 secondes.
+    if (!dto.idempotencyKey) {
+      const unresolved = await this.withdrawalModel
+        .findOne({
+          requestedBy: actorId,
+          amount,
+          phone: dto.phone,
+          status: { $in: ['pending', 'gateway_unavailable', 'approved'] },
+        })
+        .sort({ createdAt: -1 });
+      if (unresolved) {
+        return this.replayWithdrawal(unresolved, 'recent_duplicate');
+      }
+    }
+
+    // 3) Précheck rapide hors transaction (le re-check transactionnel reste
+    //    la référence).
     const preAvailable = await this.balanceFor(scope);
     if (amount > preAvailable) throw new BadRequestException('Insufficient balance');
 
-    // 1) Contact DigiKuntz EN PREMIER. L'ID du retrait est généré upfront pour
-    //    pouvoir le passer en narration sans avoir encore écrit en base.
+    // 4) Persister le retrait ET débiter le solde AVANT l'appel provider.
+    //    Un payout accepté ne peut donc plus exister sans trace locale.
     const withdrawalId = new Types.ObjectId();
-    const requester = await this.userModel.findById(this.oid(actor.sub));
+    const now = new Date();
+    let debit: any = null;
+    let balanceAfter = 0;
+    let created: any = null;
+
+    const session = await this.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const available = await this.balanceFor(scope, session);
+        if (amount > available) throw new BadRequestException('Insufficient balance');
+
+        const [withdrawal] = await this.withdrawalModel.create([{
+          _id: withdrawalId,
+          ...scope,
+          requestedBy: actorId,
+          idempotencyKey,
+          amount,
+          phone: dto.phone,
+          accountBankCode,
+          currency: 'XAF',
+          // État initial : le payout n'est pas encore confirmé. Si le
+          // processus s'arrête avant l'appel provider, le cron de retry
+          // reprend l'initiation avec la même clé d'idempotence.
+          status: 'gateway_unavailable',
+          provider: 'digikuntz',
+          providerStatus: 'initiating',
+          gatewayUnavailableSince: now,
+          gatewayUnavailableAttempts: 0,
+          lastGatewayRetryAt: now,
+          nextGatewayRetryAt: new Date(now.getTime() + this.minGatewayRetryIntervalMs),
+        }], { session });
+
+        debit = await this.recordBalanceTransaction({
+          ...scope,
+          withdrawalId: withdrawal._id,
+          amount: -amount,
+          type: 'debit',
+          reason: 'withdrawal_request',
+          currency: 'XAF',
+          note: `Retrait ${accountBankCode === 'MTN' ? 'MTN Mobile Money' : 'Orange Money'} ${dto.phone}`,
+          createdBy: actorId,
+        }, session);
+
+        balanceAfter = await this.refreshCachedBalance(scope, session);
+        created = withdrawal;
+
+        this.logger.log(
+          `Withdrawal ${withdrawal._id} persisted before payout — amount=${amount}, balanceBefore=${available}, balanceAfter=${balanceAfter}`,
+        );
+      });
+    } catch (error: any) {
+      // Deux requêtes concurrentes avec la même clé (client ou auto) :
+      // l'index unique tranche. On renvoie le retrait gagnant si visible,
+      // sinon un 409 explicite (jamais un 500 brut).
+      if (error?.code === 11000) {
+        const duplicate = await this.withdrawalModel.findOne({
+          requestedBy: actorId,
+          idempotencyKey,
+        });
+        if (duplicate) {
+          return this.replayWithdrawal(duplicate, 'idempotent_replay');
+        }
+        throw new ConflictException('Withdrawal creation already in progress');
+      }
+      throw error;
+    } finally {
+      await session.endSession();
+    }
+
+    // 5) Appel provider APRÈS le commit. La clé d'idempotence provider est
+    //    l'ID du retrait : un retry ne peut pas créer un second payout.
+    const requester = await this.userModel.findById(actorId);
     const outcome = await this.callDigikuntzPayoutOutcome({
       amount,
       phone: dto.phone,
@@ -936,103 +1053,226 @@ export class BalancesService {
       idempotencyKey: String(withdrawalId),
     });
 
-    // 2) Selon la réponse de DigiKuntz, on enregistre la transaction.
-    //    - SUCCESS → status='pending' (en attente de l'état final DigiKuntz)
-    //    - GATEWAY_UNAVAILABLE → status='gateway_unavailable' (le cron retentera)
-    //    - PROVIDER_ERROR (4xx) → on lève une exception → AUCUNE écriture en BD
     if (outcome.kind === 'provider_error') {
-      this.logger.warn(
-        `Withdrawal aborted (no DB write) — providerMessage="${outcome.providerMessage}", raw="${outcome.rawError}"`,
+      const transition = await this.transitionWithdrawalStatus(
+        String(withdrawalId),
+        'failed',
+        outcome.providerMessage,
+        actor.sub,
+        {
+          providerStatus: 'payout_error',
+          providerPayload: {
+            error: outcome.rawError,
+            providerMessage: outcome.providerMessage,
+          },
+        } as any,
+        // Refus synchrone : le client reçoit déjà le 400 avec le message,
+        // inutile de notifier tous les admins.
+        { notify: false },
+      );
+      const withdrawal = transition?.withdrawal || created;
+      this.recordWithdrawalAudit(
+        actor,
+        withdrawal,
+        amount,
+        dto.phone,
+        idempotencyKey,
+        'failed',
       );
       throw new BadRequestException(
         outcome.providerMessage || 'Retrait refusé par le service de paiement.',
       );
     }
 
-    const localStatus: WithdrawalStatus =
-      outcome.kind === 'gateway_unavailable' ? 'gateway_unavailable' : 'pending';
-    const now = new Date();
-
-    const session = await this.connection.startSession();
-    try {
-      let result: any;
-      await session.withTransaction(async () => {
-        // Re-check de solde dans la transaction (race protection).
-        const available = await this.balanceFor(scope, session);
-        if (amount > available) throw new BadRequestException('Insufficient balance');
-
-        const [withdrawal] = await this.withdrawalModel.create([{
-          _id: withdrawalId,
-          ...scope,
-          requestedBy: this.oid(actor.sub),
-          amount,
-          phone: dto.phone,
-          accountBankCode,
-          currency: 'XAF',
-          status: localStatus,
-          provider: 'digikuntz',
-          ...(outcome.kind === 'success'
-            ? {
-                providerRef: outcome.providerRef,
-                transactionRef: outcome.transactionRef,
-                providerStatus: outcome.providerStatus,
-                providerPayload: outcome.providerPayload,
-              }
-            : {
-                providerStatus: 'gateway_unavailable',
-                providerPayload: {
-                  reason: 'gateway_unavailable',
-                  error: outcome.rawError,
-                  attemptedAt: now.toISOString(),
-                },
-                gatewayUnavailableSince: now,
-                gatewayUnavailableAttempts: 1,
-                lastGatewayRetryAt: now,
-              }),
-        }], { session });
-
-        // Débit initial : insertion directe via `recordBalanceTransaction`.
-        // L'unique index (withdrawalId, reason) sur BalanceTransaction
-        // prévient tout double-insert au niveau Mongo. La transaction
-        // session garantit l'atomicité avec la création de la withdrawal.
-        const debit = await this.recordBalanceTransaction({
-          ...scope,
-          withdrawalId: withdrawal._id,
-          amount: -amount,
-          type: 'debit',
-          reason: 'withdrawal_request',
-          currency: 'XAF',
-          note: `Retrait ${accountBankCode === 'MTN' ? 'MTN Mobile Money' : 'Orange Money'} ${dto.phone}`,
-          createdBy: this.oid(actor.sub),
-        }, session);
-
-        const newBalance = await this.refreshCachedBalance(scope, session);
-        this.logger.log(
-          `Withdrawal ${withdrawal._id} created — amount=${amount}, status=${localStatus}, balanceBefore=${available}, balanceAfter=${newBalance}, debitId=${(debit as any)?._id}`,
-        );
-
-        result = {
-          withdrawal,
-          debit,
-          balance: newBalance,
-        };
-      });
-      this.auditLogs.record({
-        actorId: actor.sub,
-        actorEmail: actor.email,
-        actorRole: actor.role,
-        action: 'withdrawal.create',
-        resourceType: 'withdrawal',
-        resourceId: String(result.withdrawal._id),
-        metadata: { amount, phone: dto.phone, status: localStatus },
-        method: 'POST',
-        path: '/balances/withdrawals',
-        statusCode: 200,
-      });
-      return { ...result, execution: { withdrawal: result.withdrawal, balance: result.balance } };
-    } finally {
-      await session.endSession();
+    if (outcome.kind === 'idempotency_in_progress') {
+      const transition = await this.transitionWithdrawalStatus(
+        String(withdrawalId),
+        'gateway_unavailable',
+        undefined,
+        actor.sub,
+        {
+          providerStatus: 'idempotency_in_progress',
+          providerPayload: {
+            reason: 'idempotency_in_progress',
+            error: outcome.rawError,
+            attemptedAt: new Date().toISOString(),
+          },
+          lastGatewayRetryAt: new Date(),
+          // Le provider bloque la clé jusqu'à 24 h : on re-tente avec un
+          // backoff long, sans jamais rembourser.
+          nextGatewayRetryAt: new Date(Date.now() + 15 * 60 * 1000),
+          gatewayUnavailableAttempts: 1,
+        } as any,
+      );
+      const withdrawal = transition?.withdrawal || created;
+      this.recordWithdrawalAudit(
+        actor,
+        withdrawal,
+        amount,
+        dto.phone,
+        idempotencyKey,
+        'gateway_unavailable',
+      );
+      return {
+        withdrawal,
+        debit,
+        balance: transition?.balance ?? balanceAfter,
+        execution: { withdrawal, balance: transition?.balance ?? balanceAfter },
+      };
     }
+
+    if (outcome.kind === 'gateway_unavailable') {
+      const transition = await this.transitionWithdrawalStatus(
+        String(withdrawalId),
+        'gateway_unavailable',
+        undefined,
+        actor.sub,
+        {
+          providerStatus: 'gateway_unavailable',
+          providerPayload: {
+            reason: 'gateway_unavailable',
+            error: outcome.rawError,
+            attemptedAt: new Date().toISOString(),
+          },
+          lastGatewayRetryAt: new Date(),
+          nextGatewayRetryAt: new Date(Date.now() + this.minGatewayRetryIntervalMs),
+          gatewayUnavailableAttempts: 1,
+        } as any,
+      );
+      const withdrawal = transition?.withdrawal || created;
+      this.recordWithdrawalAudit(
+        actor,
+        withdrawal,
+        amount,
+        dto.phone,
+        idempotencyKey,
+        'gateway_unavailable',
+      );
+      return {
+        withdrawal,
+        debit,
+        balance: transition?.balance ?? balanceAfter,
+        execution: { withdrawal, balance: transition?.balance ?? balanceAfter },
+      };
+    }
+
+    // Un succès sans référence exploitable ne doit pas rester `pending` :
+    // aucun cron ne pourrait le retrouver. On repasse par le retry avec la
+    // même clé d'idempotence provider.
+    if (!outcome.providerRef && !outcome.transactionRef) {
+      const transition = await this.transitionWithdrawalStatus(
+        String(withdrawalId),
+        'gateway_unavailable',
+        undefined,
+        actor.sub,
+        {
+          providerStatus: 'missing_provider_reference',
+          providerPayload: {
+            reason: 'missing_provider_reference',
+            providerStatus: outcome.providerStatus,
+            providerPayload: outcome.providerPayload,
+            attemptedAt: new Date().toISOString(),
+          },
+          lastGatewayRetryAt: new Date(),
+          nextGatewayRetryAt: new Date(Date.now() + this.minGatewayRetryIntervalMs),
+          gatewayUnavailableAttempts: 1,
+        } as any,
+      );
+      const withdrawal = transition?.withdrawal || created;
+      this.recordWithdrawalAudit(
+        actor,
+        withdrawal,
+        amount,
+        dto.phone,
+        idempotencyKey,
+        'gateway_unavailable',
+      );
+      return {
+        withdrawal,
+        debit,
+        balance: transition?.balance ?? balanceAfter,
+        execution: { withdrawal, balance: transition?.balance ?? balanceAfter },
+      };
+    }
+
+    const nextStatus = this.localStatusForProviderStatus(outcome.providerStatus) || 'pending';
+    const transition = await this.transitionWithdrawalStatus(
+      String(withdrawalId),
+      nextStatus,
+      undefined,
+      actor.sub,
+      {
+        providerRef: outcome.providerRef,
+        transactionRef: outcome.transactionRef,
+        providerStatus: outcome.providerStatus,
+        providerPayload: outcome.providerPayload,
+      } as any,
+    );
+    const withdrawal = transition?.withdrawal || created;
+    this.recordWithdrawalAudit(
+      actor,
+      withdrawal,
+      amount,
+      dto.phone,
+      idempotencyKey,
+      nextStatus,
+    );
+    return {
+      withdrawal,
+      debit,
+      balance: transition?.balance ?? balanceAfter,
+      execution: { withdrawal, balance: transition?.balance ?? balanceAfter },
+    };
+  }
+
+  private recordWithdrawalAudit(
+    actor: any,
+    withdrawal: any,
+    amount: number,
+    phone: string,
+    idempotencyKey: string,
+    status: string,
+  ) {
+    this.auditLogs.record({
+      actorId: actor?.sub,
+      actorEmail: actor?.email,
+      actorRole: actor?.role,
+      action: 'withdrawal.create',
+      resourceType: 'withdrawal',
+      resourceId: String(withdrawal?._id),
+      metadata: { amount, phone, status, idempotencyKey },
+      method: 'POST',
+      path: '/balances/withdrawals',
+      statusCode: status === 'failed' ? 400 : 200,
+    });
+  }
+
+  /**
+   * Clé déterministe pour les clients qui n'en fournissent pas : deux
+   * requêtes identiques dans la même minute produisent la même clé, donc
+   * l'index unique empêche un double retrait même en concurrence.
+   */
+  private autoIdempotencyKey(actorId: Types.ObjectId, amount: number, phone: string) {
+    const minute = Math.floor(Date.now() / 60_000);
+    const digest = createHash('sha256')
+      .update(`${String(actorId)}|${amount}|${phone}|${minute}`)
+      .digest('hex');
+    return `svc:${digest}`;
+  }
+
+  private async replayWithdrawal(withdrawal: any, reason: string) {
+    if (['failed', 'rejected'].includes(withdrawal.status)) {
+      throw new BadRequestException(withdrawal.note || 'Withdrawal failed');
+    }
+    const balance = await this.balanceFor(this.scopeForWithdrawal(withdrawal));
+    return {
+      withdrawal,
+      debit: null,
+      balance,
+      execution: { withdrawal, balance },
+      idempotentReplay: true,
+      replayReason: reason,
+    };
   }
 
   /**
@@ -1059,6 +1299,7 @@ export class BalancesService {
         providerPayload?: any;
       }
     | { kind: 'gateway_unavailable'; rawError: string }
+    | { kind: 'idempotency_in_progress'; rawError: string }
     | { kind: 'provider_error'; providerMessage: string; rawError: string }
   > {
     try {
@@ -1079,6 +1320,11 @@ export class BalancesService {
       };
     } catch (error: any) {
       const rawError = String(error?.message || error || '');
+      // 409 d'idempotence : la requête initiale est encore en cours. Ne jamais
+      // la traiter comme un refus (refund) ni créer un nouveau payout.
+      if (error instanceof DigikuntzIdempotencyInProgressError) {
+        return { kind: 'idempotency_in_progress', rawError };
+      }
       if (error instanceof ServiceUnavailableException) {
         return { kind: 'gateway_unavailable', rawError };
       }
@@ -1088,10 +1334,10 @@ export class BalancesService {
   }
 
   /**
-   * Tente d'initier une withdrawal déjà existante chez DigiKuntz (utilisé
-   * uniquement par le cron de retry des `gateway_unavailable`). À la création
-   * initiale, on passe par `createWithdrawal` qui appelle DigiKuntz AVANT
-   * d'écrire en base.
+   * Tente d'initier une withdrawal déjà persistée (cron de retry des
+   * `gateway_unavailable`). La création initiale persiste le retrait et le
+   * débit AVANT d'appeler DigiKuntz ; cette méthode réutilise le même ID
+   * comme clé d'idempotence provider.
    */
   private async executeWithdrawal(withdrawalId: Types.ObjectId, actor: any) {
     const withdrawal = await this.withdrawalModel.findById(withdrawalId);
@@ -1108,6 +1354,30 @@ export class BalancesService {
       narration: `Retrait Eat App ${withdrawal._id}`,
       idempotencyKey: String(withdrawal._id),
     });
+
+    if (outcome.kind === 'idempotency_in_progress') {
+      const now = new Date();
+      return this.transitionWithdrawalStatus(
+        String(withdrawal._id),
+        'gateway_unavailable',
+        undefined,
+        actor?.sub,
+        {
+          providerStatus: 'idempotency_in_progress',
+          providerPayload: {
+            reason: 'idempotency_in_progress',
+            error: outcome.rawError,
+            attemptedAt: now.toISOString(),
+          },
+          ...(withdrawal.gatewayUnavailableSince
+            ? {}
+            : { gatewayUnavailableSince: now }),
+          lastGatewayRetryAt: now,
+          nextGatewayRetryAt: new Date(now.getTime() + 15 * 60 * 1000),
+          gatewayUnavailableAttempts: (withdrawal.gatewayUnavailableAttempts || 0) + 1,
+        } as any,
+      );
+    }
 
     if (outcome.kind === 'gateway_unavailable') {
       const now = new Date();
@@ -1127,6 +1397,7 @@ export class BalancesService {
             ? {}
             : { gatewayUnavailableSince: now }),
           lastGatewayRetryAt: now,
+          nextGatewayRetryAt: new Date(now.getTime() + this.minGatewayRetryIntervalMs),
           gatewayUnavailableAttempts: (withdrawal.gatewayUnavailableAttempts || 0) + 1,
         } as any,
       );
@@ -1148,6 +1419,26 @@ export class BalancesService {
             providerMessage: outcome.providerMessage,
           },
         },
+      );
+    }
+
+    if (!outcome.providerRef && !outcome.transactionRef) {
+      return this.transitionWithdrawalStatus(
+        String(withdrawal._id),
+        'gateway_unavailable',
+        undefined,
+        actor?.sub,
+        {
+          providerStatus: 'missing_provider_reference',
+          providerPayload: {
+            reason: 'missing_provider_reference',
+            providerStatus: outcome.providerStatus,
+            providerPayload: outcome.providerPayload,
+            attemptedAt: new Date().toISOString(),
+          },
+          lastGatewayRetryAt: new Date(),
+          gatewayUnavailableAttempts: (withdrawal.gatewayUnavailableAttempts || 0) + 1,
+        } as any,
       );
     }
 
@@ -1173,6 +1464,7 @@ export class BalancesService {
     note?: string,
     processedBy?: string,
     providerFields?: Partial<WithdrawalRequest>,
+    options?: { notify?: boolean },
   ) {
     const session = await this.connection.startSession();
     try {
@@ -1189,6 +1481,42 @@ export class BalancesService {
           return;
         }
         if (['paid', 'rejected', 'failed'].includes(withdrawal.status)) {
+          // Succès provider tardif après un échec/refus déjà remboursé :
+          // on ne bascule pas automatiquement (cela ferait payout + refund
+          // sans débit compensatoire). On trace pour réconciliation manuelle.
+          if (
+            ['failed', 'rejected'].includes(withdrawal.status) &&
+            ['pending', 'paid'].includes(nextStatus)
+          ) {
+            this.logger.error(
+              `Late provider success for ${withdrawal.status} withdrawal ${withdrawal._id} — manual reconciliation required`,
+            );
+            withdrawal.lateProviderSuccessAt = new Date();
+            Object.assign(withdrawal, providerFields || {});
+            await withdrawal.save({ session });
+            const scope = this.scopeForWithdrawal(withdrawal);
+            result = {
+              withdrawal,
+              refunded: false,
+              lateSuccess: true,
+              balance: await this.refreshCachedBalance(scope, session),
+            };
+            return;
+          }
+          // Un payout déjà payé ne redevient jamais pending/failed.
+          if (withdrawal.status === 'paid' && ['pending', 'failed'].includes(nextStatus)) {
+            this.logger.warn(
+              `Ignoring ${nextStatus} transition for already paid withdrawal ${withdrawal._id}`,
+            );
+            const scope = this.scopeForWithdrawal(withdrawal);
+            result = {
+              withdrawal,
+              refunded: false,
+              ignored: true,
+              balance: await this.refreshCachedBalance(scope, session),
+            };
+            return;
+          }
           throw new BadRequestException(`Withdrawal is already ${withdrawal.status}`);
         }
 
@@ -1202,6 +1530,7 @@ export class BalancesService {
         // dans ce cas providerFields aura déjà repositionné les bons champs).
         if (nextStatus !== 'gateway_unavailable') {
           withdrawal.gatewayUnavailableSince = null;
+          withdrawal.nextGatewayRetryAt = null;
           // On garde `gatewayUnavailableAttempts` pour traçabilité.
         }
         await withdrawal.save({ session });
@@ -1235,7 +1564,14 @@ export class BalancesService {
           balance: await this.refreshCachedBalance(scope, session),
         };
       });
-      if (result?.withdrawal && nextStatus === 'failed') {
+      if (
+        result?.withdrawal &&
+        nextStatus === 'failed' &&
+        options?.notify !== false &&
+        // Une seule notification : seulement quand ce passage a réellement
+        // inséré le remboursement (pas sur un rejeu failed → failed).
+        result?.refunded
+      ) {
         void this.notifyWithdrawalFailure(result.withdrawal as WithdrawalRequestDocument, note);
       }
       return result;
@@ -1315,7 +1651,15 @@ export class BalancesService {
   async updateWithdrawalStatus(withdrawalId: string, dto: UpdateWithdrawalStatusDto, actor: any) {
     this.assertAdmin(actor);
     const prev = await this.withdrawalModel.findById(withdrawalId).select('status');
-    const result = await this.transitionWithdrawalStatus(withdrawalId, dto.status as WithdrawalStatus, dto.note, actor.sub);
+    const result: any = await this.transitionWithdrawalStatus(
+      withdrawalId,
+      dto.status as WithdrawalStatus,
+      dto.note,
+      actor.sub,
+    );
+
+    const applied = !result?.ignored && !result?.lateSuccess;
+    const effectiveStatus = result?.withdrawal?.status || dto.status;
     this.auditLogs.record({
       actorId: actor.sub,
       actorEmail: actor.email,
@@ -1323,11 +1667,24 @@ export class BalancesService {
       action: 'withdrawal.update_status',
       resourceType: 'withdrawal',
       resourceId: withdrawalId,
-      metadata: { from: prev?.status, to: dto.status, note: dto.note },
+      metadata: {
+        from: prev?.status,
+        requested: dto.status,
+        effective: effectiveStatus,
+        applied,
+        lateSuccess: Boolean(result?.lateSuccess),
+        note: dto.note,
+      },
       method: 'PATCH',
       path: `/balances/withdrawals/${withdrawalId}/status`,
-      statusCode: 200,
+      statusCode: applied ? 200 : 409,
     });
+
+    if (!applied) {
+      throw new ConflictException(
+        `Withdrawal is already ${effectiveStatus}; transition not applied`,
+      );
+    }
     return result;
   }
 
@@ -1394,11 +1751,9 @@ export class BalancesService {
 
       for (const withdrawal of withdrawals) {
         try {
-          // Lookup prioritaire par transactionRef ; fallback sur providerRef
-          // si la ref n'a pas pu être capturée à l'initiation.
-          const remote = withdrawal.transactionRef
-            ? await this.digikuntzProvider.getTransactionStatusByRef(withdrawal.transactionRef)
-            : await this.digikuntzProvider.getTransactionStatus(withdrawal.providerRef || '');
+          // Lookup par transactionRef puis providerRef, avec repli sur la route
+          // documentée des payouts si nécessaire.
+          const remote = await this.fetchProviderWithdrawalStatus(withdrawal);
           const providerStatus = remote?.status;
           const nextStatus = this.localStatusForProviderStatus(providerStatus);
           if (!remote || !providerStatus || !nextStatus) continue;
@@ -1435,9 +1790,50 @@ export class BalancesService {
    *
    * Idempotent grâce au verrou `isRetryingGatewayWithdrawals`.
    */
+  private async fetchProviderWithdrawalStatus(withdrawal: WithdrawalRequestDocument) {
+    try {
+      let remote: { id: string; status: string; data: any } | null = null;
+
+      if (withdrawal.transactionRef) {
+        remote = await this.digikuntzProvider.getTransactionStatusByRef(
+          withdrawal.transactionRef,
+        );
+      }
+      if (!remote && withdrawal.providerRef) {
+        remote = await this.digikuntzProvider.getTransactionStatus(withdrawal.providerRef);
+      }
+      // Route documentée des payouts (fallback si les routes de statut de
+      // transaction ne couvrent pas les retraits).
+      if (!remote && (withdrawal.providerRef || withdrawal.transactionRef)) {
+        remote = await this.digikuntzProvider.getPayoutStatus({
+          providerRef: withdrawal.providerRef,
+          transactionRef: withdrawal.transactionRef,
+        });
+      }
+
+      return remote;
+    } catch (error: any) {
+      this.logger.warn(
+        `Unable to fetch provider status for withdrawal ${withdrawal._id}: ${error?.message || error}`,
+      );
+      return null;
+    }
+  }
+
   private isRetryingGatewayWithdrawals = false;
-  private readonly gatewayUnavailableTimeoutMs = Number(
-    process.env.DIGIKUNTZ_GATEWAY_TIMEOUT_MS || 60 * 60 * 1000,
+  private readonly gatewayUnavailableTimeoutMs = envDuration(
+    'DIGIKUNTZ_GATEWAY_TIMEOUT_MS',
+    60 * 60 * 1000,
+  );
+  private readonly minGatewayRetryIntervalMs = envDuration(
+    'DIGIKUNTZ_RETRY_INTERVAL_MS',
+    60 * 1000,
+  );
+  // Au-delà de la TTL d'idempotence provider (24 h), re-tenter avec la même
+  // clé pourrait créer un nouveau payout : on s'arrête pour réconciliation.
+  private readonly idempotencyTtlMs = envDuration(
+    'DIGIKUNTZ_IDEMPOTENCY_TTL_MS',
+    24 * 60 * 60 * 1000,
   );
 
   @Cron(CronExpression.EVERY_MINUTE)
@@ -1450,37 +1846,145 @@ export class BalancesService {
     }
     this.isRetryingGatewayWithdrawals = true;
     try {
+      const now = new Date();
       const candidates = await this.withdrawalModel
-        .find({ status: 'gateway_unavailable' })
-        .sort({ gatewayUnavailableSince: 1 })
+        .find({
+          status: 'gateway_unavailable',
+          // Ne jamais laisser les lignes définitivement bloquées occuper le
+          // lot : elles seraient les plus anciennes et affameraient le cron.
+          providerStatus: { $nin: ['manual_reconciliation_required'] },
+          // Respecte le backoff sans re-scanner les lignes trop récentes.
+          $or: [
+            { nextGatewayRetryAt: null },
+            { nextGatewayRetryAt: { $lte: now } },
+          ],
+        })
+        .sort({ nextGatewayRetryAt: 1, gatewayUnavailableSince: 1 })
         .limit(50);
 
       for (const withdrawal of candidates) {
         try {
-          const since = withdrawal.gatewayUnavailableSince
-            ? new Date(withdrawal.gatewayUnavailableSince).getTime()
-            : Date.now();
+          // Déjà sorti de la boucle automatique (TTL d'idempotence dépassée).
+          if (withdrawal.providerStatus === 'manual_reconciliation_required') continue;
+
+          const sinceDate =
+            withdrawal.gatewayUnavailableSince ||
+            withdrawal.lastGatewayRetryAt ||
+            (withdrawal as any).updatedAt ||
+            new Date();
+          const since = new Date(sinceDate).getTime();
           const elapsed = Date.now() - since;
 
-          if (elapsed >= this.gatewayUnavailableTimeoutMs) {
-            // Timeout d'1 h dépassé : on déclare le retrait en échec.
-            // `transitionWithdrawalStatus` orchestre refund + notif user/admins.
+          // Évite de rappeler le provider tant que la tentative précédente
+          // est trop récente (création initiale ou retry précédent).
+          if (
+            withdrawal.nextGatewayRetryAt &&
+            Date.now() < new Date(withdrawal.nextGatewayRetryAt).getTime()
+          ) {
+            continue;
+          }
+          const lastAttempt = withdrawal.lastGatewayRetryAt
+            ? new Date(withdrawal.lastGatewayRetryAt).getTime()
+            : 0;
+          if (Date.now() - lastAttempt < this.minGatewayRetryIntervalMs) continue;
+
+          if (elapsed >= this.idempotencyTtlMs) {
+            // Dernière lecture (sans effet de bord) avant d'abandonner : un
+            // payout finalement accepté doit être résolu, pas poussé en
+            // réconciliation manuelle.
+            const remote = await this.fetchProviderWithdrawalStatus(withdrawal);
+            const remoteStatus = this.localStatusForProviderStatus(remote?.status);
+            if (remote && remoteStatus) {
+              await this.transitionWithdrawalStatus(
+                String(withdrawal._id),
+                remoteStatus,
+                undefined,
+                undefined,
+                {
+                  providerRef: remote.id || withdrawal.providerRef,
+                  transactionRef: remote.data?.transactionRef || withdrawal.transactionRef,
+                  providerStatus: remote.status,
+                  providerPayload: remote,
+                } as any,
+              );
+              this.logger.warn(
+                `Withdrawal ${withdrawal._id} exceeded the idempotency TTL but provider reports ${remote.status} — resolved as ${remoteStatus}`,
+              );
+              continue;
+            }
+
             await this.transitionWithdrawalStatus(
               String(withdrawal._id),
-              'failed',
+              'gateway_unavailable',
               undefined,
               undefined,
               {
-                providerStatus: 'gateway_timeout',
+                providerStatus: 'manual_reconciliation_required',
                 providerPayload: {
-                  reason: 'gateway_unavailable_timeout',
+                  reason: 'idempotency_ttl_expired',
                   unavailableSince: withdrawal.gatewayUnavailableSince,
                   attempts: withdrawal.gatewayUnavailableAttempts || 0,
                 },
-              },
+                nextGatewayRetryAt: null,
+              } as any,
             );
-            this.logger.warn(
-              `Withdrawal ${withdrawal._id} timed out in gateway_unavailable after ${Math.round(elapsed / 60_000)} min — marked failed`,
+            this.logger.error(
+              `Withdrawal ${withdrawal._id} exceeded the provider idempotency TTL (${Math.round(elapsed / 3_600_000)} h) — automatic retries stopped, manual reconciliation required`,
+            );
+            continue;
+          }
+
+          if (elapsed >= this.gatewayUnavailableTimeoutMs) {
+            // Avant de déclarer l'échec, on demande une dernière fois l'état
+            // au provider. Un payout accepté mais dont la réponse a été perdue
+            // ne doit pas être remboursé puis payé (double sortie d'argent).
+            const remote = await this.fetchProviderWithdrawalStatus(withdrawal);
+            const remoteStatus = this.localStatusForProviderStatus(remote?.status);
+            if (remote && remoteStatus) {
+              await this.transitionWithdrawalStatus(
+                String(withdrawal._id),
+                remoteStatus,
+                undefined,
+                undefined,
+                {
+                  providerRef: remote.id || withdrawal.providerRef,
+                  transactionRef: remote.data?.transactionRef || withdrawal.transactionRef,
+                  providerStatus: remote.status,
+                  providerPayload: remote,
+                } as any,
+              );
+              this.logger.warn(
+                `Withdrawal ${withdrawal._id} timed out but provider reports ${remote.status} — resolved as ${remoteStatus}`,
+              );
+              continue;
+            }
+
+            // Provider injoignable ou sans référence exploitable : on ne
+            // rembourse JAMAIS à l'aveugle. Un payout a pu être accepté alors
+            // que la réponse a été perdue ; le remboursement créerait une
+            // double sortie d'argent. Les fonds restent retenus et le retrait
+            // reste en `gateway_unavailable` pour réconciliation manuelle.
+            await this.transitionWithdrawalStatus(
+              String(withdrawal._id),
+              'gateway_unavailable',
+              undefined,
+              undefined,
+              {
+                providerStatus: 'unverified_timeout',
+                providerPayload: {
+                  reason: 'unverified_timeout',
+                  unavailableSince: withdrawal.gatewayUnavailableSince,
+                  attempts: withdrawal.gatewayUnavailableAttempts || 0,
+                  lastCheckedAt: new Date().toISOString(),
+                },
+                lastGatewayRetryAt: new Date(),
+                // Backoff : on ne re-sonde pas le provider toutes les minutes
+                // indéfiniment quand il ne peut rien confirmer.
+                nextGatewayRetryAt: new Date(Date.now() + 15 * 60 * 1000),
+              } as any,
+            );
+            this.logger.error(
+              `Withdrawal ${withdrawal._id} timed out after ${Math.round(elapsed / 60_000)} min without provider confirmation — funds held, manual reconciliation required`,
             );
             continue;
           }

@@ -8,6 +8,7 @@ import {
   Patch,
   Post,
   Query,
+  UnsupportedMediaTypeException,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -29,7 +30,7 @@ import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
-import { convertUploadToWebp } from '../../common/utils/convert-image.util';
+import { convertUploadToWebp, isConvertibleImageMime } from '../../common/utils/convert-image.util';
 import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
@@ -106,7 +107,7 @@ export class CategoriesController {
   @UseInterceptors(FileInterceptor('file', {
     storage: categoryUploadStorage,
     fileFilter: (_req, file, cb) => {
-      if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image uploads are allowed'), false);
+      if (!isConvertibleImageMime(file.mimetype)) return cb(new UnsupportedMediaTypeException('Unsupported image type'), false);
       cb(null, true);
     },
     limits: { fileSize: 5 * 1024 * 1024 },
@@ -126,6 +127,7 @@ export class CategoriesController {
   })
   @ApiOkResponse({ description: 'Image catégorie uploadée et enregistrée', type: CategoryResponseDto })
   async uploadImage(@Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('Category image file is required');
     const dest = resolveUploadDir('categories');
     const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
     file.filename = filename;

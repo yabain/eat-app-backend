@@ -38,6 +38,34 @@ npm run start:dev
 - `GET /api/payments/:orderId/status` : vue client du dernier paiement (`id`, `status`, `amount`, `outcome`, `operator`, `paymentLink` si valide, dates). Aucune donnée fournisseur (`callbackPayload`, `providerRef`, `transactionRef`) n'est renvoyée.
 - `POST /api/payments/:id/resolve` : **administrateur**. Force l'issue d'un paiement ambigu (`outcome` = `paid` ou `failed`) via le même chemin atomique que le webhook, avec journal d'audit. Refuse une transition déjà appliquée.
 
+### Répartition des fonds (version 3)
+À partir de `balanceDistributionVersion = 3`, le frais de plateforme est réellement encaissé et réparti :
+- `paymentAmount` (montant débité) = items + packaging + livraison − promo + `platformFee` ; `grandTotal = paymentAmount`.
+- Restaurant : `items + packaging − promo − Σ(frais catégorie)`.
+- Livreur : `livraison − 15 %` (le système absorbe le reliquat d'arrondi).
+- Système : `Σ(frais catégorie) + 15 % livraison + platformFee`.
+- La somme des trois parts est **exactement** égale au montant encaissé.
+
+Les commandes historiques (`balanceDistributionVersion` 1 ou 2) conservent leur règle d'origine : le `platformFee` n'y était pas encaissé, il n'est donc pas crédité. La répartition est centralisée dans `src/modules/payments/utils/order-balance-distribution.util.ts`.
+
+Le paiement canonique d'une commande est figé dans `order.paidPaymentId` : même si plusieurs tentatives atteignent `PAID`, une seule répartition est créditée. La part livreur est rattachée au paiement (pas au livreur), donc une réaffectation après crédit ne double pas la rémunération. La répartition est aussi idempotente **par commande** : les lignes existantes (`order_*_share`) sont détectées avant tout nouveau crédit, ce qui couvre les commandes historiques sans `paidPaymentId`.
+
+⚠️ Déploiement : la version 3 doit être déployée sur **toutes** les instances backend avant qu'une commande v3 puisse être payée. Une instance ancienne interprète une commande v3 comme v2 et omettrait le `platformFee` du crédit système (irréversible à cause de `$setOnInsert`). Déployer de façon atomique (toutes les instances redémarrées) et vérifier qu'aucune commande v3 n'a été payée pendant la fenêtre de déploiement.
+
+Le tableau de bord utilise désormais le montant réellement encaissé (`paymentAmount`, avec repli `grandTotal − platformFee` pour les commandes antérieures) et ne compte le `platformFee` que pour les commandes v3.
+
+Réconciliation : `driverShareSettledAt` marque une commande livrée dont la part livreur a été réglée (ou constatée nulle), ce qui permet au cron de traiter le backlog sans rescanner les mêmes commandes. Une répartition incohérente (somme des parts ≠ montant encaissé, ou snapshot v3 incomplet) est refusée et la commande est marquée `settlementError = inconsistent_distribution` : elle sort des crons et nécessite une correction manuelle, afin de ne jamais créditer plus que le montant encaissé.
+
+### Sécurité des retraits (payouts)
+- Le retrait et son débit de solde sont **persistés dans une transaction Mongo avant l'appel à DigiKuntz**. Un payout accepté ne peut plus exister sans trace locale ni débit.
+- Idempotence : `POST /api/balances/withdrawals` accepte une `idempotencyKey` optionnelle. Sans clé, le serveur génère une clé déterministe par minute (`svc:<sha256>`), et un index unique `{requestedBy, idempotencyKey}` empêche tout doublon concurrent. Réutiliser une clé avec un montant/numéro périmètre différents renvoie `409`. Tant qu'un retrait identique est non résolu (`pending`/`gateway_unavailable`/`approved`), une nouvelle demande sans clé renvoie ce retrait au lieu d'en créer un second.
+- Un refus provider explicite (4xx) passe le retrait en `failed`, rembourse le solde (une seule fois) et renvoie `400`. En cas d'indisponibilité du gateway, le retrait reste `gateway_unavailable` et le cron le reprend avec la même clé d'idempotence provider (`withdrawalId`).
+- Au timeout d'1 h, l'état provider est vérifié une dernière fois. Un payout finalement accepté est résolu (`pending`/`paid`). Si le provider ne peut pas confirmer (injoignable ou sans référence), **aucun remboursement automatique n'est effectué** : les fonds restent retenus (`gateway_unavailable`, `providerStatus = unverified_timeout`) pour réconciliation manuelle. C'est volontaire : rembourser un payout dont la réponse a été perdue créerait une double sortie d'argent.
+- Un succès provider tardif sur un retrait déjà `failed`/`rejected` n'est **pas** appliqué automatiquement : il est journalisé (`lateProviderSuccessAt`, log niveau error) et reste visible via la liste admin des retraits pour réconciliation manuelle, afin d'éviter un payout + refund non compensés.
+- Un retrait `gateway_unavailable` non confirmé reste volontairement retenu (fonds non remboursés) et est re-testé avec un backoff (15 min après un timeout non confirmé). Son `providerStatus = unverified_timeout` est visible via la liste admin. Après vérification auprès du provider, un administrateur peut le passer manuellement à `failed` (remboursement) ou `paid`.
+- Tant qu'un retrait identique (même montant + numéro) reste non résolu, une demande sans clé renvoie ce retrait. Un client qui doit légitimement répéter le même montant/numéro dans cet intervalle doit fournir une `idempotencyKey` distincte.
+- Conformité DigiKuntz : `Idempotency-Key` est envoyé **en header** sur `/dev/transaction`, `/dev/direct-charge` et `/dev/payout` (255 caractères max). Un `409` dont le message indique une clé encore en cours est traité comme ambigu (aucun remboursement, aucun nouveau paiement) ; la TTL provider de 24 h arrête les retries automatiques et bascule en réconciliation manuelle.
+
 ### Règles de sécurité des paiements
 - Une demande directe `prompt_sent` encore `processing` n'est jamais expirée automatiquement : la synchronisation DigiKuntz la résout en `payin_success`, `payin_error` ou `payin_closed`.
 - Un direct charge refusé avec `paymentLink` reste une transaction ouverte chez DigiKuntz (`payin_pending`) : la commande n'est pas expirée et le stock n'est pas libéré pendant la fenêtre `PAYMENT_HOSTED_FALLBACK_TIMEOUT_MINUTES`.
@@ -63,6 +91,9 @@ npm run start:dev
 - Upload endpoints:
   - `POST /api/uploads` with form-data file field `file`
   - `POST /api/uploads/:folder` with form-data file field `file`
+  - Les images (produits, logos, bannières, profils, catégories et pièces jointes d'annonces) sont converties en WebP (qualité 82). Formats acceptés : JPEG, PNG, WebP, GIF, AVIF, TIFF, HEIC/HEIF. SVG, BMP et ICO sont refusés (400/415). Si `sharp` échoue, l'upload est refusé (400), le fichier temporaire et l'original sont supprimés. Les PDF/Word/Excel des annonces ne sont pas convertis.
+  - GIF animés : conservés en WebP animé (maximum 30 images et 16 MP cumulés). Les images statiques sont limitées à 25 MP. L'orientation EXIF est appliquée à tous les formats.
+  - Annonces WhatsApp : la passerelle doit accepter `image/webp` ; sinon, prévoir un dérivé JPEG avant l'envoi.
 - Restaurants (admin):
   - `POST /api/restaurants/:id/assign-manager`
   - `PATCH /api/restaurants/:id/media` (logo + bannerImage)

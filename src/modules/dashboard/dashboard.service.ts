@@ -93,6 +93,24 @@ export class DashboardService {
     return this.monthLabels[bucket - 1] || String(bucket);
   }
 
+  /**
+   * Montant encaissé, avec repli pour les commandes antérieures à l'ajout de
+   * `paymentAmount` (le champ est absent, pas zéro).
+   */
+  private paymentAmountExpression() {
+    return {
+      $ifNull: [
+        '$pricingSnapshot.paymentAmount',
+        {
+          $subtract: [
+            { $ifNull: ['$pricingSnapshot.grandTotal', 0] },
+            { $ifNull: ['$pricingSnapshot.platformFee', 0] },
+          ],
+        },
+      ],
+    };
+  }
+
   private aggregateSeries(period: DashboardPeriod, filter: FilterQuery<OrderDocument>) {
     const operator = period === 'day' ? '$hour' : period === 'month' ? '$dayOfMonth' : '$month';
     return this.orderModel.aggregate([
@@ -102,7 +120,7 @@ export class DashboardService {
           _id: { [operator]: { date: '$createdAt', timezone: this.timezone } },
           orders: { $sum: 1 },
           paidOrders: { $sum: { $cond: [{ $eq: ['$paymentStatus', PaymentStatus.PAID] }, 1, 0] } },
-          revenue: { $sum: { $cond: [{ $eq: ['$paymentStatus', PaymentStatus.PAID] }, '$pricingSnapshot.grandTotal', 0] } },
+          revenue: { $sum: { $cond: [{ $eq: ['$paymentStatus', PaymentStatus.PAID] }, this.paymentAmountExpression(), 0] } },
         },
       },
       {
@@ -184,8 +202,18 @@ export class DashboardService {
         { $match: paidOrderFilter },
         { $group: {
           _id: null,
-          grossRevenue: { $sum: '$pricingSnapshot.grandTotal' },
-          platformFees: { $sum: '$pricingSnapshot.platformFee' },
+          // Montant réellement encaissé (et non un total affiché).
+          grossRevenue: { $sum: this.paymentAmountExpression() },
+          // Le platformFee n'est encaissé qu'à partir de la version 3.
+          platformFees: {
+            $sum: {
+              $cond: [
+                { $gte: ['$pricingSnapshot.balanceDistributionVersion', 3] },
+                '$pricingSnapshot.platformFee',
+                0,
+              ],
+            },
+          },
           deliveryFees: { $sum: '$pricingSnapshot.deliveryFee' },
           promoDiscounts: { $sum: '$pricingSnapshot.promoDiscount' },
         } },

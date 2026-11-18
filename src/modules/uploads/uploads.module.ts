@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Module, UnsupportedMediaTypeException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MulterModule } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto';
 import { UploadsController } from './uploads.controller';
 import { UploadStorageService } from './upload-storage.service';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
+import { isConvertibleImageMime } from '../../common/utils/convert-image.util';
 import { UserRole } from '../../common/enums/roles.enum';
 
 function assertFolderAllowedForRole(role: string | undefined, folder = '') {
@@ -18,7 +19,7 @@ function assertFolderAllowedForRole(role: string | undefined, folder = '') {
   if (profileFolders.includes(folder)) return;
   if (restaurantFolders.includes(folder) && role === UserRole.MANAGER) return;
   if (menuFolders.includes(folder) && [UserRole.MANAGER, UserRole.EMPLOYEE].includes(role as UserRole)) return;
-  throw new Error('Upload folder not allowed for this user');
+  throw new ForbiddenException('Upload folder not allowed for this user');
 }
 
 @Module({
@@ -37,7 +38,7 @@ function assertFolderAllowedForRole(role: string | undefined, folder = '') {
               const rawFolder = req.params?.folder as string | string[] | undefined;
               const folder = Array.isArray(rawFolder) ? rawFolder[0] : rawFolder;
               if (folder && !/^[a-zA-Z0-9_-]+$/.test(folder)) {
-                return cb(new Error('Invalid upload folder'), '');
+                return cb(new BadRequestException('Invalid upload folder'), '');
               }
               assertFolderAllowedForRole((req as any).user?.role, folder || '');
 
@@ -54,8 +55,8 @@ function assertFolderAllowedForRole(role: string | undefined, folder = '') {
           },
         }),
         fileFilter: (_req, file, cb) => {
-          if (!file.mimetype.startsWith('image/')) {
-            return cb(new Error('Only image uploads are allowed'), false);
+          if (!isConvertibleImageMime(file.mimetype)) {
+            return cb(new UnsupportedMediaTypeException('Unsupported image type'), false);
           }
           cb(null, true);
         },

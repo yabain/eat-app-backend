@@ -35,3 +35,6 @@ export class Payment {
   @Prop({ enum: DIRECT_CHARGE_OUTCOMES }) directChargeOutcome?: DirectChargeOutcome;
 }
 export const PaymentSchema = SchemaFactory.createForClass(Payment);
+// Réconciliation des paiements et résolution du paiement canonique.
+PaymentSchema.index({ orderId: 1, status: 1, completedAt: -1 });
+PaymentSchema.index({ status: 1, updatedAt: -1 });

@@ -54,9 +54,30 @@ export class Order {
   @Prop({ type: Types.ObjectId, ref: 'User', default: null }) assignedDriverId?: Types.ObjectId;
   @Prop() outForDeliveryAt?: Date;
   @Prop() paymentConfirmedAt?: Date;
+  /**
+   * Paiement qui a effectivement fait passer la commande à PAID.
+   * Sert de source canonique pour la répartition : même si plusieurs
+   * tentatives ont existé, une seule part est créditée par commande.
+   */
+  @Prop({ type: Types.ObjectId, ref: 'Payment', default: null }) paidPaymentId?: Types.ObjectId | null;
+  /** Date à laquelle la part livreur a été réglée (ou constatée nulle). */
+  @Prop({ default: null }) driverShareSettledAt?: Date | null;
+  /**
+   * Anomalie de répartition bloquant définitivement le crédit (ex.
+   * `inconsistent_distribution`). Exclut la commande des crons de reprise
+   * pour éviter une boucle de logs/scan ; correction manuelle requise.
+   */
+  @Prop({ default: null }) settlementError?: string | null;
   @Prop() preparationReminderSentAt?: Date;
   @Prop() deliveryStartedWhatsappSentAt?: Date;
   /** Paiement reçu après expiration sans stock suffisant : à rembourser manuellement (paiement réel, commande non honorable). */
   @Prop({ enum: ['paid_without_stock'] }) paymentAnomaly?: string;
 }
 export const OrderSchema = SchemaFactory.createForClass(Order);
+// Réconciliation des parts livreur et des crédits manquants.
+OrderSchema.index({
+  paymentStatus: 1,
+  orderStatus: 1,
+  driverShareSettledAt: 1,
+  updatedAt: 1,
+});

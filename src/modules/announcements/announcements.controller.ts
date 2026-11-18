@@ -1,10 +1,10 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UnsupportedMediaTypeException, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
-import { mkdirSync } from 'fs';
+import { mkdirSync, promises as fs } from 'fs';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -14,6 +14,26 @@ import { AnnouncementStatus } from '../../database/schemas/announcement.schema';
 import { CreateAnnouncementDto, UpdateAnnouncementDto } from './dto/announcement.dto';
 import { AnnouncementsService } from './announcements.service';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
+import { convertUploadToWebp, isConvertibleImageMime } from '../../common/utils/convert-image.util';
+
+const ANNOUNCEMENT_DOCUMENT_EXTENSION: Record<string, string> = {
+  'application/pdf': '.pdf',
+  'application/msword': '.doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+  'application/vnd.ms-excel': '.xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+};
+
+const ANNOUNCEMENT_DOCUMENT_MIME = new Set(Object.keys(ANNOUNCEMENT_DOCUMENT_EXTENSION));
+
+// Never trust the client-provided extension: an "invoice.pdf" could be named
+// "invoice.html". Images are always converted to .webp right after upload and
+// documents get a fixed extension derived from their validated MIME type.
+export function resolveAnnouncementExtension(mimetype: string): string {
+  const mime = String(mimetype || '').toLowerCase();
+  if (mime.startsWith('image/')) return '.webp';
+  return ANNOUNCEMENT_DOCUMENT_EXTENSION[mime] || '';
+}
 
 const announcementAttachmentStorage = diskStorage({
   destination: (_req, _file, cb) => {
@@ -22,7 +42,7 @@ const announcementAttachmentStorage = diskStorage({
     cb(null, destination);
   },
   filename: (_req, file, cb) => {
-    cb(null, `${Date.now()}-${randomUUID()}${extname(file.originalname).toLowerCase()}`);
+    cb(null, `${Date.now()}-${randomUUID()}${resolveAnnouncementExtension(file.mimetype)}`);
   },
 });
 
@@ -39,22 +59,31 @@ export class AnnouncementsController {
     storage: announcementAttachmentStorage,
     limits: { fileSize: 5 * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
-      const allowed = [
-        'image/jpeg', 'image/png', 'image/webp', 'image/gif',
-        'application/pdf',
-        'application/msword',
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        'application/vnd.ms-excel',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      ];
-      const accepted = allowed.includes(file.mimetype);
-      cb(accepted ? null : new Error('Unsupported attachment type'), accepted);
+      const mime = String(file.mimetype || '').toLowerCase();
+      const accepted = isConvertibleImageMime(mime) || ANNOUNCEMENT_DOCUMENT_MIME.has(mime);
+      cb(
+        accepted ? null : new UnsupportedMediaTypeException('Unsupported attachment type'),
+        accepted,
+      );
     },
   }))
   @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Importer une pièce jointe pour une annonce' })
   @ApiBody({ schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } }, required: ['file'] } })
-  uploadAttachment(@UploadedFile() file: Express.Multer.File) {
+  async uploadAttachment(@UploadedFile() file: Express.Multer.File) {
+    if (file?.mimetype && file.mimetype.toLowerCase().startsWith('image/')) {
+      const dest = resolveUploadDir('announcements');
+      const { filename, path } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
+      file.filename = filename;
+      file.path = path;
+      file.size = (await fs.stat(path)).size;
+      file.mimetype = 'image/webp';
+
+      const extension = extname(file.originalname);
+      const base = extension ? file.originalname.slice(0, -extension.length) : file.originalname;
+      file.originalname = `${base}.webp`;
+    }
+
     return this.announcementsService.buildAttachmentMetadata(file);
   }
 

@@ -6,46 +6,18 @@ import { PaymentSchema } from '../database/schemas/payment.schema';
 import { OrderSchema } from '../database/schemas/order.schema';
 import { PaymentStatus } from '../common/enums/payment-status.enum';
 import { OrderStatus } from '../common/enums/order-status.enum';
+import { orderBalanceDistribution } from '../modules/payments/utils/order-balance-distribution.util';
 
 const DRY_RUN = !process.argv.includes('--apply');
 
-function money(value: any): number {
-  const amount = Number(value || 0);
-  if (!Number.isFinite(amount)) return 0;
-  return Math.max(0, Math.floor(amount));
-}
-
-function computeAmounts(pricing: any, distVersion: number) {
-  const deliveryFee = money(pricing.deliveryFee);
-  const packagingTotal = money(pricing.packagingTotal);
-
-  if (distVersion >= 2) {
-    const itemsSubtotal = money(pricing.itemsSubtotal);
-    const promoDiscount = money(pricing.promoDiscount);
-    const categorySystemFeeTotal = money(pricing.categorySystemFeeTotal ?? 0);
-    const driverAmount = money(deliveryFee * 0.85);
-    const systemDeliveryShare = money(deliveryFee * 0.15);
-
-    return {
-      systemAmount: money(categorySystemFeeTotal + systemDeliveryShare),
-      restaurantAmount: money(itemsSubtotal + packagingTotal - promoDiscount - categorySystemFeeTotal),
-      driverAmount,
-    };
-  }
-
-  const driverAmount = money(deliveryFee * 0.75);
-  const systemDeliveryShare = Math.max(0, deliveryFee - driverAmount);
-  const paymentAmount =
-    money(pricing.paymentAmount) ||
-    money(
-      money(pricing.itemsSubtotal) + packagingTotal + deliveryFee - money(pricing.promoDiscount),
-    );
-
-  return {
-    systemAmount: money(packagingTotal + systemDeliveryShare),
-    restaurantAmount: money(paymentAmount - deliveryFee - packagingTotal),
-    driverAmount,
-  };
+function computeAmounts(order: any, distVersion: number) {
+  return orderBalanceDistribution({
+    pricingSnapshot: {
+      ...(order.pricingSnapshot || {}),
+      balanceDistributionVersion: distVersion,
+    },
+    items: order.items || [],
+  });
 }
 
 function isDeliveredOrBeyond(orderStatus: string): boolean {
@@ -128,7 +100,7 @@ async function run() {
 
     const pricing = (order as any).pricingSnapshot || {};
     const distVersion = Number(pricing.balanceDistributionVersion || 1);
-    const amounts = computeAmounts(pricing, distVersion);
+    const amounts = computeAmounts(order, distVersion);
 
     let expectedAmount = -1;
 
@@ -140,9 +112,11 @@ async function run() {
           continue;
         }
         expectedAmount = amounts.systemAmount;
-        note = distVersion >= 2
-          ? 'Category flat fees + 15% delivery fee, excluding DigiKuntz platform fees'
-          : 'packaging fees + 25% delivery fee, excluding DigiKuntz platform fees';
+        note = distVersion >= 3
+          ? 'Category flat fees + delivery fee share + platform fee'
+          : distVersion >= 2
+            ? 'Category flat fees + 15% delivery fee, excluding DigiKuntz platform fees'
+            : 'packaging fees + 25% delivery fee, excluding DigiKuntz platform fees';
         break;
       }
       case 'order_restaurant_share': {

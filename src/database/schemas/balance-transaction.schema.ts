@@ -45,3 +45,5 @@ BalanceTransactionSchema.index(
   },
 );
 BalanceTransactionSchema.index({ ownerType: 1, restaurantId: 1, userId: 1, createdAt: -1 });
+// Idempotence par commande et lecture du ledger par commande.
+BalanceTransactionSchema.index({ orderId: 1, reason: 1 });

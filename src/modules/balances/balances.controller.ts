@@ -55,14 +55,18 @@ export class BalancesController {
 
   @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.DRIVER)
   @Post('withdrawals')
-  @ApiOperation({ summary: 'Initier un retrait du solde système, restaurant ou livreur vers Mobile Money' })
+  @ApiOperation({
+    summary: 'Initier un retrait du solde système, restaurant ou livreur vers Mobile Money',
+    description:
+      "Le retrait et le débit du solde sont enregistrés avant l'appel au provider. Une `idempotencyKey` optionnelle protège des doublons ; sans clé, un retrait identique non résolu est renvoyé au lieu d'en créer un second.",
+  })
   withdraw(@Req() req: any, @Body() dto: CreateWithdrawalDto) { return this.service.createWithdrawal(req.user, dto); }
 
   @Roles(UserRole.ADMIN)
   @Patch('withdrawals/:id/status')
   @ApiOperation({
     summary: 'Traiter une demande de retrait (admin)',
-    description: 'Passe une demande à approved, paid, rejected ou failed. Les statuts rejected/failed recréditent automatiquement le solde concerné une seule fois.',
+    description: 'Passe une demande à paid, rejected ou failed. Les statuts rejected/failed recréditent automatiquement le solde concerné une seule fois. Une transition ignorée (déjà payée) renvoie 409.',
   })
   updateWithdrawalStatus(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateWithdrawalStatusDto) {
     return this.service.updateWithdrawalStatus(id, dto, req.user);

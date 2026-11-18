@@ -19,6 +19,11 @@ export class WithdrawalRequest {
   @Prop({ type: Types.ObjectId, ref: 'Restaurant' }) restaurantId?: Types.ObjectId;
   @Prop({ type: Types.ObjectId, ref: 'User' }) userId?: Types.ObjectId;
   @Prop({ type: Types.ObjectId, ref: 'User', required: true }) requestedBy: Types.ObjectId;
+  /**
+   * Clé d'idempotence fournie par le client (ou générée côté serveur).
+   * Un même demandeur + une même clé ne peuvent créer qu'un seul retrait.
+   */
+  @Prop() idempotencyKey?: string;
   @Prop({ required: true }) amount: number;
   @Prop({ required: true }) phone: string;
   @Prop({ enum: ['MTN', 'ORANGEMONEY'], default: 'MTN' }) accountBankCode: 'MTN' | 'ORANGEMONEY';
@@ -45,7 +50,24 @@ export class WithdrawalRequest {
   @Prop({ default: 0 }) gatewayUnavailableAttempts?: number;
   /** Dernière tentative effectuée par le cron (utile pour debug). */
   @Prop({ default: null }) lastGatewayRetryAt?: Date | null;
+  /** Prochaine tentative autorisée (backoff après un timeout non confirmé). */
+  @Prop({ default: null }) nextGatewayRetryAt?: Date | null;
+  /**
+   * Un succès provider est arrivé après que le retrait a été marqué
+   * failed/rejected (remboursé). Aucune transition automatique : le cas
+   * nécessite une réconciliation manuelle (payout + refund déjà versés).
+   */
+  @Prop({ default: null }) lateProviderSuccessAt?: Date | null;
 }
 export const WithdrawalRequestSchema = SchemaFactory.createForClass(WithdrawalRequest);
 WithdrawalRequestSchema.index({ ownerType: 1, restaurantId: 1, userId: 1, createdAt: -1 });
 WithdrawalRequestSchema.index({ status: 1, gatewayUnavailableSince: 1 });
+WithdrawalRequestSchema.index({ status: 1, nextGatewayRetryAt: 1 });
+WithdrawalRequestSchema.index(
+  { requestedBy: 1, idempotencyKey: 1 },
+  {
+    name: 'requestedBy_1_idempotencyKey_1',
+    unique: true,
+    partialFilterExpression: { idempotencyKey: { $type: 'string' } },
+  },
+);

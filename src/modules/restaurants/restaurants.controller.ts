@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UnsupportedMediaTypeException, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -6,7 +6,7 @@ import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
-import { convertUploadToWebp } from '../../common/utils/convert-image.util';
+import { convertUploadToWebp, isConvertibleImageMime } from '../../common/utils/convert-image.util';
 import { RestaurantsService } from './restaurants.service';
 import { AssignManagerDto } from './dto/assign-manager.dto';
 import { CreateRestaurantDto } from './dto/create-restaurant.dto';
@@ -148,7 +148,7 @@ export class RestaurantsController {
   @UseInterceptors(FileInterceptor('file', {
     storage: restaurantUploadStorage,
     fileFilter: (_req, file, cb) => {
-      if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image uploads are allowed'), false);
+      if (!isConvertibleImageMime(file.mimetype)) return cb(new UnsupportedMediaTypeException('Unsupported image type'), false);
       cb(null, true);
     },
     limits: { fileSize: 5 * 1024 * 1024 },
@@ -168,6 +168,7 @@ export class RestaurantsController {
   })
   @ApiOkResponse({ description: 'Logo restaurant mis à jour', type: RestaurantMediaResponseDto })
   async uploadLogo(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Req() req: any) {
+    if (!file) throw new BadRequestException('File is required');
     const dest = resolveUploadDir('restaurants');
     const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
     const relativePath = `/uploads/restaurants/${filename}`;
@@ -181,7 +182,7 @@ export class RestaurantsController {
   @UseInterceptors(FileInterceptor('file', {
     storage: restaurantUploadStorage,
     fileFilter: (_req, file, cb) => {
-      if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image uploads are allowed'), false);
+      if (!isConvertibleImageMime(file.mimetype)) return cb(new UnsupportedMediaTypeException('Unsupported image type'), false);
       cb(null, true);
     },
     limits: { fileSize: 5 * 1024 * 1024 },
@@ -201,6 +202,7 @@ export class RestaurantsController {
   })
   @ApiOkResponse({ description: 'Bannière restaurant mise à jour', type: RestaurantMediaResponseDto })
   async uploadBanner(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Req() req: any) {
+    if (!file) throw new BadRequestException('File is required');
     const dest = resolveUploadDir('restaurants');
     const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
     const relativePath = `/uploads/restaurants/${filename}`;

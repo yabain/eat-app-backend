@@ -30,6 +30,36 @@ export interface DirectChargeResult {
 const PROVIDER_CODE_PATTERN = /^[A-Za-z0-9_]{1,50}$/;
 const REFUSAL_REASON_PATTERN = /^[A-Z_]{1,50}$/;
 
+/**
+ * 409 d'idempotence : la requête initiale est encore en cours (ou son effet de
+ * bord a eu lieu mais la réponse a été perdue). Ce n'est JAMAIS un refus
+ * définitif : un remboursement ou un nouveau paiement serait dangereux.
+ * Hérite de ServiceUnavailableException pour que le flux payin le classe
+ * comme issue inconnue (et non comme échec).
+ */
+export class DigikuntzIdempotencyInProgressError extends ServiceUnavailableException {
+  constructor() {
+    super('Request with this Idempotency-Key is still in progress');
+  }
+}
+
+function isBusinessConflict(body: string) {
+  // 409 métier observé (ex. « Insufficient balance ») : refus définitif.
+  // Volontairement restrictif : un libellé ambigu (« Request rejected:
+  // idempotency key still in progress », « Invalid Idempotency-Key header »)
+  // ne doit PAS être pris pour un refus définitif.
+  return /insufficient balance|invalid (?:phone|amount|account|number|bank)|not allowed|forbidden/i.test(
+    String(body || ''),
+  );
+}
+
+function isIdempotencyInProgress(status: number, body: string) {
+  // Tout 409 non explicitement métier est ambigu (clé encore en cours,
+  // corps vide/HTML via proxy, changement de libellé provider). On le traite
+  // comme « en cours », jamais comme un refus.
+  return status === 409 && !isBusinessConflict(body);
+}
+
 @Injectable()
 export class DigikuntzProvider {
   private readonly logger = new Logger(DigikuntzProvider.name);
@@ -91,8 +121,7 @@ export class DigikuntzProvider {
       paymentMethodCode: input.paymentMethodCode,
       callbackUrl: input.callbackUrl ?? '',
       raisonForTransfer: input.raisonForTransfer ?? 'Payment',
-      idempotencyKey: input.idempotencyKey,
-    });
+    }, { idempotencyKey: input.idempotencyKey });
 
     if (!ok) throw this.classifyDirectChargeFailure(status, json);
     return this.parseDirectChargeSuccess(json);
@@ -204,7 +233,8 @@ export class DigikuntzProvider {
     });
 
     if (!res.ok) {
-      throw this.buildHostedPaymentError(res);
+      const errorBody = await res.text().catch(() => '');
+      throw this.buildHostedPaymentError(res, errorBody);
     }
 
     const data = await this.readJsonResponse(res, 'DigiKuntz payment');
@@ -231,6 +261,54 @@ export class DigikuntzProvider {
   async getTransactionStatusByRef(transactionRef: string): Promise<{ id: string; status: string; data: any } | null> {
     if (!transactionRef) return null;
     return this.fetchTransaction(`/dev/transaction-by-ref?transactionRef=${encodeURIComponent(transactionRef)}`);
+  }
+
+  /**
+   * État d'un payout via la route documentée `/dev/api-payouts` (fallback
+   * lorsque les routes de statut de transaction ne couvrent pas les payouts).
+   * La liste est paginée ; on cherche par `_id` (providerRef) ou
+   * `transactionRef` dans la première page.
+   */
+  async getPayoutStatus(input: {
+    providerRef?: string;
+    transactionRef?: string;
+  }): Promise<{ id: string; status: string; data: any } | null> {
+    try {
+      // La doc expose une liste paginée : on parcourt un nombre borné de pages
+      // plutôt que de supposer que le payout est dans la première.
+      for (let page = 1; page <= 5; page += 1) {
+        const res = await this.fetchWithTimeout(
+          `${this.baseUrl}/dev/api-payouts?page=${page}&limit=20`,
+          { method: 'GET', headers: this.headers },
+        );
+        if (!res.ok) {
+          this.logger.warn(`DigiKuntz payouts list HTTP ${res.status}`);
+          return null;
+        }
+
+        const body: any = await res.json().catch(() => null);
+        const items = Array.isArray(body?.data) ? body.data : [];
+        const match = items.find((item: any) => {
+          if (input.providerRef && String(item?._id) === String(input.providerRef)) return true;
+          if (input.transactionRef && item?.transactionRef === input.transactionRef) return true;
+          return false;
+        });
+        if (match) {
+          return {
+            id: String(match._id),
+            status: normalizeDigikuntzStatus(match.status) || String(match.status || ''),
+            data: match,
+          };
+        }
+        if (!body?.pagination?.hasNextPage) break;
+      }
+      return null;
+    } catch (error: any) {
+      this.logger.warn(
+        `Unable to list DigiKuntz payouts: ${error?.message || error}`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -293,7 +371,10 @@ export class DigikuntzProvider {
    * Erreur du flux hébergé : aucun corps fournisseur dans le message (jamais exposé au client).
    * Les 5xx / 408 / 429 restent une indisponibilité, comme avant.
    */
-  private buildHostedPaymentError(res: Response) {
+  private buildHostedPaymentError(res: Response, rawBody = '') {
+    if (isIdempotencyInProgress(res.status, rawBody)) {
+      return new DigikuntzIdempotencyInProgressError();
+    }
     const isUnavailable = res.status >= 500 || res.status === 408 || res.status === 429;
     if (isUnavailable) {
       return new ServiceUnavailableException(
@@ -353,6 +434,9 @@ export class DigikuntzProvider {
 
   private buildProviderError(res: Response, rawBody: string, context: string) {
     const body = String(rawBody || '');
+    if (isIdempotencyInProgress(res.status, body)) {
+      return new DigikuntzIdempotencyInProgressError();
+    }
     const isHtml = /<\/?[a-z][\s\S]*>/i.test(body);
     const title = body.match(/<title[^>]*>(.*?)<\/title>/i)?.[1]?.trim();
     const safeDetail = isHtml ? title : body.slice(0, 300);

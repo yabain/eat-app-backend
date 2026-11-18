@@ -10,6 +10,7 @@ import {
   Query,
   Req,
   Res,
+  UnsupportedMediaTypeException,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -22,7 +23,8 @@ import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 import { resolveUploadDir } from '../../common/utils/upload-dir.util';
-import { convertUploadToWebp } from '../../common/utils/convert-image.util';
+import { deleteLocalUpload } from '../../common/utils/local-upload.util';
+import { convertUploadToWebp, isConvertibleImageMime } from '../../common/utils/convert-image.util';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -202,7 +204,7 @@ export class UsersController {
   @UseInterceptors(FileInterceptor('file', {
     storage: profileUploadStorage,
     fileFilter: (_req, file, cb) => {
-      if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image uploads are allowed'), false);
+      if (!isConvertibleImageMime(file.mimetype)) return cb(new UnsupportedMediaTypeException('Unsupported image type'), false);
       cb(null, true);
     },
     limits: { fileSize: 5 * 1024 * 1024 },
@@ -220,11 +222,17 @@ export class UsersController {
   })
   @ApiOkResponse({ description: 'Image de profil uploadée et enregistrée', type: UserResponseDto })
   async uploadMyProfileImage(@Req() req: any, @UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('Profile image file is required');
     const dest = resolveUploadDir('profiles');
     const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
     file.filename = filename;
     const profileImage = this.buildProfileImageUrl(file);
-    return this.usersService.updateMyProfileImage(req.user.sub, profileImage);
+    try {
+      return await this.usersService.updateMyProfileImage(req.user.sub, profileImage);
+    } catch (error) {
+      await deleteLocalUpload(`/uploads/profiles/${filename}`);
+      throw error;
+    }
   }
 
   @Roles(...authenticatedRoles)
@@ -269,7 +277,7 @@ export class UsersController {
   @UseInterceptors(FileInterceptor('file', {
     storage: profileUploadStorage,
     fileFilter: (_req, file, cb) => {
-      if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image uploads are allowed'), false);
+      if (!isConvertibleImageMime(file.mimetype)) return cb(new UnsupportedMediaTypeException('Unsupported image type'), false);
       cb(null, true);
     },
     limits: { fileSize: 5 * 1024 * 1024 },
@@ -288,11 +296,17 @@ export class UsersController {
   })
   @ApiOkResponse({ description: 'Image de profil uploadée et enregistrée', type: UserResponseDto })
   async uploadProfileImage(@Req() req: any, @Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('Profile image file is required');
     const dest = resolveUploadDir('profiles');
     const { filename } = await convertUploadToWebp(file.path, file.filename, file.mimetype, dest);
     file.filename = filename;
     const profileImage = this.buildProfileImageUrl(file);
-    return this.usersService.updateProfileImageForActor(req.user, id, profileImage);
+    try {
+      return await this.usersService.updateProfileImageForActor(req.user, id, profileImage);
+    } catch (error) {
+      await deleteLocalUpload(`/uploads/profiles/${filename}`);
+      throw error;
+    }
   }
 
   @Roles(UserRole.ADMIN)

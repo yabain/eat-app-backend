@@ -28,6 +28,11 @@ import { buildPaginationMeta, normalizePagination } from '../../common/paginatio
 import { buildContainsRegex } from '../../common/utils/search.util';
 import { buildTimeSeriesStats } from '../../common/stats/time-series-stats';
 import { normalizeDigikuntzStatus } from '../../common/utils/digikuntz-status.util';
+import {
+  isDistributionBalanced,
+  orderBalanceDistribution,
+  orderPaymentAmount,
+} from './utils/order-balance-distribution.util';
 
 /** Fenêtre pendant laquelle un appel direct `calling` est considéré comme encore en cours. */
 const DIRECT_CHARGE_IN_PROGRESS_MS = 60 * 1000;
@@ -377,22 +382,6 @@ export class PaymentsService implements OnModuleInit {
     return sign * Math.floor(Math.abs(amount));
   }
 
-  private orderPaymentAmount(order: any): number {
-    const pricing = order?.pricingSnapshot || {};
-    const explicit = Number(pricing.paymentAmount);
-    if (Number.isFinite(explicit) && explicit > 0) return this.money(explicit);
-
-    const itemsSubtotal = Number(pricing.itemsSubtotal);
-    const packagingTotal = Number(pricing.packagingTotal);
-    const deliveryFee = Number(pricing.deliveryFee);
-    const promoDiscount = Number(pricing.promoDiscount || 0);
-    if ([itemsSubtotal, packagingTotal, deliveryFee].every(Number.isFinite)) {
-      return this.money(itemsSubtotal + packagingTotal + deliveryFee - promoDiscount);
-    }
-
-    return this.money(Number(pricing.grandTotal || 0) - Number(pricing.platformFee || 0));
-  }
-
   private cameroonDateKey(date: Date | string | number): string {
     return new Intl.DateTimeFormat('en-CA', {
       timeZone: 'Africa/Douala',
@@ -445,7 +434,7 @@ export class PaymentsService implements OnModuleInit {
     }
 
     const user = await this.userModel.findById(order.userId);
-    const paymentAmount = this.orderPaymentAmount(order);
+    const paymentAmount = orderPaymentAmount(order);
     if (paymentAmount <= 0) throw new BadRequestException('Invalid order payment amount');
 
     let payment: PaymentDocument;
@@ -773,7 +762,7 @@ export class PaymentsService implements OnModuleInit {
     const user = await this.userModel.findById(order.userId);
     const { phone, operator } = this.resolveDirectChargePhone(user);
 
-    const paymentAmount = this.orderPaymentAmount(order);
+    const paymentAmount = orderPaymentAmount(order);
     if (paymentAmount <= 0) throw new BadRequestException('Invalid order payment amount');
 
     let payment: PaymentDocument;
@@ -1405,47 +1394,6 @@ export class PaymentsService implements OnModuleInit {
   }
 
 
-  private orderBalanceDistribution(order: any) {
-    const pricing = order.pricingSnapshot || {};
-    const paymentAmount = this.orderPaymentAmount(order);
-    const deliveryFee = this.money(pricing.deliveryFee);
-    const packagingTotal = this.money(pricing.packagingTotal);
-    const distributionVersion = Number(pricing.balanceDistributionVersion || 1);
-
-    if (distributionVersion >= 2) {
-      const itemsSubtotal = this.money(pricing.itemsSubtotal);
-      const promoDiscount = this.money(pricing.promoDiscount);
-      const categorySystemFeeTotal = this.money(
-        pricing.categorySystemFeeTotal ??
-        (order.items || []).reduce(
-          (sum: number, item: any) =>
-            sum + Number(item.systemFeeTotal ?? Number(item.systemFeePerItem || 0) * Number(item.quantity || 0)),
-          0,
-        ),
-      );
-      const driverAmount = this.money(deliveryFee * 0.85);
-      const systemDeliveryShare = this.money(deliveryFee * 0.15);
-
-      return {
-        systemAmount: this.money(categorySystemFeeTotal + systemDeliveryShare),
-        restaurantAmount: this.money(
-          itemsSubtotal + packagingTotal - promoDiscount - categorySystemFeeTotal,
-        ),
-        driverAmount,
-        distributionVersion,
-      };
-    }
-
-    const driverAmount = this.money(deliveryFee * 0.75);
-    const systemDeliveryShare = Math.max(0, deliveryFee - driverAmount);
-    return {
-      systemAmount: this.money(packagingTotal + systemDeliveryShare),
-      restaurantAmount: this.money(paymentAmount - deliveryFee - packagingTotal),
-      driverAmount,
-      distributionVersion,
-    };
-  }
-
   private balanceAccountFromTransactionPayload(payload: any): { accountType: BalanceAccountType; ownerId: string } {
     if (payload.ownerType === 'restaurant') {
       return { accountType: 'restaurant', ownerId: String(payload.restaurantId) };
@@ -1470,13 +1418,13 @@ export class PaymentsService implements OnModuleInit {
     return this.balanceInteger(row?.balance || 0);
   }
 
-  private async setBalanceTotal(payload: any): Promise<number> {
+  private async setBalanceTotal(payload: any, session?: ClientSession): Promise<number> {
     const account = this.balanceAccountFromTransactionPayload(payload);
     // Le ledger BalanceTransaction est l'unique source de vérité :
     // retrait initié => débit withdrawal_request ; retrait échoué => refund.
     // Une réconciliation paiement ne doit jamais recréditer un retrait pending.
-    const balance = await this.computeAuthoritativeBalance(payload);
-    await this.balanceModel.findOneAndUpdate(
+    const balance = await this.computeAuthoritativeBalance(payload, session);
+    const update = await this.balanceModel.updateOne(
       account,
       {
         $set: {
@@ -1485,12 +1433,29 @@ export class PaymentsService implements OnModuleInit {
           currency: payload.currency || 'XAF',
         },
       },
-      { upsert: true, new: true, runValidators: true },
+      { session },
     );
+
+    // Évite l'upsert concurrent sur l'index unique {accountType, ownerId}.
+    if (!update.matchedCount) {
+      try {
+        await this.balanceModel.create(
+          [{ ...account, balance, currency: payload.currency || 'XAF' }],
+          { session },
+        );
+      } catch (error: any) {
+        if (error?.code !== 11000) throw error;
+        await this.balanceModel.updateOne(
+          account,
+          { $set: { balance, currency: payload.currency || 'XAF' } },
+          { session },
+        );
+      }
+    }
     return balance;
   }
 
-  private async computeAuthoritativeBalance(payload: any): Promise<number> {
+  private async computeAuthoritativeBalance(payload: any, session?: ClientSession): Promise<number> {
     const btsMatch: any = {
       ownerType: payload.ownerType,
     };
@@ -1524,12 +1489,12 @@ export class PaymentsService implements OnModuleInit {
         },
       },
       { $group: { _id: null, total: { $sum: '$amount' } } },
-    ]);
+    ]).session(session || null);
 
     return this.balanceInteger(Number(btRow?.total || 0));
   }
 
-  private async recordOrderBalanceTransaction(filter: any, payload: any) {
+  private async recordOrderBalanceTransaction(filter: any, payload: any, session?: ClientSession) {
     const amount = this.money(payload.amount);
     const doc = {
       ...payload,
@@ -1540,30 +1505,96 @@ export class PaymentsService implements OnModuleInit {
     // Normaliser les IDs en ObjectId pour éviter les doublons liés au type
     // (string vs ObjectId). L'index unique paymentId+ownerType+userId+reason
     // ne peut pas dédoublonner si les valeurs ont des types BSON différents.
+    if (doc.orderId) doc.orderId = new Types.ObjectId(String(doc.orderId));
     if (doc.restaurantId) doc.restaurantId = new Types.ObjectId(String(doc.restaurantId));
     if (doc.userId) doc.userId = new Types.ObjectId(String(doc.userId));
+    if (filter.orderId) filter.orderId = new Types.ObjectId(String(filter.orderId));
     if (filter.restaurantId) filter.restaurantId = new Types.ObjectId(String(filter.restaurantId));
     if (filter.userId) filter.userId = new Types.ObjectId(String(filter.userId));
 
-    const { note: _note, currency: _currency, ...insertOnlyDoc } = doc;
+    let inserted = false;
+    try {
+      const result = await this.transactionModel.updateOne(
+        filter,
+        { $setOnInsert: { ...doc, createdAt: new Date() } },
+        { upsert: true, session },
+      );
+      inserted = Number(result.upsertedCount || 0) > 0;
+    } catch (error: any) {
+      // Course concurrente sur la même clé d'idempotence : la part est déjà
+      // écrite par l'autre appelant, on se contente de recalculer le solde.
+      if (error?.code !== 11000) throw error;
+    }
 
-    await this.transactionModel.updateOne(
-      filter,
-      { $setOnInsert: { ...insertOnlyDoc, createdAt: new Date() } },
-      { upsert: true },
-    );
-
-    return this.setBalanceTotal(doc);
+    await this.setBalanceTotal(doc, session);
+    return inserted;
   }
 
-  private async creditOrderBalances(order: any, payment: any, driverId?: any) {
-    if (!payment?._id) return;
-    const { systemAmount, restaurantAmount, driverAmount, distributionVersion } = this.orderBalanceDistribution(order);
-    const currency = payment.currency || 'XAF';
-    const operations: Promise<any>[] = [];
+  private async creditOrderBalances(order: any, payment: any, driverId?: any): Promise<number> {
+    if (!payment?._id || !order?._id) return 0;
 
-    if (systemAmount > 0) {
-      operations.push(this.recordOrderBalanceTransaction(
+    // Anomalie déjà constatée : la commande est exclue des crons de reprise
+    // jusqu'à correction manuelle (évite une boucle de logs/scan).
+    if (order.settlementError) return 0;
+
+    const orderId = new Types.ObjectId(String(order._id));
+    const { systemAmount, restaurantAmount, driverAmount, distributionVersion } = orderBalanceDistribution(order);
+    const distribution = { systemAmount, restaurantAmount, driverAmount, distributionVersion };
+
+    // L'idempotence est par COMMANDE, pas par tentative de paiement. Des
+    // commandes historiques peuvent avoir plusieurs Payment PAID : la
+    // présence d'une ligne pour la commande doit suffire à ne pas recréditer.
+    const existing = await this.transactionModel
+      .find({
+        orderId,
+        reason: {
+          $in: [
+            'order_system_share',
+            'order_restaurant_share',
+            'order_delivery_share',
+          ],
+        },
+      })
+      .select('reason userId')
+      .lean();
+
+    const hasSystem = existing.some((row: any) => row.reason === 'order_system_share');
+    const hasRestaurant = existing.some((row: any) => row.reason === 'order_restaurant_share');
+    const driverShare = existing.find((row: any) => row.reason === 'order_delivery_share');
+    const hasDriver = Boolean(driverShare);
+
+    if (hasDriver && driverId && String(driverShare.userId) !== String(driverId)) {
+      this.logger.warn(
+        `Delivery share already credited to another driver for order ${order._id} (kept ${driverShare.userId}, requested ${driverId})`,
+      );
+    }
+
+    const total = systemAmount + restaurantAmount + driverAmount;
+    const collected = orderPaymentAmount(order);
+    if (total > collected || (distributionVersion >= 3 && !isDistributionBalanced(order, distribution))) {
+      // Ne jamais créditer plus que le montant encaissé. Un snapshot v3
+      // incomplet est une anomalie de données : on refuse le crédit et on
+      // marque la commande pour qu'elle sorte des crons de reprise.
+      this.logger.error(
+        `Inconsistent balance distribution for order ${orderId}: parts=${total}, collected=${collected}, version=${distributionVersion}`,
+      );
+      await this.orderModel.updateOne(
+        { _id: orderId, settlementError: null },
+        {
+          $set: {
+            settlementError: 'inconsistent_distribution',
+            driverShareSettledAt: new Date(),
+          },
+        },
+      );
+      return 0;
+    }
+
+    const currency = payment.currency || 'XAF';
+    const operations: Array<(session: ClientSession) => Promise<boolean>> = [];
+
+    if (systemAmount > 0 && !hasSystem) {
+      operations.push((session) => this.recordOrderBalanceTransaction(
         { paymentId: payment._id, ownerType: 'system', reason: 'order_system_share' },
         {
           ownerType: 'system',
@@ -1572,16 +1603,19 @@ export class PaymentsService implements OnModuleInit {
           amount: systemAmount,
           type: 'credit',
           reason: 'order_system_share',
-          note: distributionVersion >= 2
-            ? 'Category flat fees + 15% delivery fee, excluding DigiKuntz platform fees'
-            : 'packaging fees + 25% delivery fee, excluding DigiKuntz platform fees',
+          note: distributionVersion >= 3
+            ? 'Category flat fees + delivery fee share + platform fee'
+            : distributionVersion >= 2
+              ? 'Category flat fees + 15% delivery fee, excluding DigiKuntz platform fees'
+              : 'packaging fees + 25% delivery fee, excluding DigiKuntz platform fees',
           currency,
         },
+        session,
       ));
     }
 
-    if (restaurantAmount > 0 && order.restaurantId) {
-      operations.push(this.recordOrderBalanceTransaction(
+    if (restaurantAmount > 0 && order.restaurantId && !hasRestaurant) {
+      operations.push((session) => this.recordOrderBalanceTransaction(
         { paymentId: payment._id, ownerType: 'restaurant', restaurantId: order.restaurantId, reason: 'order_restaurant_share' },
         {
           ownerType: 'restaurant',
@@ -1596,12 +1630,16 @@ export class PaymentsService implements OnModuleInit {
             : 'Payment amount minus delivery and packaging fees',
           currency,
         },
+        session,
       ));
     }
 
-    if (driverAmount > 0 && driverId) {
-      operations.push(this.recordOrderBalanceTransaction(
-        { paymentId: payment._id, ownerType: 'user', userId: driverId, reason: 'order_delivery_share' },
+    if (driverAmount > 0 && driverId && !hasDriver) {
+      // Le filtre ne contient volontairement pas `userId` : si la livraison a
+      // été réaffectée après un premier crédit, la part existe déjà et
+      // `$setOnInsert` ne crée pas une seconde rémunération.
+      operations.push((session) => this.recordOrderBalanceTransaction(
+        { paymentId: payment._id, ownerType: 'user', reason: 'order_delivery_share' },
         {
           ownerType: 'user',
           userId: driverId,
@@ -1613,10 +1651,43 @@ export class PaymentsService implements OnModuleInit {
           note: distributionVersion >= 2 ? '85% delivery fee' : '75% delivery fee',
           currency,
         },
+        session,
       ));
     }
 
-    await Promise.all(operations);
+    // Rien à écrire et aucune livraison à marquer (ou déjà marquée) : sortie
+    // rapide, sans transaction ni agrégation de solde.
+    if (!operations.length && (!driverId || order.driverShareSettledAt)) return 0;
+
+    // Tout ou rien : les trois parts (système, restaurant, livreur) sont
+    // écrites dans la même transaction Mongo. Un échec ne laisse jamais un
+    // crédit partiel ; le cron de réconciliation reprend l'opération.
+    const session = await this.connection.startSession();
+    let inserted = 0;
+    try {
+      await session.withTransaction(async () => {
+        // Une nouvelle tentative (write conflict) ne doit pas recompter les
+        // insertions de l'essai précédent.
+        inserted = 0;
+        for (const operation of operations) {
+          if (await operation(session)) inserted += 1;
+        }
+
+        // Marque la livraison comme réglée (même si driverAmount = 0) pour
+        // que le cron ciblé progresse au lieu de rescanner les mêmes ordres.
+        if (driverId) {
+          await this.orderModel.updateOne(
+            { _id: orderId },
+            { $set: { driverShareSettledAt: new Date() } },
+            { session },
+          );
+        }
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    return inserted;
   }
 
   private displayName(user: any) {
@@ -1684,13 +1755,30 @@ export class PaymentsService implements OnModuleInit {
       throw new BadRequestException('Order payment is not paid');
     }
 
-    const payment = await this.paymentModel
-      .findOne({ orderId: order._id, status: PaymentStatus.PAID })
-      .sort({ completedAt: -1, updatedAt: -1 });
+    const payment = await this.resolvePaidPaymentForOrder(order);
     if (!payment) throw new NotFoundException('Paid payment not found for order');
 
-    await this.creditOrderBalances(order, payment, driverId);
-    return { ok: true };
+    const inserted = await this.creditOrderBalances(order, payment, driverId);
+    return { ok: true, inserted };
+  }
+
+  /**
+   * Paiement canonique d'une commande payée. `paidPaymentId` est renseigné au
+   * moment de la transition PAID ; le fallback couvre les commandes créées
+   * avant l'ajout du champ.
+   */
+  private async resolvePaidPaymentForOrder(order: any) {
+    if (order?.paidPaymentId) {
+      const canonical = await this.paymentModel.findOne({
+        _id: order.paidPaymentId,
+        status: PaymentStatus.PAID,
+      });
+      if (canonical) return canonical;
+    }
+
+    return this.paymentModel
+      .findOne({ orderId: order._id, status: PaymentStatus.PAID })
+      .sort({ completedAt: -1, updatedAt: -1 });
   }
 
   /**
@@ -1802,7 +1890,12 @@ export class PaymentsService implements OnModuleInit {
       restocked = await this.tryReserveStockForLatePayment(currentOrder);
     }
 
-    const orderUpdate: Record<string, any> = { paymentStatus: PaymentStatus.PAID };
+    const orderUpdate: Record<string, any> = {
+      paymentStatus: PaymentStatus.PAID,
+      // Source canonique unique pour la répartition, même si plusieurs
+      // tentatives de paiement ont été créées pour cette commande.
+      paidPaymentId: payment._id,
+    };
     if (restocked) {
       orderUpdate.orderStatus = OrderStatus.PAID;
       if (!currentOrder.paymentConfirmedAt) orderUpdate.paymentConfirmedAt = new Date();
@@ -1892,16 +1985,78 @@ export class PaymentsService implements OnModuleInit {
       .sort({ updatedAt: -1 })
       .limit(Number.isFinite(limit) && limit > 0 ? limit : 100);
 
+    const seenOrders = new Set<string>();
     for (const payment of payments) {
+      const orderKey = String(payment.orderId);
+      // Une seule répartition par commande, même si plusieurs tentatives ont
+      // été marquées PAID (paiement tardif après `payment_timeout`).
+      if (seenOrders.has(orderKey)) continue;
+      seenOrders.add(orderKey);
+
       try {
         const order = await this.orderModel.findById(payment.orderId);
         if (!order || order.paymentStatus !== PaymentStatus.PAID) continue;
         // Paiement reçu sans stock : remboursement manuel, jamais de crédit restaurant.
         if (order.paymentAnomaly) continue;
+        // Répartition incohérente déjà signalée : correction manuelle.
+        if (order.settlementError) continue;
+
+        const canonical = await this.resolvePaidPaymentForOrder(order);
+        if (!canonical) continue;
         const driverId = order.orderStatus === OrderStatus.DELIVERED ? order.assignedDriverId : undefined;
-        await this.creditOrderBalances(order, payment, driverId);
+        await this.creditOrderBalances(order, canonical, driverId);
       } catch (err: any) {
         this.logger.warn(`Failed to reconcile balances for payment ${payment._id}: ${err?.message || err}`);
+      }
+    }
+  }
+
+  /**
+   * Filet de sécurité ciblé : une commande livrée dont la part livreur n'a
+   * jamais été écrite (erreur après la transition DELIVERED). Contrairement à
+   * `reconcilePaidOrderBalances`, cette passe n'est pas limitée aux paiements
+   * récents : elle retrouve les commandes concernées par leur statut.
+   */
+  @Cron('*/5 * * * *')
+  async reconcileDeliveredDriverBalances() {
+    if (!(await this.cronLease.acquire('payments.reconcileDelivered', 4 * 60 * 1000))) return;
+
+    const orders = await this.orderModel
+      .find({
+        paymentStatus: PaymentStatus.PAID,
+        orderStatus: { $in: [OrderStatus.DELIVERED, OrderStatus.CLOSED] },
+        assignedDriverId: { $ne: null },
+        // Marqueur de progression : une commande réglée sort de la file.
+        driverShareSettledAt: null,
+        // Anomalie de répartition : correction manuelle, pas de boucle cron.
+        settlementError: null,
+        $or: [{ paymentAnomaly: { $exists: false } }, { paymentAnomaly: null }],
+      })
+      // Les plus anciennes d'abord : le backlog est atteint, pas seulement
+      // les 200 commandes les plus récentes.
+      .sort({ updatedAt: 1 })
+      .limit(200)
+      .select('_id paidPaymentId restaurantId pricingSnapshot items orderStatus assignedDriverId paymentStatus');
+
+    for (const order of orders) {
+      try {
+        const canonical = await this.resolvePaidPaymentForOrder(order);
+        if (!canonical) continue;
+
+        const inserted = await this.creditOrderBalances(
+          order,
+          canonical,
+          order.assignedDriverId,
+        );
+        if (inserted > 0) {
+          this.logger.warn(
+            `Recredited missing delivery share for order ${order._id} (driver ${order.assignedDriverId})`,
+          );
+        }
+      } catch (err: any) {
+        this.logger.warn(
+          `Failed to recredit delivery share for order ${order._id}: ${err?.message || err}`,
+        );
       }
     }
   }

@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Model, Types } from 'mongoose';
 import { randomUUID } from 'crypto';
@@ -34,6 +34,8 @@ import {
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     @InjectModel(MenuItem.name) private menuModel: Model<MenuItemDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
@@ -403,7 +405,9 @@ export class OrdersService {
         'Category system fees cannot exceed the items and packaging amount after discount',
       );
     }
-    const paymentAmount = Math.max(0, payableBeforePlatformFee - promoDiscount);
+    // Depuis la version 3, le frais de plateforme est réellement encaissé :
+    // il fait partie du montant débité et il est crédité au compte système.
+    const paymentAmount = Math.max(0, payableBeforePlatformFee - promoDiscount + platformFee);
 
     return {
       items,
@@ -414,9 +418,9 @@ export class OrdersService {
         platformFee,
         promoDiscount,
         paymentAmount,
-        grandTotal: paymentAmount + platformFee,
+        grandTotal: paymentAmount,
         categorySystemFeeTotal,
-        balanceDistributionVersion: 2,
+        balanceDistributionVersion: 3,
       },
       deliveryEstimateMinutes,
       deliveryMapLink: zone.mapLink || '',
@@ -725,7 +729,13 @@ export class OrdersService {
 
       // Créditer le solde du livreur si livré
       if (dto.orderStatus === OrderStatus.DELIVERED) {
-        await this.payments.ensurePaidOrderBalances(order, delivery.driverId).catch(() => undefined);
+        await this.payments.ensurePaidOrderBalances(order, delivery.driverId).catch((error: any) => {
+          // Le cron de réconciliation reprend la part livreur ; on trace
+          // l'échec au lieu de le perdre silencieusement.
+          this.logger.warn(
+            `Failed to credit delivery share for order ${order._id}: ${error?.message || error}`,
+          );
+        });
       }
 
       const user = await this.userModel.findById(order.userId);
