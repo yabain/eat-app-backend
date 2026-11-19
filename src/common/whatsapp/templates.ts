@@ -251,3 +251,25 @@ export function withdrawalFailedAdminWhatsappTemplate(input: {
     'Le solde a été automatiquement recrédité. Vérifiez côté DigiKuntz si besoin.',
   ]);
 }
+
+export function withdrawalReconciliationAdminWhatsappTemplate(input: {
+  amount: number;
+  currency?: string;
+  phone?: string;
+  ownerLabel?: string;
+  withdrawalId?: string;
+  providerStatus?: string;
+  errorDetail?: string;
+}) {
+  const amount = money(Number(input.amount || 0)) || '';
+  return lines([
+    '*Retrait à réconcilier*',
+    '\n',
+    `Un retrait de *${amount}*${input.phone ? ` vers *${input.phone}*` : ''} nécessite une vérification manuelle.`,
+    input.ownerLabel ? `Bénéficiaire: ${input.ownerLabel}` : undefined,
+    input.providerStatus ? `Statut provider: \`${input.providerStatus}\`` : undefined,
+    input.withdrawalId ? `Réf retrait: ${input.withdrawalId}` : undefined,
+    input.errorDetail ? `Détail: ${input.errorDetail}` : undefined,
+    'Les fonds sont conservés : le solde n’a PAS été recrédité. Vérifiez côté DigiKuntz avant toute action.',
+  ]);
+}

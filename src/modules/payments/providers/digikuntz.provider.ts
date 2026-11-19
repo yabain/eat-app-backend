@@ -43,11 +43,46 @@ export class DigikuntzIdempotencyInProgressError extends ServiceUnavailableExcep
   }
 }
 
+const IDEMPOTENCY_CONFLICT_CODES = new Set([
+  'IDEMPOTENCY_IN_PROGRESS',
+  'IDEMPOTENCY_KEY_IN_PROGRESS',
+  'REQUEST_IN_PROGRESS',
+  'DUPLICATE_REQUEST',
+]);
+
+const BUSINESS_CONFLICT_CODES = new Set([
+  'INSUFFICIENT_BALANCE',
+  'INVALID_PHONE',
+  'INVALID_AMOUNT',
+  'INVALID_ACCOUNT',
+  'INVALID_NUMBER',
+  'NOT_ALLOWED',
+  'FORBIDDEN',
+]);
+
+function providerErrorCode(body: string): string | null {
+  try {
+    const parsed: any = JSON.parse(String(body || ''));
+    const code = parsed?.errors?.[0]?.code ?? parsed?.code ?? parsed?.errorCode;
+    return typeof code === 'string' ? code.toUpperCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 function isBusinessConflict(body: string) {
-  // 409 métier observé (ex. « Insufficient balance ») : refus définitif.
-  // Volontairement restrictif : un libellé ambigu (« Request rejected:
-  // idempotency key still in progress », « Invalid Idempotency-Key header »)
-  // ne doit PAS être pris pour un refus définitif.
+  // Priorité au code structuré s'il est fourni ; le texte n'est qu'un repli.
+  const code = providerErrorCode(body);
+  if (code) {
+    if (IDEMPOTENCY_CONFLICT_CODES.has(code) || code.includes('IDEMPOTENCY')) {
+      return false;
+    }
+    if (BUSINESS_CONFLICT_CODES.has(code) || code.startsWith('INVALID_')) {
+      return true;
+    }
+    // Code inconnu : on retombe sur le texte, avec une liste volontairement
+    // restrictive (un libellé ambigu ne doit pas déclencher un remboursement).
+  }
   return /insufficient balance|invalid (?:phone|amount|account|number|bank)|not allowed|forbidden/i.test(
     String(body || ''),
   );

@@ -679,6 +679,39 @@ export class BalancesService {
     return { data, meta: buildPaginationMeta(pagination.page, pagination.limit, total) };
   }
 
+  /**
+   * Retraits nécessitant une action manuelle : fonds retenus sans
+   * confirmation provider, TTL d'idempotence dépassée, ou succès provider
+   * arrivé après un remboursement.
+   */
+  async listWithdrawalsForReconciliation(page?: number, limit?: number) {
+    const pagination = normalizePagination(page, limit);
+    const filter = {
+      $or: [
+        {
+          status: 'gateway_unavailable',
+          providerStatus: {
+            $in: [
+              'manual_reconciliation_required',
+              'unverified_timeout',
+              'idempotency_in_progress',
+            ],
+          },
+        },
+        { lateProviderSuccessAt: { $ne: null } },
+      ],
+    };
+    const [data, total] = await Promise.all([
+      this.withdrawalModel
+        .find(filter)
+        .sort({ updatedAt: 1 })
+        .skip(pagination.skip)
+        .limit(pagination.limit),
+      this.withdrawalModel.countDocuments(filter),
+    ]);
+    return { data, meta: buildPaginationMeta(pagination.page, pagination.limit, total) };
+  }
+
   private assertAdmin(actor: any) {
     if (actor.role !== UserRole.ADMIN) throw new ForbiddenException('Only admin can manage balances');
   }
@@ -1467,6 +1500,10 @@ export class BalancesService {
     options?: { notify?: boolean },
   ) {
     const session = await this.connection.startSession();
+    // Alerte différée APRÈS commit : une transaction réessayée ou annulée ne
+    // doit jamais envoyer de notification en double (ou pour un travail non
+    // committé).
+    let lateSuccessAlert: WithdrawalRequestDocument | null = null;
     try {
       let result: any;
       await session.withTransaction(async () => {
@@ -1491,9 +1528,11 @@ export class BalancesService {
             this.logger.error(
               `Late provider success for ${withdrawal.status} withdrawal ${withdrawal._id} — manual reconciliation required`,
             );
+            const firstLateSuccess = !withdrawal.lateProviderSuccessAt;
             withdrawal.lateProviderSuccessAt = new Date();
             Object.assign(withdrawal, providerFields || {});
             await withdrawal.save({ session });
+            if (firstLateSuccess) lateSuccessAlert = withdrawal;
             const scope = this.scopeForWithdrawal(withdrawal);
             result = {
               withdrawal,
@@ -1564,6 +1603,13 @@ export class BalancesService {
           balance: await this.refreshCachedBalance(scope, session),
         };
       });
+      if (lateSuccessAlert) {
+        void this.notifyWithdrawalReconciliationRequired(
+          lateSuccessAlert,
+          'late_provider_success',
+        );
+      }
+
       if (
         result?.withdrawal &&
         nextStatus === 'failed' &&
@@ -1644,6 +1690,62 @@ export class BalancesService {
     } catch (error: any) {
       this.logger.warn(
         `notifyWithdrawalFailure(${String(withdrawal._id)}) failed: ${error?.message || error}`,
+      );
+    }
+  }
+
+  /**
+   * Alerte admin : un retrait doit être vérifié manuellement (fonds conservés,
+   * solde non recrédité). Fire-and-forget ; le caractère « une seule fois »
+   * est garanti par l'état du retrait (appelé après commit).
+   */
+  private async notifyWithdrawalReconciliationRequired(
+    withdrawal: WithdrawalRequestDocument,
+    reason: string,
+  ): Promise<void> {
+    try {
+      const [requester, restaurant, admins] = await Promise.all([
+        withdrawal.requestedBy
+          ? this.userModel
+              .findById(withdrawal.requestedBy)
+              .select({ email: 1, phone: 1, firstName: 1 })
+              .lean()
+          : null,
+        withdrawal.restaurantId
+          ? this.restaurantModel
+              .findById(withdrawal.restaurantId)
+              .select({ name: 1 })
+              .lean()
+          : null,
+        this.userModel
+          .find({ role: UserRole.ADMIN, isActive: true })
+          .select({ email: 1, phone: 1 })
+          .lean(),
+      ]);
+
+      const ownerLabel =
+        withdrawal.ownerType === 'restaurant'
+          ? restaurant?.name || 'Restaurant'
+          : `${requester?.firstName || ''} ${requester?.email || ''}`.trim() || 'Demandeur';
+
+      await this.notifications.sendWithdrawalReconciliationRequiredAdmins(
+        (admins || []).map((admin) => ({ email: admin.email, phone: admin.phone })),
+        {
+          amount: Number(withdrawal.amount || 0),
+          currency: withdrawal.currency || 'XAF',
+          phone: withdrawal.phone,
+          ownerType: withdrawal.ownerType,
+          ownerLabel,
+          withdrawalId: String(withdrawal._id),
+          providerStatus: reason,
+          errorDetail: withdrawal.providerStatus
+            ? `providerStatus=${withdrawal.providerStatus}`
+            : undefined,
+        },
+      );
+    } catch (error: any) {
+      this.logger.warn(
+        `notifyWithdrawalReconciliationRequired(${String(withdrawal._id)}) failed: ${error?.message || error}`,
       );
     }
   }
@@ -1829,11 +1931,12 @@ export class BalancesService {
     'DIGIKUNTZ_RETRY_INTERVAL_MS',
     60 * 1000,
   );
-  // Au-delà de la TTL d'idempotence provider (24 h), re-tenter avec la même
-  // clé pourrait créer un nouveau payout : on s'arrête pour réconciliation.
-  private readonly idempotencyTtlMs = envDuration(
-    'DIGIKUNTZ_IDEMPOTENCY_TTL_MS',
-    24 * 60 * 60 * 1000,
+  // La TTL d'idempotence provider est de 24 h. On s'arrête avec une marge de
+  // sécurité (23 h par défaut, plafond 23 h) : re-tenter à/au-delà de la TTL
+  // réelle pourrait créer un second payout.
+  private readonly idempotencyTtlMs = Math.min(
+    envDuration('DIGIKUNTZ_IDEMPOTENCY_TTL_MS', 23 * 60 * 60 * 1000),
+    23 * 60 * 60 * 1000,
   );
 
   @Cron(CronExpression.EVERY_MINUTE)
@@ -1931,6 +2034,10 @@ export class BalancesService {
             this.logger.error(
               `Withdrawal ${withdrawal._id} exceeded the provider idempotency TTL (${Math.round(elapsed / 3_600_000)} h) — automatic retries stopped, manual reconciliation required`,
             );
+            void this.notifyWithdrawalReconciliationRequired(
+              withdrawal,
+              'idempotency_ttl_expired',
+            );
             continue;
           }
 
@@ -1986,6 +2093,13 @@ export class BalancesService {
             this.logger.error(
               `Withdrawal ${withdrawal._id} timed out after ${Math.round(elapsed / 60_000)} min without provider confirmation — funds held, manual reconciliation required`,
             );
+            // Une seule alerte par retrait (pas à chaque backoff).
+            if (withdrawal.providerStatus !== 'unverified_timeout') {
+              void this.notifyWithdrawalReconciliationRequired(
+                withdrawal,
+                'unverified_timeout',
+              );
+            }
             continue;
           }
 

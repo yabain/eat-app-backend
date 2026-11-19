@@ -13,6 +13,7 @@ import {
   resetPasswordTemplate,
   withdrawalFailedUserTemplate,
   withdrawalFailedAdminTemplate,
+  withdrawalReconciliationAdminTemplate,
 } from '../../common/email/templates';
 import { MailTemplate } from '../../common/email/mail-layout';
 import {
@@ -30,6 +31,7 @@ import {
   resetPasswordWhatsappTemplate,
   withdrawalFailedUserWhatsappTemplate,
   withdrawalFailedAdminWhatsappTemplate,
+  withdrawalReconciliationAdminWhatsappTemplate,
 } from '../../common/whatsapp/templates';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
 
@@ -240,6 +242,42 @@ export class NotificationsService {
     ));
     this.logger.log(
       `Notify ${contacts.length} admin(s) — withdrawal ${input.withdrawalId} failed.`,
+    );
+  }
+
+  /**
+   * Alerte admin : un retrait nécessite une réconciliation manuelle (fonds
+   * conservés, solde non recrédité). Fire-and-forget ; les appelants
+   * garantissent le caractère « une seule fois » via l'état du retrait.
+   */
+  async sendWithdrawalReconciliationRequiredAdmins(
+    recipients: Array<{ email?: string; phone?: string }>,
+    input: {
+      amount: number;
+      currency?: string;
+      phone?: string;
+      ownerType?: string;
+      ownerLabel?: string;
+      withdrawalId?: string;
+      providerStatus?: string;
+      errorDetail?: string;
+    },
+  ) {
+    if (!recipients?.length) return;
+    const contacts = this.normalizeContacts(recipients);
+    if (!contacts.length) return;
+    const template = withdrawalReconciliationAdminTemplate(input);
+    const whatsappText = withdrawalReconciliationAdminWhatsappTemplate(input);
+    this.dispatch(
+      `withdrawal_reconciliation_admin:${input.withdrawalId || ''}:${input.providerStatus || ''}`,
+      () => Promise.all(
+      contacts.flatMap((contact) => [
+        this.sendTemplate(contact.email, template),
+        this.sendWhatsapp(contact.phone, whatsappText),
+      ]),
+    ));
+    this.logger.warn(
+      `Notify ${contacts.length} admin(s) — withdrawal ${input.withdrawalId} requires manual reconciliation.`,
     );
   }
 

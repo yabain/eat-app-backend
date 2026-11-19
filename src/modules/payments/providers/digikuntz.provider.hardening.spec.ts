@@ -266,6 +266,67 @@ describe('DigikuntzProvider — durcissement', () => {
       expect(error.getStatus()).toBe(503);
     });
 
+    it('initiatePayout 409 avec code IDEMPOTENCY_IN_PROGRESS : ambigu même si le texte dit « rejected »', async () => {
+      const provider = buildProvider();
+      fetchSpy.mockResolvedValueOnce(
+        jsonResponse(409, {
+          errors: [{ code: 'IDEMPOTENCY_IN_PROGRESS' }],
+          message: 'Request rejected',
+        }),
+      );
+
+      const error = await captureError(
+        provider.initiatePayout({
+          amount: 1000,
+          phone: '237650123456',
+          accountBankCode: 'MTN',
+          receiverName: 'Jean',
+          narration: 'Retrait',
+        }),
+      );
+
+      expect(error).toBeInstanceOf(DigikuntzIdempotencyInProgressError);
+    });
+
+    it('initiatePayout 409 avec code INVALID_IDEMPOTENCY_KEY : ambigu, jamais un refus', async () => {
+      const provider = buildProvider();
+      fetchSpy.mockResolvedValueOnce(
+        jsonResponse(409, { errors: [{ code: 'INVALID_IDEMPOTENCY_KEY' }] }),
+      );
+
+      const error = await captureError(
+        provider.initiatePayout({
+          amount: 1000,
+          phone: '237650123456',
+          accountBankCode: 'MTN',
+          receiverName: 'Jean',
+          narration: 'Retrait',
+        }),
+      );
+
+      expect(error).toBeInstanceOf(DigikuntzIdempotencyInProgressError);
+    });
+
+    it('initiatePayout 409 avec code INSUFFICIENT_BALANCE : refus métier', async () => {
+      const provider = buildProvider();
+      fetchSpy.mockResolvedValueOnce(
+        jsonResponse(409, { errors: [{ code: 'INSUFFICIENT_BALANCE' }] }),
+      );
+
+      const error = await captureError(
+        provider.initiatePayout({
+          amount: 1000,
+          phone: '237650123456',
+          accountBankCode: 'MTN',
+          receiverName: 'Jean',
+          narration: 'Retrait',
+        }),
+      );
+
+      expect(error).not.toBeInstanceOf(DigikuntzIdempotencyInProgressError);
+      expect(error.message.startsWith('DigiKuntz payout error: ')).toBe(true);
+    });
+
     it('initiatePayout 409 sans corps : ambigu, jamais un refus', async () => {
       const provider = buildProvider();
       fetchSpy.mockResolvedValueOnce(new Response('', { status: 409 }));

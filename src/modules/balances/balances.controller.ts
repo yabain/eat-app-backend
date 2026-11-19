@@ -74,6 +74,17 @@ export class BalancesController {
 
 
   @Roles(UserRole.ADMIN)
+  @Get('admin/withdrawals/reconciliation')
+  @ApiOperation({
+    summary: 'Lister les retraits nécessitant une réconciliation manuelle',
+    description:
+      'Retraits dont les fonds sont retenus (unverified_timeout, idempotency_in_progress, manual_reconciliation_required) ou dont un succès provider est arrivé après remboursement (lateProviderSuccessAt).',
+  })
+  listWithdrawalsForReconciliation(@Query() query: PaginationQueryDto) {
+    return this.service.listWithdrawalsForReconciliation(query.page, query.limit);
+  }
+
+  @Roles(UserRole.ADMIN)
   @Post('admin/reconcile')
   @ApiOperation({
     summary: 'Forcer la réconciliation des soldes (admin)',

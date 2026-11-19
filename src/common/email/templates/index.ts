@@ -9,3 +9,4 @@ export { resetPasswordTemplate } from './reset-password.template';
 export { menuItemAvailableTemplate } from './menu-item-available.template';
 export { withdrawalFailedUserTemplate } from './withdrawal-failed-user.template';
 export { withdrawalFailedAdminTemplate } from './withdrawal-failed-admin.template';
+export { withdrawalReconciliationAdminTemplate } from './withdrawal-reconciliation-admin.template';

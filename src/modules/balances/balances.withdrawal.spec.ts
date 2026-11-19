@@ -13,6 +13,7 @@ describe('BalancesService — retraits sécurisés', () => {
     findById: jest.Mock;
     find: jest.Mock;
     updateOne: jest.Mock;
+    countDocuments: jest.Mock;
   };
   let userModel: { findById: jest.Mock };
   let connection: { startSession: jest.Mock };
@@ -45,6 +46,7 @@ describe('BalancesService — retraits sécurisés', () => {
       findById: jest.fn(),
       find: jest.fn(),
       updateOne: jest.fn(),
+      countDocuments: jest.fn().mockResolvedValue(0),
     };
     userModel = {
       findById: jest.fn().mockResolvedValue({
@@ -441,6 +443,9 @@ describe('BalancesService — retraits sécurisés', () => {
       }),
     });
     jest.spyOn(service as any, 'fetchProviderWithdrawalStatus').mockResolvedValue(null);
+    const notify = jest
+      .spyOn(service as any, 'notifyWithdrawalReconciliationRequired')
+      .mockResolvedValue(undefined);
 
     await service.retryGatewayUnavailableWithdrawals();
 
@@ -454,6 +459,27 @@ describe('BalancesService — retraits sécurisés', () => {
         nextGatewayRetryAt: null,
       }),
     );
+    expect(notify).toHaveBeenCalledWith(stale, 'idempotency_ttl_expired');
+  });
+
+  it('liste les retraits à réconcilier (providerStatus + lateProviderSuccessAt)', async () => {
+    const limit = jest.fn().mockResolvedValue([]);
+    const skip = jest.fn().mockReturnValue({ limit });
+    const sort = jest.fn().mockReturnValue({ skip });
+    withdrawalModel.find.mockReturnValue({ sort });
+    withdrawalModel.countDocuments.mockResolvedValue(0);
+
+    await service.listWithdrawalsForReconciliation(1, 10);
+
+    expect(withdrawalModel.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        $or: expect.arrayContaining([
+          expect.objectContaining({ status: 'gateway_unavailable' }),
+          { lateProviderSuccessAt: { $ne: null } },
+        ]),
+      }),
+    );
+    expect(sort).toHaveBeenCalledWith({ updatedAt: 1 });
   });
 
   it('au timeout, un payout finalement accepté est résolu au lieu d’être remboursé', async () => {
@@ -502,6 +528,9 @@ describe('BalancesService — retraits sécurisés', () => {
       }),
     });
     jest.spyOn(service as any, 'fetchProviderWithdrawalStatus').mockResolvedValue(null);
+    const notify = jest
+      .spyOn(service as any, 'notifyWithdrawalReconciliationRequired')
+      .mockResolvedValue(undefined);
 
     await service.retryGatewayUnavailableWithdrawals();
 
@@ -512,6 +541,7 @@ describe('BalancesService — retraits sécurisés', () => {
       undefined,
       expect.objectContaining({ providerStatus: 'unverified_timeout' }),
     );
+    expect(notify).toHaveBeenCalledWith(stale, 'unverified_timeout');
     const failedTransition = transition.mock.calls.find(
       ([, status]: any[]) => status === 'failed',
     );
@@ -521,6 +551,9 @@ describe('BalancesService — retraits sécurisés', () => {
   it('un succès provider tardif après échec est signalé sans double transition', async () => {
     // Ce test exerce la vraie transition, pas le spy utilisé par les autres cas.
     transition.mockRestore();
+    const notify = jest
+      .spyOn(service as any, 'notifyWithdrawalReconciliationRequired')
+      .mockResolvedValue(undefined);
     const failed = makeWithdrawal({
       status: 'failed',
       providerStatus: 'payout_error',
@@ -543,5 +576,32 @@ describe('BalancesService — retraits sécurisés', () => {
     expect(failed.status).toBe('failed');
     expect(failed.lateProviderSuccessAt).toBeInstanceOf(Date);
     expect(failed.save).toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith(failed, 'late_provider_success');
+  });
+
+  it('n’alerte pas une seconde fois un succès tardif déjà signalé', async () => {
+    transition.mockRestore();
+    const notify = jest
+      .spyOn(service as any, 'notifyWithdrawalReconciliationRequired')
+      .mockResolvedValue(undefined);
+    const failed = makeWithdrawal({
+      status: 'failed',
+      lateProviderSuccessAt: new Date(),
+      save: jest.fn().mockResolvedValue(undefined),
+    });
+    withdrawalModel.findById.mockReturnValue({
+      session: jest.fn().mockResolvedValue(failed),
+    });
+
+    const result = await (service as any).transitionWithdrawalStatus(
+      String(failed._id),
+      'paid',
+      undefined,
+      undefined,
+      { providerStatus: 'payout_success' },
+    );
+
+    expect(result.lateSuccess).toBe(true);
+    expect(notify).not.toHaveBeenCalled();
   });
 });
