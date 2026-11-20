@@ -17,6 +17,8 @@ export class Category {
   @Prop() description?: string;
   @Prop() image?: string;
   @Prop({ default: true }) isActive: boolean;
+  /** Ordre d'affichage global (admin, menus, pages publiques). */
+  @Prop({ type: Number, default: 0, min: 0 }) order: number;
   @Prop({ default: false }) isDefault: boolean;
   @Prop({ default: false }) resetStockAtMidnight: boolean;
   @Prop({ type: Number, default: 0, min: 0 }) systemFeePerItem: number;
@@ -31,3 +33,4 @@ export class Category {
   accompaniments: CategoryAccompaniment[];
 }
 export const CategorySchema = SchemaFactory.createForClass(Category);
+CategorySchema.index({ order: 1, createdAt: 1 });

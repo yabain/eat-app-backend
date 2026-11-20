@@ -27,6 +27,20 @@ export class RestaurantManagerResponseDto {
   isActive?: boolean;
 }
 
+export class AutoWithdrawalSettingsDto {
+  @ApiProperty({ example: false })
+  enabled: boolean;
+
+  @ApiPropertyOptional({ example: '691224472' })
+  phone?: string;
+
+  @ApiPropertyOptional({ enum: ['MTN', 'ORANGEMONEY'], example: 'ORANGEMONEY' })
+  accountBankCode?: 'MTN' | 'ORANGEMONEY';
+
+  @ApiPropertyOptional({ example: '2026-11-20T00:00:00.000Z' })
+  updatedAt?: string;
+}
+
 export class RestaurantResponseDto {
   @ApiProperty({ example: '665d58e63d7bfeb8f7f6172e' })
   _id: string;
@@ -96,6 +110,9 @@ export class RestaurantResponseDto {
 
   @ApiPropertyOptional({ example: '2026-04-25T12:00:00.000Z' })
   updatedAt?: string;
+
+  @ApiPropertyOptional({ type: AutoWithdrawalSettingsDto })
+  autoWithdrawal?: AutoWithdrawalSettingsDto;
 }
 
 export class RestaurantMediaResponseDto {

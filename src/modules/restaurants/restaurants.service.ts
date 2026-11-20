@@ -11,6 +11,11 @@ import { AssignManagerDto } from './dto/assign-manager.dto';
 import { CreateRestaurantDto } from './dto/create-restaurant.dto';
 import { UpdateRestaurantMediaDto } from './dto/update-restaurant-media.dto';
 import { UpdateRestaurantDto } from './dto/update-restaurant.dto';
+import { UpdateAutoWithdrawalDto } from './dto/update-auto-withdrawal.dto';
+import {
+  detectCameroonMobileMoneyOperator,
+  normalizeCameroonPhone,
+} from '../../common/utils/cameroon-mobile-money.util';
 
 @Injectable()
 export class RestaurantsService {
@@ -157,6 +162,48 @@ export class RestaurantsService {
     if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
     const restaurant = await this.populateManager(this.model.findById(actor.restaurantId));
     if (!restaurant) throw new NotFoundException('Restaurant not found');
+    return restaurant;
+  }
+
+  /**
+ * Configuration du retrait automatique, réservée au manager du restaurant.
+ * Le réseau et le numéro sont revalidés côté serveur (pas seulement côté UI).
+ */
+  async updateAutoWithdrawal(actor: any, dto: UpdateAutoWithdrawalDto) {
+    if (actor?.role !== UserRole.MANAGER || !actor.restaurantId) {
+      throw new ForbiddenException('Only the restaurant manager can configure automatic withdrawal');
+    }
+
+    const restaurant = await this.model.findById(actor.restaurantId);
+    if (!restaurant) throw new NotFoundException('Restaurant not found');
+
+    const existing = restaurant.autoWithdrawal || { enabled: false };
+    const enabled = Boolean(dto.enabled);
+    const phone = normalizeCameroonPhone(String(dto.phone || existing.phone || ''));
+    const bank = dto.accountBankCode || existing.accountBankCode;
+
+    if (enabled) {
+      if (!/^6\d{8}$/.test(phone)) {
+        throw new BadRequestException('Numéro camerounais invalide (9 chiffres commençant par 6)');
+      }
+      if (!bank) {
+        throw new BadRequestException('Choisissez Orange Money ou MTN Mobile Money');
+      }
+      const detected = detectCameroonMobileMoneyOperator(phone);
+      if (!detected || detected !== bank) {
+        throw new BadRequestException('Le numéro ne correspond pas au réseau sélectionné');
+      }
+    }
+
+    restaurant.autoWithdrawal = {
+      ...existing,
+      enabled,
+      phone: phone || undefined,
+      accountBankCode: bank,
+      updatedAt: new Date(),
+      updatedBy: new Types.ObjectId(actor.sub),
+    };
+    await restaurant.save();
     return restaurant;
   }
 

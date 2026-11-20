@@ -39,12 +39,13 @@ export function detectMobileMoneyOperator(phone?: string | null): DirectChargeOp
 
 /**
  * Normalise un numéro camerounais au format attendu par `/dev/direct-charge` :
- * `237` suivi de 9 chiffres (6XXXXXXXX). Accepte `6XXXXXXXX`, `237 6XXXXXXXX`
- * et `+237 6XXXXXXXX` (espaces et symboles ignorés). Renvoie `null` sinon.
+ * **9 chiffres locaux** (ex. `691224472`), conformément à la requête de
+ * référence du provider. Accepte `6XXXXXXXX`, `237 6XXXXXXXX` et
+ * `+237 6XXXXXXXX` (espaces et symboles ignorés). Renvoie `null` sinon.
  */
 export function normalizeCmPhoneForDirectCharge(raw?: string | null): string | null {
   const digits = String(raw ?? '').replace(/\D/g, '');
-  if (/^6\d{8}$/.test(digits)) return `237${digits}`;
-  if (/^2376\d{8}$/.test(digits)) return digits;
+  if (/^6\d{8}$/.test(digits)) return digits;
+  if (/^2376\d{8}$/.test(digits)) return digits.slice(3);
   return null;
 }

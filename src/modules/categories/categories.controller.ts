@@ -35,6 +35,7 @@ import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { CreateAccompanimentDto, UpdateAccompanimentDto } from './dto/accompaniment.dto';
+import { MoveCategoryDto } from './dto/move-category.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -92,6 +93,17 @@ export class CategoriesController {
   @ApiBody({ type: CreateCategoryDto })
   @ApiCreatedResponse({ description: 'Catégorie créée', type: CategoryResponseDto })
   create(@Body() dto: CreateCategoryDto) { return this.service.create(dto); }
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Patch(':id/move')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: "Monter ou descendre une catégorie dans l'ordre d'affichage (admin)" })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiBody({ type: MoveCategoryDto })
+  @ApiOkResponse({ description: 'Ordre mis à jour', schema: { example: { moved: true, order: 0 } } })
+  move(@Param('id') id: string, @Body() dto: MoveCategoryDto) {
+    return this.service.move(id, dto);
+  }
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Patch(':id')

@@ -31,7 +31,8 @@ npm run start:dev
 - Les valeurs contenant `#` doivent être entre guillemets dans `.env`.
 
 ### Endpoints
-- `POST /api/payments/initiate-direct/:orderId` : **client propriétaire uniquement**. Envoie une demande de confirmation sur le téléphone du client (Orange ou MTN, numéro lu côté serveur). Réponse `201` : `outcome` = `prompt_sent` (demande envoyée) ou `refused` (DigiKuntz refuse le direct : ouvrir `paymentLink`, lien hébergé https). Codes d'erreur : `PAYMENT_PHONE_MISSING`, `PAYMENT_PHONE_INVALID`, `PAYMENT_OPERATOR_UNSUPPORTED`, `PAYMENT_METHOD_UNAVAILABLE`, `PAYMENT_AMOUNT_OUT_OF_RANGE`, `PAYMENT_LIMIT_EXCEEDED`, `PAYMENT_REJECTED`, `PAYMENT_DIRECT_DISABLED`, `PAYMENT_IN_PROGRESS`, `PAYMENT_OUTCOME_UNKNOWN`, `INSUFFICIENT_STOCK`.
+- `POST /api/payments/initiate-direct/:orderId` : **client propriétaire uniquement**. Body optionnel `{ phone?, paymentMethodCode? }` : le frontend envoie le numéro **local 9 chiffres** prérempli et le réseau sélectionné ; le backend revalide la cohérence (sinon `PAYMENT_OPERATOR_MISMATCH`). La requête provider est alignée sur le format de référence : `estimation`, `currency: XAF`, `userPhone` 9 chiffres, `senderName`, `raisonForTransfer`, header `Idempotency-Key` ; **pas** de `paymentMethodCode` ni de `callbackUrl` (routing provider par le numéro). Réponse `201` : `outcome` = `prompt_sent` (demande envoyée, `ussdCode` fourni) ou `refused` (DigiKuntz refuse le direct : ouvrir `paymentLink`, lien hébergé https). Codes d'erreur : `PAYMENT_PHONE_MISSING`, `PAYMENT_PHONE_INVALID`, `PAYMENT_OPERATOR_MISMATCH`, `PAYMENT_OPERATOR_UNSUPPORTED`, `PAYMENT_METHOD_UNAVAILABLE`, `PAYMENT_AMOUNT_OUT_OF_RANGE`, `PAYMENT_LIMIT_EXCEEDED`, `PAYMENT_REJECTED`, `PAYMENT_DIRECT_DISABLED`, `PAYMENT_IN_PROGRESS`, `PAYMENT_OUTCOME_UNKNOWN`, `INSUFFICIENT_STOCK`.
+  - `PAYMENT_OUTCOME_UNKNOWN` (timeout/5xx sans référence) : le Payment reste `processing`. Le client peut **renvoyer la même demande** (même Payment, même `Idempotency-Key`) après `PAYMENT_UNKNOWN_RETRY_COOLDOWN_SECONDS` (60 s par défaut) : aucun double débit possible. Le timeout provider du direct charge est `DIGIKUNTZ_DIRECT_CHARGE_TIMEOUT_MS` (20 s par défaut).
 - `POST /api/payments/initiate/:orderId` : paiement hébergé (page sécurisée), disponible pour le staff et pour les clients (voie de secours).
   - `409 PAYMENT_OUTCOME_UNKNOWN` : DigiKuntz n'a pas répondu de façon certaine, la demande a peut-être été reçue. **Ne pas relancer** : le paiement reste en attente de vérification (la commande n'est ni relancée ni expirée automatiquement).
   - `409 PAYMENT_IN_PROGRESS` : un paiement direct est déjà en cours sur la commande. Confirmer la demande sur le téléphone avant de relancer.
@@ -56,6 +57,16 @@ Le tableau de bord utilise désormais le montant réellement encaissé (`payment
 
 Réconciliation : `driverShareSettledAt` marque une commande livrée dont la part livreur a été réglée (ou constatée nulle), ce qui permet au cron de traiter le backlog sans rescanner les mêmes commandes. Une répartition incohérente (somme des parts ≠ montant encaissé, ou snapshot v3 incomplet) est refusée et la commande est marquée `settlementError = inconsistent_distribution` : elle sort des crons et nécessite une correction manuelle, afin de ne jamais créditer plus que le montant encaissé.
 
+### Ordre d'affichage des catégories
+- `Category.order` est un entier global (0 = premier). Les listes `/api/categories` sont triées par `order` puis `createdAt`, donc l'ordre s'applique à l'admin, aux menus manager et aux pages publiques.
+- `PATCH /api/categories/:id/move` (**admin**) avec `{ "direction": "up" | "down" }` : normalise l'ordre complet (0..n-1) puis échange la catégorie avec sa voisine. Les nouvelles catégories sont ajoutées à la fin.
+
+### Retrait automatique restaurant
+- `PATCH /api/restaurants/my/auto-withdrawal` (**manager uniquement**) : `{ enabled, phone?, accountBankCode? }`. Le numéro est normalisé en 9 chiffres et doit correspondre au réseau (`ORANGEMONEY` ou `MTN`), sinon `400`.
+- La configuration est stockée dans `Restaurant.autoWithdrawal` et visible dans `GET /api/restaurants/my`.
+- Cron quotidien **00:30 Africa/Douala** : pour chaque restaurant actif avec `enabled`, si le solde disponible est **strictement supérieur** à `MIN_WITHDRAWAL_AMOUNT_XAF` (défaut `1000`) et qu'aucun retrait n'est déjà `pending`/`approved`/`gateway_unavailable`, le système initie un retrait de **la totalité du solde** avec le numéro/réseau configurés.
+- Clé d'idempotence quotidienne `auto-<restaurantId>-<YYYY-MM-DD>` : un second passage le même jour ne crée pas un doublon.
+
 ### Sécurité des retraits (payouts)
 - Le retrait et son débit de solde sont **persistés dans une transaction Mongo avant l'appel à DigiKuntz**. Un payout accepté ne peut plus exister sans trace locale ni débit.
 - Idempotence : `POST /api/balances/withdrawals` accepte une `idempotencyKey` optionnelle. Sans clé, le serveur génère une clé déterministe par minute (`svc:<sha256>`), et un index unique `{requestedBy, idempotencyKey}` empêche tout doublon concurrent. Réutiliser une clé avec un montant/numéro périmètre différents renvoie `409`. Tant qu'un retrait identique est non résolu (`pending`/`gateway_unavailable`/`approved`), une nouvelle demande sans clé renvoie ce retrait au lieu d'en créer un second.
@@ -66,6 +77,11 @@ Réconciliation : `driverShareSettledAt` marque une commande livrée dont la par
 - Les retraits nécessitant une action manuelle sont listés par `GET /api/balances/admin/withdrawals/reconciliation` (admin) : `unverified_timeout`, `idempotency_in_progress`, `manual_reconciliation_required`, ou succès provider tardif (`lateProviderSuccessAt`).
 - Tant qu'un retrait identique (même montant + numéro) reste non résolu, une demande sans clé renvoie ce retrait. Un client qui doit légitimement répéter le même montant/numéro dans cet intervalle doit fournir une `idempotencyKey` distincte.
 - Conformité DigiKuntz : `Idempotency-Key` est envoyé **en header** sur `/dev/transaction`, `/dev/direct-charge` et `/dev/payout` (255 caractères max). Un `409` non explicitement métier (ou dont le code structuré indique une idempotence en cours) est traité comme ambigu : aucun remboursement, aucun nouveau paiement. La TTL provider est de 24 h ; notre arrêt de sécurité est fixé à **23 h par défaut et plafonné à 23 h** (`DIGIKUNTZ_IDEMPOTENCY_TTL_MS`), puis réconciliation manuelle.
+
+### Expiration des commandes impayées
+- Une commande `PENDING_PAYMENT` est expirée après `ORDER_PAYMENT_TIMEOUT_MINUTES` (30 min) et son stock est restitué si elle date du jour courant au Cameroun.
+- Un direct charge `calling` est retenu au maximum `PAYMENT_DIRECT_CALLING_HOLD_MINUTES` (2 min), un `unknown` au maximum `PAYMENT_UNKNOWN_HOLD_MINUTES` (30 min), un `prompt_sent` au maximum le TTL commande. Au-delà, la commande expire ; un succès provider tardif peut encore la récupérer et re-réserver le stock.
+- Une commande plus ancienne que la fenêtre de paiement n'est plus payable : `POST /payments/initiate*` renvoie `PAYMENT_EXPIRED`, et le bouton « Payer maintenant » n'est plus affiché côté client.
 
 ### Règles de sécurité des paiements
 - Une demande directe `prompt_sent` encore `processing` n'est jamais expirée automatiquement : la synchronisation DigiKuntz la résout en `payin_success`, `payin_error` ou `payin_closed`.

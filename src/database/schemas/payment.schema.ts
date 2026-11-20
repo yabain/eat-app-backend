@@ -32,6 +32,11 @@ export class Payment {
   @Prop() completedAt?: Date;
   /** Opérateur mobile money utilisé pour une demande directe (ORANGEMONEY | MTN). */
   @Prop() directChargeOperator?: string;
+  /**
+   * Numéro réellement envoyé au provider (format 237…). Conservé pour pouvoir
+   * rejouer la même demande avec la même clé d'idempotence après un timeout.
+   */
+  @Prop() directChargePhone?: string;
   @Prop({ enum: DIRECT_CHARGE_OUTCOMES }) directChargeOutcome?: DirectChargeOutcome;
 }
 export const PaymentSchema = SchemaFactory.createForClass(Payment);

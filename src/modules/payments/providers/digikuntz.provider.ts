@@ -2,6 +2,7 @@ import { Injectable, InternalServerErrorException, Logger, ServiceUnavailableExc
 import { DigikuntzDirectChargeError } from '../errors/direct-charge.errors';
 import type { DirectChargeOperator } from '../utils/mobile-money.util';
 import { normalizeDigikuntzStatus } from '../../../common/utils/digikuntz-status.util';
+import { publicFrontendUrl } from '../../../common/utils/public-url.util';
 
 export interface DirectChargeInput {
   estimation: number;
@@ -9,6 +10,7 @@ export interface DirectChargeInput {
   userEmail?: string;
   userCountry?: string;
   senderName: string;
+  /** Validation locale / affichage USSD ; non envoyé (routing provider par téléphone). */
   paymentMethodCode: DirectChargeOperator;
   callbackUrl?: string;
   raisonForTransfer?: string;
@@ -29,6 +31,20 @@ export interface DirectChargeResult {
 
 const PROVIDER_CODE_PATTERN = /^[A-Za-z0-9_]{1,50}$/;
 const REFUSAL_REASON_PATTERN = /^[A-Z_]{1,50}$/;
+
+/** Certains 400 provider n'ont pas de code : inférer uniquement les cas évidents. */
+function inferDirectChargeCode(message?: string): string | undefined {
+  const text = String(message || '').toLowerCase();
+  if (!text) return undefined;
+  if (/(below|under).*(min|minimum)|minimum.*amount|amount.*minimum/.test(text)) {
+    return 'AMOUNT_BELOW_MIN';
+  }
+  if (/(exceed|above).*(max|maximum)|maximum.*amount|amount.*maximum/.test(text)) {
+    return 'AMOUNT_EXCEEDS_MAX';
+  }
+  if (/limit/.test(text)) return 'LIMIT_EXCEEDED';
+  return undefined;
+}
 
 /**
  * 409 d'idempotence : la requête initiale est encore en cours (ou son effet de
@@ -104,6 +120,11 @@ export class DigikuntzProvider {
   // Timeout serré pour ne pas bloquer un encaissement client lorsque DigiKuntz
   // ne répond pas. Au-delà → ServiceUnavailableException = gateway indisponible.
   private readonly requestTimeoutMs = Number(process.env.DIGIKUNTZ_REQUEST_TIMEOUT_MS || 12000);
+  // Le direct charge est plus lent (push opérateur) : un délai trop court
+  // produit des issues « unknown » évitables.
+  private readonly directChargeTimeoutMs = Number(
+    process.env.DIGIKUNTZ_DIRECT_CHARGE_TIMEOUT_MS || 20000,
+  );
 
   private get headers() {
     return {
@@ -146,15 +167,16 @@ export class DigikuntzProvider {
    * Le corps brut n'est jamais renvoyé ni inclus dans un message.
    */
   async initiateDirectCharge(input: DirectChargeInput): Promise<DirectChargeResult> {
+    // Format aligné sur la requête de référence DigiKuntz qui fonctionne :
+// téléphone local 9 chiffres, pas de paymentMethodCode (routing par numéro),
+// pas de callbackUrl.
     const { status, ok, json } = await this.postDirectCharge({
       estimation: input.estimation,
       currency: 'XAF',
       userPhone: input.userPhone,
-      userEmail: input.userEmail ?? '',
+      ...(input.userEmail ? { userEmail: input.userEmail } : {}),
       userCountry: input.userCountry || 'Cameroon',
       senderName: input.senderName,
-      paymentMethodCode: input.paymentMethodCode,
-      callbackUrl: input.callbackUrl ?? '',
       raisonForTransfer: input.raisonForTransfer ?? 'Payment',
     }, { idempotencyKey: input.idempotencyKey });
 
@@ -173,7 +195,7 @@ export class DigikuntzProvider {
     }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const timer = setTimeout(() => controller.abort(), this.directChargeTimeoutMs);
     try {
       const res = await fetch(`${this.baseUrl}/dev/direct-charge`, {
         method: 'POST',
@@ -203,20 +225,30 @@ export class DigikuntzProvider {
   private classifyDirectChargeFailure(status: number, body: any): DigikuntzDirectChargeError {
     const rawCode = body?.errors?.[0]?.code;
     const providerCode = typeof rawCode === 'string' && PROVIDER_CODE_PATTERN.test(rawCode) ? rawCode : undefined;
-    this.logger.warn(`DigiKuntz direct charge HTTP ${status}${providerCode ? ` (${providerCode})` : ''}`);
+    const rawMessage = body?.errors?.[0]?.message ?? body?.message ?? body?.error;
+    // Message assaini, journalisé et stocké en base pour diagnostic ; jamais
+    // renvoyé au client. Tronqué pour éviter un log géant.
+    const providerMessage = typeof rawMessage === 'string' ? rawMessage.slice(0, 200) : undefined;
+    // Certains 400 n'exposent pas de code : on infère les cas sans ambiguïté.
+    const inferredCode = providerCode ?? inferDirectChargeCode(providerMessage);
+    this.logger.warn(
+      `DigiKuntz direct charge HTTP ${status}${inferredCode ? ` (${inferredCode})` : ''}${providerMessage ? ` — ${providerMessage}` : ''}`,
+    );
 
-    if (status === 503 && providerCode === 'DIRECT_CHARGE_DISABLED') {
-      return new DigikuntzDirectChargeError('rejected', providerCode, status);
+    if (status === 503 && inferredCode === 'DIRECT_CHARGE_DISABLED') {
+      return new DigikuntzDirectChargeError('rejected', inferredCode, status, providerMessage);
     }
     // 409 = clé d'idempotence déjà en cours / conflit fournisseur : l'issue est
     // ambiguë. Ne jamais le classer comme un rejet certain, sinon le service
     // créerait un nouveau paiement alors que la demande précédente peut aboutir.
     if (status === 409) {
-      return new DigikuntzDirectChargeError('unknown', providerCode, status);
+      return new DigikuntzDirectChargeError('unknown', inferredCode, status, providerMessage);
     }
     const isClientError = status >= 400 && status < 500 && status !== 408 && status !== 429;
-    if (isClientError) return new DigikuntzDirectChargeError('rejected', providerCode, status);
-    return new DigikuntzDirectChargeError('unknown', providerCode, status);
+    if (isClientError) {
+      return new DigikuntzDirectChargeError('rejected', inferredCode, status, providerMessage);
+    }
+    return new DigikuntzDirectChargeError('unknown', inferredCode, status, providerMessage);
   }
 
   private parseDirectChargeSuccess(json: any): DirectChargeResult {
@@ -251,7 +283,9 @@ export class DigikuntzProvider {
     userEmail?: string,
     options?: { idempotencyKey?: string },
   ) {
-    const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+    const frontendUrl = publicFrontendUrl();
+    // Un provider refuse généralement un callbackUrl localhost : en dev on
+    // l'omet pour laisser DigiKuntz utiliser son fallbackUrl de compte.
     const callbackUrl = frontendUrl ? `${frontendUrl}/orders` : '';
     const res = await this.fetchWithTimeout(`${this.baseUrl}/dev/transaction`, {
       method: 'POST',

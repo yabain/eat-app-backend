@@ -5,7 +5,7 @@ const BASE_URL = 'https://digikuntz.test/dev';
 
 const baseInput = {
   estimation: 4200,
-  userPhone: '237650123456',
+  userPhone: '650123456',
   userEmail: 'payer@example.com',
   userCountry: 'Cameroon',
   senderName: 'Jean Dupont',
@@ -77,7 +77,7 @@ describe('DigikuntzProvider.initiateDirectCharge', () => {
   }
 
   describe('succès', () => {
-    it('envoie currency XAF, paymentMethodCode explicite et userPhone tel que fourni', async () => {
+    it('envoie le format de référence : currency XAF, téléphone local, sans paymentMethodCode ni callbackUrl', async () => {
       fetchSpy.mockResolvedValueOnce(jsonResponse(201, acceptedBody));
 
       await provider.initiateDirectCharge({ ...baseInput, paymentMethodCode: 'ORANGEMONEY' });
@@ -87,8 +87,9 @@ describe('DigikuntzProvider.initiateDirectCharge', () => {
       expect(init.method).toBe('POST');
       const sent = JSON.parse(init.body as string);
       expect(sent.currency).toBe('XAF');
-      expect(sent.paymentMethodCode).toBe('ORANGEMONEY');
-      expect(sent.userPhone).toBe('237650123456');
+      expect(sent.paymentMethodCode).toBeUndefined();
+      expect(sent.callbackUrl).toBeUndefined();
+      expect(sent.userPhone).toBe('650123456');
       expect(sent.estimation).toBe(4200);
     });
 
@@ -229,7 +230,7 @@ describe('DigikuntzProvider.initiateDirectCharge', () => {
     });
 
     it('timeout : la requête est annulée par AbortController → unknown', async () => {
-      process.env.DIGIKUNTZ_REQUEST_TIMEOUT_MS = '20';
+      process.env.DIGIKUNTZ_DIRECT_CHARGE_TIMEOUT_MS = '20';
       provider = new DigikuntzProvider();
       fetchSpy.mockImplementationOnce(
         (_url: any, init: any) =>

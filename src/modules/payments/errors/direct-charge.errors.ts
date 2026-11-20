@@ -7,6 +7,7 @@ import { HttpException } from '@nestjs/common';
 export const DIRECT_CHARGE_ERROR_CODES = [
   'PAYMENT_PHONE_MISSING',
   'PAYMENT_PHONE_INVALID',
+  'PAYMENT_OPERATOR_MISMATCH',
   'PAYMENT_OPERATOR_UNSUPPORTED',
   'PAYMENT_METHOD_UNAVAILABLE',
   'PAYMENT_AMOUNT_OUT_OF_RANGE',
@@ -15,6 +16,7 @@ export const DIRECT_CHARGE_ERROR_CODES = [
   'PAYMENT_DIRECT_DISABLED',
   'PAYMENT_IN_PROGRESS',
   'PAYMENT_OUTCOME_UNKNOWN',
+  'PAYMENT_EXPIRED',
   'INSUFFICIENT_STOCK',
 ] as const;
 
@@ -28,6 +30,10 @@ export const DIRECT_CHARGE_ERRORS: Record<DirectChargeErrorCode, { httpStatus: n
   PAYMENT_PHONE_INVALID: {
     httpStatus: 400,
     message: 'Le numéro de téléphone de votre profil n’est pas valide pour le paiement mobile money.',
+  },
+  PAYMENT_OPERATOR_MISMATCH: {
+    httpStatus: 400,
+    message: 'Le numéro saisi ne correspond pas au réseau mobile money sélectionné.',
   },
   PAYMENT_OPERATOR_UNSUPPORTED: {
     httpStatus: 400,
@@ -65,6 +71,10 @@ export const DIRECT_CHARGE_ERRORS: Record<DirectChargeErrorCode, { httpStatus: n
     httpStatus: 409,
     message:
       'Nous ne pouvons pas confirmer si la demande de paiement a abouti. Ne relancez pas le paiement tout de suite : vérifiez le statut de votre commande ou contactez le support.',
+  },
+  PAYMENT_EXPIRED: {
+    httpStatus: 400,
+    message: 'Cette commande a expiré. Créez une nouvelle commande pour payer.',
   },
 };
 
@@ -111,6 +121,8 @@ export class DigikuntzDirectChargeError extends Error {
     public readonly kind: 'rejected' | 'unknown',
     public readonly providerCode?: string,
     public readonly httpStatus?: number,
+    /** Message fournisseur assaini (jamais renvoyé au client). */
+    public readonly providerMessage?: string,
   ) {
     super(`DigiKuntz direct charge ${kind}`);
     this.name = 'DigikuntzDirectChargeError';

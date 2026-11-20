@@ -7,6 +7,8 @@ export class CreateCategoryDto {
   @IsOptional() @IsString() description?: string;
   @ApiPropertyOptional({ example: '/uploads/categories/grillades.png' })
   @IsOptional() @IsString() image?: string;
+  @ApiPropertyOptional({ example: 0, description: "Ordre d'affichage global (0 = premier)." })
+  @IsOptional() @IsInt() @Min(0) order?: number;
   @ApiPropertyOptional({ example: true })
   @IsOptional() @IsBoolean() isActive?: boolean;
   @ApiPropertyOptional({ example: false, description: 'Catégorie affichée par défaut sur la page restaurant' })

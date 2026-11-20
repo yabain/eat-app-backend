@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, SortOrder } from 'mongoose';
+import { Model, SortOrder, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.schema';
@@ -195,7 +195,7 @@ export class UsersService {
     if (actor.role === UserRole.DRIVER && dto.isDriverAvailable !== undefined) {
       if (dto.isDriverAvailable === true) {
         const activeDelivery = await this.deliveryModel.exists({
-          driverId: actor.sub,
+          driverId: new Types.ObjectId(actor.sub),
           status: { $in: ['assigned', 'picked_up', 'out_for_delivery'] },
         });
         if (activeDelivery) {

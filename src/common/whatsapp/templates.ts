@@ -87,7 +87,7 @@ export function restaurantOrderConfirmedWhatsappTemplate(input: {
     input.clientName ? `Client: *${input.clientName}*` : undefined,
     input.clientPhone ? `Téléphone client: *${input.clientPhone}*` : undefined,
     input.address ? `Adresse: _${input.address}_` : undefined,
-    input.total !== undefined ? `Total: *${money(input.total)}*` : undefined,
+    // input.total !== undefined ? `Total: *${money(input.total)}*` : undefined,
     items ? `\nArticles:\n${items}` : undefined,
     '\n',
     '`Merci de confirmer rapidement la commande et de démarrer la préparation.`',

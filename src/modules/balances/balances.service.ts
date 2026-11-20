@@ -1309,6 +1309,112 @@ export class BalancesService {
   }
 
   /**
+   * Retrait automatique quotidien des restaurants configurés, à 00:30
+   * (Africa/Douala). Retire la totalité du solde disponible si celui-ci
+   * dépasse strictement le minimum système.
+   */
+  @Cron('30 0 * * *', { timeZone: 'Africa/Douala' })
+  async runRestaurantAutoWithdrawals() {
+    if (!(await this.cronLease.acquire('balances.restaurantAutoWithdrawals', 10 * 60 * 1000))) return;
+
+    const minAmount = Math.max(0, Number(process.env.MIN_WITHDRAWAL_AMOUNT_XAF || 1000));
+    const dayKey = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Douala',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+
+    const restaurants = await this.restaurantModel
+      .find({ status: 'active', 'autoWithdrawal.enabled': true })
+      .select('_id name managerId autoWithdrawal')
+      .limit(500)
+      .lean();
+
+    for (const restaurant of restaurants) {
+      try {
+        const settings: any = restaurant.autoWithdrawal || {};
+        const phone = normalizeCameroonPhone(String(settings.phone || ''));
+        const accountBankCode = settings.accountBankCode;
+        if (!/^6\d{8}$/.test(phone) || !accountBankCode) {
+          this.logger.warn(
+            `Auto withdrawal skipped for restaurant ${restaurant._id}: invalid phone/network`,
+          );
+          continue;
+        }
+        if (detectCameroonMobileMoneyOperator(phone) !== accountBankCode) {
+          this.logger.warn(
+            `Auto withdrawal skipped for restaurant ${restaurant._id}: phone/network mismatch`,
+          );
+          continue;
+        }
+        if (!restaurant.managerId) {
+          this.logger.warn(
+            `Auto withdrawal skipped for restaurant ${restaurant._id}: no manager`,
+          );
+          continue;
+        }
+
+        const manager = await this.userModel.findById(restaurant.managerId);
+        if (!manager || manager.isActive === false) {
+          this.logger.warn(
+            `Auto withdrawal skipped for restaurant ${restaurant._id}: inactive/missing manager`,
+          );
+          continue;
+        }
+
+        // Ne jamais empiler un second retrait tant que le précédent n'est pas soldé.
+        const pending = await this.withdrawalModel.exists({
+          ownerType: 'restaurant',
+          restaurantId: restaurant._id,
+          status: { $in: ['pending', 'approved', 'gateway_unavailable'] },
+        });
+        if (pending) {
+          this.logger.debug(
+            `Auto withdrawal skipped for restaurant ${restaurant._id}: withdrawal already pending`,
+          );
+          continue;
+        }
+
+        const balance = await this.balanceFor({
+          ownerType: 'restaurant',
+          restaurantId: restaurant._id,
+        });
+        if (!Number.isFinite(balance) || balance <= minAmount) {
+          this.logger.debug(
+            `Auto withdrawal skipped for restaurant ${restaurant._id}: balance ${balance} <= minimum ${minAmount}`,
+          );
+          continue;
+        }
+
+        const amount = Math.floor(balance);
+        const result = await this.createWithdrawal(
+          {
+            sub: String(manager._id),
+            email: manager.email,
+            role: UserRole.MANAGER,
+            restaurantId: String(restaurant._id),
+          },
+          {
+            amount,
+            phone,
+            accountBankCode,
+            idempotencyKey: `auto-${restaurant._id}-${dayKey}`,
+          } as CreateWithdrawalDto,
+        );
+
+        this.logger.log(
+          `Auto withdrawal initiated for restaurant ${restaurant._id}: amount=${amount}, withdrawal=${(result as any)?.withdrawal?._id || 'unknown'}`,
+        );
+      } catch (error: any) {
+        this.logger.warn(
+          `Auto withdrawal failed for restaurant ${restaurant?._id}: ${error?.message || error}`,
+        );
+      }
+    }
+  }
+
+  /**
    * Encapsule l'appel à DigiKuntz `initiatePayout` et catégorise le résultat
    * pour le consommateur (createWithdrawal + cron de retry) :
    *   - `success` : transaction acceptée par DigiKuntz

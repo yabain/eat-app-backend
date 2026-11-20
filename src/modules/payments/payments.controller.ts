@@ -16,6 +16,7 @@ import {
 import { PaymentsService } from './payments.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { DigikuntzWebhookDto } from './dto/digikuntz-webhook.dto';
+import { InitiateDirectChargeDto } from './dto/initiate-direct-charge.dto';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/roles.enum';
@@ -116,16 +117,21 @@ export class PaymentsController {
   @ApiOperation({
     summary: 'Initier un paiement mobile money direct (sans lien de redirection)',
     description:
-      'Réservé au client propriétaire de la commande. Envoie une demande de confirmation sur le téléphone du client (Orange ou MTN, numéro lu côté serveur). Si DigiKuntz refuse le direct, `outcome` vaut `refused` et `paymentLink` contient le lien hébergé. En cas d’issue inconnue (`PAYMENT_OUTCOME_UNKNOWN`), ne pas relancer le paiement avant vérification du statut de la commande.',
+      'Réservé au client propriétaire de la commande. Envoie une demande de confirmation sur le téléphone mobile money indiqué (numéro prérempli avec celui du profil, éditable). Le réseau sélectionné doit correspondre au numéro ; le backend revalide tout. Si DigiKuntz refuse le direct, `outcome` vaut `refused` et `paymentLink` contient le lien hébergé. En cas d’issue inconnue (`PAYMENT_OUTCOME_UNKNOWN`), ne pas relancer le paiement avant vérification du statut de la commande.',
   })
   @ApiParam({ name: 'orderId', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiBody({ type: InitiateDirectChargeDto, required: false })
   @ApiCreatedResponse({ description: 'Demande directe traitée (demande envoyée ou refus avec lien)', type: DirectChargeInitiateResponseDto })
   @ApiBadRequestResponse({ description: 'Téléphone, opérateur, montant ou moyen de paiement non acceptés (code : PAYMENT_*)', type: DirectChargeErrorDto })
   @ApiForbiddenResponse({ description: 'Réservé au client propriétaire de la commande' })
   @ApiConflictResponse({ description: 'Paiement déjà en cours (PAYMENT_IN_PROGRESS) ou issue inconnue (PAYMENT_OUTCOME_UNKNOWN)', type: DirectChargeErrorDto })
   @ApiServiceUnavailableResponse({ description: 'Paiement mobile money direct désactivé côté fournisseur (PAYMENT_DIRECT_DISABLED)', type: DirectChargeErrorDto })
-  initiateDirect(@Param('orderId') orderId: string, @Req() req: any) {
-    return this.service.initiateDirectPayment(orderId, req.user);
+  initiateDirect(
+    @Param('orderId') orderId: string,
+    @Body() dto: InitiateDirectChargeDto,
+    @Req() req: any,
+  ) {
+    return this.service.initiateDirectPayment(orderId, req.user, dto);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

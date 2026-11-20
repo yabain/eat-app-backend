@@ -14,6 +14,9 @@ export class CategoryResponseDto {
   @ApiPropertyOptional({ example: '/uploads/categories/boissons.png' })
   image?: string;
 
+  @ApiProperty({ example: 0, description: "Ordre d'affichage global (0 = premier)." })
+  order: number;
+
   @ApiProperty({ example: true })
   isActive: boolean;
 

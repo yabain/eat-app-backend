@@ -8,6 +8,7 @@ import { deleteLocalUpload, deleteReplacedLocalUpload } from '../../common/utils
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { CreateAccompanimentDto, UpdateAccompanimentDto } from './dto/accompaniment.dto';
+import { MoveCategoryDto } from './dto/move-category.dto';
 
 @Injectable()
 export class CategoriesService {
@@ -16,7 +17,18 @@ export class CategoriesService {
     if (dto.isDefault === true) {
       await this.model.updateMany({ isDefault: true }, { $set: { isDefault: false } });
     }
-    return this.model.create(dto);
+    const order = dto.order ?? (await this.nextOrder());
+    return this.model.create({ ...dto, order });
+  }
+
+  /** Place une nouvelle catégorie à la fin de l'ordre d'affichage. */
+  private async nextOrder(): Promise<number> {
+    const last = await this.model
+      .findOne()
+      .sort({ order: -1, createdAt: -1 })
+      .select('order')
+      .lean();
+    return Number((last as any)?.order ?? -1) + 1;
   }
   async findOne(id: string) {
     const item = await this.model.findById(id);
@@ -38,7 +50,7 @@ export class CategoriesService {
     const [data, total] = await Promise.all([
       this.model
         .find(filter)
-        .sort({ createdAt: -1 })
+        .sort({ order: 1, createdAt: 1 })
         .skip(pagination.skip)
         .limit(pagination.limit),
       this.model.countDocuments(filter),
@@ -49,6 +61,41 @@ export class CategoriesService {
       meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     };
   }
+  /**
+   * Monte/descend une catégorie d'un cran. L'ordre complet est normalisé
+   * (0..n-1) puis échangé, ce qui corrige aussi les anciennes catégories
+   * restées à `order = 0`.
+   */
+  async move(id: string, dto: MoveCategoryDto) {
+    const categories = await this.model
+      .find()
+      .sort({ order: 1, createdAt: 1 })
+      .select('_id order')
+      .lean();
+
+    const index = categories.findIndex((category: any) => String(category._id) === String(id));
+    if (index < 0) throw new NotFoundException('Category not found');
+
+    const target = dto.direction === 'up' ? index - 1 : index + 1;
+    if (target < 0 || target >= categories.length) {
+      return { moved: false };
+    }
+
+    const reordered = [...categories];
+    [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+
+    await this.model.bulkWrite(
+      reordered.map((category: any, position: number) => ({
+        updateOne: {
+          filter: { _id: category._id },
+          update: { $set: { order: position } },
+        },
+      })),
+    );
+
+    return { moved: true, order: target };
+  }
+
   async update(id: string, dto: UpdateCategoryDto) {
     const existing = await this.model.findById(id);
     if (!existing) {

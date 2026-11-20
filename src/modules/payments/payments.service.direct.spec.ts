@@ -208,15 +208,64 @@ describe('PaymentsService — paiement mobile money direct', () => {
       expect(result.ussdCode).toBeNull();
     });
 
-    it('envoie le téléphone normalisé 237… et l’opérateur local explicite au provider', async () => {
+    it('envoie le téléphone local 9 chiffres et l’opérateur local au provider', async () => {
       provider.initiateDirectCharge.mockResolvedValue(acceptedResult);
 
       await service.initiateDirectPayment(String(ORDER_ID), clientActor);
 
       expect(provider.initiateDirectCharge).toHaveBeenCalledTimes(1);
       expect(provider.initiateDirectCharge.mock.calls[0][0]).toEqual(
-        expect.objectContaining({ userPhone: `237${ORANGE_PHONE}`, paymentMethodCode: 'ORANGEMONEY', estimation: 4200 }),
+        expect.objectContaining({ userPhone: ORANGE_PHONE, paymentMethodCode: 'ORANGEMONEY', estimation: 4200 }),
       );
+    });
+
+    it('utilise le numéro et le réseau fournis dans le récap', async () => {
+      provider.initiateDirectCharge.mockResolvedValue({ ...acceptedResult, paymentMethodCode: 'MTN' });
+
+      const result = await service.initiateDirectPayment(String(ORDER_ID), clientActor, {
+        phone: MTN_PHONE,
+        paymentMethodCode: 'MTN',
+      });
+
+      expect(provider.initiateDirectCharge).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userPhone: MTN_PHONE,
+          paymentMethodCode: 'MTN',
+        }),
+      );
+      expect(result.operator).toBe('MTN');
+    });
+
+    it('refuse un réseau qui ne correspond pas au numéro fourni', async () => {
+      let error: any;
+      try {
+        await service.initiateDirectPayment(String(ORDER_ID), clientActor, {
+          phone: MTN_PHONE,
+          paymentMethodCode: 'ORANGEMONEY',
+        });
+      } catch (err) {
+        error = err;
+      }
+
+      expect(error?.getResponse?.()).toEqual(
+        expect.objectContaining({ code: 'PAYMENT_OPERATOR_MISMATCH' }),
+      );
+      expect(provider.initiateDirectCharge).not.toHaveBeenCalled();
+    });
+
+    it('omet le callbackUrl localhost envoyé au provider', async () => {
+      const previous = process.env.FRONTEND_URL;
+      process.env.FRONTEND_URL = 'http://localhost:4200';
+      provider.initiateDirectCharge.mockResolvedValue(acceptedResult);
+      try {
+        await service.initiateDirectPayment(String(ORDER_ID), clientActor);
+
+        const call = provider.initiateDirectCharge.mock.calls[0][0];
+        expect(call).not.toHaveProperty('callbackUrl');
+      } finally {
+        if (previous === undefined) delete process.env.FRONTEND_URL;
+        else process.env.FRONTEND_URL = previous;
+      }
     });
 
     it('crée le Payment (calling) AVANT l’appel provider, puis persiste l’issue', async () => {
@@ -1223,6 +1272,164 @@ describe('PaymentsService — paiement mobile money direct', () => {
 
       await (service as any).applyPayinStatus(payment, order, 'payin_error', { status: 'payin_error' });
       expect(restore).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('expiration — fenêtres de retenue', () => {
+    it('retient un unknown récent mais pas un unknown de plus de 30 min', () => {
+      expect(
+        (service as any).isHeldByDirectCharge(
+          makeStoredPayment({ status: 'processing', directChargeOutcome: 'unknown', createdAt: new Date() }),
+        ),
+      ).toBe(true);
+      expect(
+        (service as any).isHeldByDirectCharge(
+          makeStoredPayment({
+            status: 'processing',
+            directChargeOutcome: 'unknown',
+            createdAt: new Date(Date.now() - 31 * 60 * 1000),
+          }),
+        ),
+      ).toBe(false);
+    });
+
+    it('retient un prompt_sent récent mais pas au-delà du TTL commande', () => {
+      expect(
+        (service as any).isHeldByDirectCharge(
+          makeStoredPayment({
+            status: 'processing',
+            directChargeOutcome: 'prompt_sent',
+            paymentMethod: 'direct_charge',
+            createdAt: new Date(),
+          }),
+        ),
+      ).toBe(true);
+      expect(
+        (service as any).isHeldByDirectCharge(
+          makeStoredPayment({
+            status: 'processing',
+            directChargeOutcome: 'prompt_sent',
+            paymentMethod: 'direct_charge',
+            createdAt: new Date(Date.now() - 31 * 60 * 1000),
+          }),
+        ),
+      ).toBe(false);
+    });
+
+    it('retient un calling 1 min mais pas 3 min', () => {
+      expect(
+        (service as any).isHeldByDirectCharge(
+          makeStoredPayment({
+            status: 'processing',
+            directChargeOutcome: 'calling',
+            createdAt: new Date(Date.now() - 60 * 1000),
+          }),
+        ),
+      ).toBe(true);
+      expect(
+        (service as any).isHeldByDirectCharge(
+          makeStoredPayment({
+            status: 'processing',
+            directChargeOutcome: 'calling',
+            createdAt: new Date(Date.now() - 3 * 60 * 1000),
+          }),
+        ),
+      ).toBe(false);
+    });
+
+    it('refuse une commande créée il y a plus de 30 min', () => {
+      const oldOrder = makeOrder({ createdAt: new Date(Date.now() - 31 * 60 * 1000) });
+      expect(() => (service as any).assertPaymentWindow(oldOrder)).toThrow();
+      expect(() => (service as any).assertPaymentWindow(makeOrder())).not.toThrow();
+    });
+  });
+
+  describe('statut — rafraîchissement provider à la demande', () => {
+    it('un paiement processing avec providerRef est synchronisé avant la réponse', async () => {
+      const processing = makeStoredPayment({
+        status: 'processing',
+        providerRef: 'PROV-SYNC',
+        providerStatus: 'payin_pending',
+      });
+      paymentModel.findOne.mockReturnValue({
+        sort: jest.fn().mockResolvedValue(processing),
+      });
+      orderModel.findById.mockResolvedValue(makeOrder({ paymentStatus: 'processing' }));
+      provider.getTransactionStatus.mockResolvedValue({
+        id: 'PROV-SYNC',
+        status: 'payin_success',
+        data: {},
+      });
+      const apply = jest
+        .spyOn(service as any, 'applyPayinStatus')
+        .mockResolvedValue(true);
+      const paid = makeStoredPayment({
+        status: 'paid',
+        providerRef: 'PROV-SYNC',
+      });
+      paymentModel.findById.mockResolvedValue(paid);
+
+      const view = await service.paymentStatus(String(ORDER_ID), clientActor);
+
+      expect(provider.getTransactionStatus).toHaveBeenCalledWith('PROV-SYNC');
+      expect(apply).toHaveBeenCalled();
+      expect(view?.status).toBe('paid');
+    });
+  });
+
+  describe('issue inconnue — renvoi de la même demande', () => {
+    it('rejoue le même Payment et la même clé après le cooldown', async () => {
+      const unknown = makeStoredPayment({
+        status: 'processing',
+        directChargeOutcome: 'unknown',
+        directChargeOperator: 'ORANGEMONEY',
+        directChargePhone: ORANGE_PHONE,
+        updatedAt: new Date(Date.now() - 5 * 60 * 1000),
+      });
+      setExistingPayment(unknown);
+      const claimed = {
+        ...unknown,
+        directChargeOutcome: 'calling',
+        save: jest.fn().mockResolvedValue(undefined),
+      };
+      paymentModel.findOneAndUpdate.mockResolvedValueOnce(claimed);
+      provider.initiateDirectCharge.mockResolvedValue(acceptedResult);
+
+      const result = await service.initiateDirectPayment(String(ORDER_ID), clientActor);
+
+      expect(paymentModel.create).not.toHaveBeenCalled();
+      expect(provider.initiateDirectCharge).toHaveBeenCalledWith(
+        expect.objectContaining({
+          idempotencyKey: String(unknown._id),
+          userPhone: ORANGE_PHONE,
+          paymentMethodCode: 'ORANGEMONEY',
+        }),
+      );
+      expect(result.outcome).toBe('prompt_sent');
+    });
+
+    it('refuse un renvoi immédiat pendant le cooldown', async () => {
+      const unknown = makeStoredPayment({
+        status: 'processing',
+        directChargeOutcome: 'unknown',
+        directChargeOperator: 'ORANGEMONEY',
+        directChargePhone: ORANGE_PHONE,
+        updatedAt: new Date(),
+      });
+      setExistingPayment(unknown);
+
+      let error: any;
+      try {
+        await service.initiateDirectPayment(String(ORDER_ID), clientActor);
+      } catch (err) {
+        error = err;
+      }
+
+      expect(error?.getResponse?.()).toEqual(
+        expect.objectContaining({ code: 'PAYMENT_OUTCOME_UNKNOWN' }),
+      );
+      expect(provider.initiateDirectCharge).not.toHaveBeenCalled();
+      expect(paymentModel.findOneAndUpdate).not.toHaveBeenCalled();
     });
   });
 

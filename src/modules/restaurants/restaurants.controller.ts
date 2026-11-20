@@ -12,6 +12,7 @@ import { AssignManagerDto } from './dto/assign-manager.dto';
 import { CreateRestaurantDto } from './dto/create-restaurant.dto';
 import { UpdateRestaurantMediaDto } from './dto/update-restaurant-media.dto';
 import { UpdateRestaurantDto } from './dto/update-restaurant.dto';
+import { UpdateAutoWithdrawalDto } from './dto/update-auto-withdrawal.dto';
 import { AssignEmployeeDto } from './dto/assign-employee.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -62,6 +63,22 @@ export class RestaurantsController {
   @ApiOperation({ summary: 'Détail de mon restaurant (manager/employé)' })
   @ApiOkResponse({ description: 'Restaurant du compte connecté', type: RestaurantResponseDto })
   myRestaurant(@Req() req: any) { return this.service.findForStaff(req.user); }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.MANAGER)
+  @Patch('my/auto-withdrawal')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({
+    summary: 'Configurer le retrait automatique du restaurant (manager)',
+    description:
+      'Active/désactive le retrait quotidien de la totalité du solde restaurant. Le numéro et le réseau sont revalidés côté serveur.',
+  })
+  @ApiBody({ type: UpdateAutoWithdrawalDto })
+  @ApiOkResponse({ description: 'Configuration mise à jour', type: RestaurantResponseDto })
+  updateMyAutoWithdrawal(@Req() req: any, @Body() dto: UpdateAutoWithdrawalDto) {
+    return this.service.updateAutoWithdrawal(req.user, dto);
+  }
+
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Get()

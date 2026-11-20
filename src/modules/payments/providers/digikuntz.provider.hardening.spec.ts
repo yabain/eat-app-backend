@@ -387,4 +387,43 @@ describe('DigikuntzProvider — durcissement', () => {
       expect(result).not.toHaveProperty('status');
     });
   });
+
+  describe('callbackUrl et diagnostic 400', () => {
+    it('omet le callbackUrl localhost du paiement hébergé', async () => {
+      process.env.FRONTEND_URL = 'http://localhost:4200';
+      const provider = buildProvider();
+      fetchSpy.mockResolvedValueOnce(
+        jsonResponse(201, {
+          id: 'P-1',
+          status: 'payin_pending',
+          data: { paymentLink: 'https://checkout.flutterwave.com/x' },
+        }),
+      );
+
+      await provider.initiatePayment('ORD-1', 100, '237650123456', 'e@x.cm');
+
+      const body = JSON.parse(String(fetchSpy.mock.calls[0][1].body));
+      expect(body.callbackUrl).toBeUndefined();
+    });
+
+    it('infère AMOUNT_BELOW_MIN depuis le message quand le code manque', async () => {
+      const provider = buildProvider();
+      fetchSpy.mockResolvedValueOnce(
+        jsonResponse(400, { message: 'Amount is below the minimum for Orange Money' }),
+      );
+
+      const error = await captureError(
+        provider.initiateDirectCharge({
+          estimation: 189,
+          userPhone: '237691224472',
+          senderName: 'Jean',
+          paymentMethodCode: 'ORANGEMONEY',
+        }),
+      );
+
+      expect(error.kind).toBe('rejected');
+      expect(error.providerCode).toBe('AMOUNT_BELOW_MIN');
+      expect(error.providerMessage).toContain('minimum');
+    });
+  });
 });

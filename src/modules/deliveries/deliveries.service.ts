@@ -1,4 +1,11 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+} from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, Model, Types } from 'mongoose';
 import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.schema';
@@ -26,7 +33,7 @@ import {
 } from '../../common/utils/delivery-status-transition.util';
 
 @Injectable()
-export class DeliveriesService {
+export class DeliveriesService implements OnModuleInit {
   private readonly logger = new Logger(DeliveriesService.name);
 
   constructor(
@@ -43,6 +50,37 @@ export class DeliveriesService {
   ) {}
 
   private readonly autoDispatchKey = 'auto-dispatch';
+
+  async onModuleInit() {
+    await this.normalizeDeliveryObjectIds();
+  }
+
+  /**
+   * Corrige les Delivery historiques dont `driverId`/`orderId` ont été stockés
+   * en string (ancien chemin Mongoose Mixed). Idempotent, exécuté au boot.
+   */
+  private async normalizeDeliveryObjectIds() {
+    const idRegex = /^[a-fA-F0-9]{24}$/;
+    try {
+      const [drivers, orders] = await Promise.all([
+        this.deliveryModel.collection.updateMany(
+          { driverId: { $type: 'string', $regex: idRegex } },
+          [{ $set: { driverId: { $toObjectId: '$driverId' } } }],
+        ),
+        this.deliveryModel.collection.updateMany(
+          { orderId: { $type: 'string', $regex: idRegex } },
+          [{ $set: { orderId: { $toObjectId: '$orderId' } } }],
+        ),
+      ]);
+      if (drivers.modifiedCount || orders.modifiedCount) {
+        this.logger.log(
+          `Normalized delivery ObjectIds (driverId=${drivers.modifiedCount}, orderId=${orders.modifiedCount})`,
+        );
+      }
+    } catch (error: any) {
+      this.logger.warn(`Unable to normalize delivery ObjectIds: ${error?.message || error}`);
+    }
+  }
 
   private displayName(user: any) {
     return `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || user?.phone || '';
@@ -143,7 +181,7 @@ export class DeliveriesService {
 
         [delivery] = await this.deliveryModel.create([{
           orderId: order._id,
-          driverId: dto.driverId,
+          driverId: new Types.ObjectId(dto.driverId),
           status: 'assigned',
           assignedAt: new Date(),
         }], { session });
@@ -245,7 +283,7 @@ export class DeliveriesService {
     this.logger.log(`Automatic delivery dispatch ${enabled ? 'enabled' : 'disabled'}`);
     return {
       enabled: settings.enabled,
-      intervalMinutes: 3,
+      intervalMinutes: 1,
       lastRunAt: settings.lastRunAt || null,
       lastAssignedCount: settings.lastAssignedCount || 0,
     };
@@ -254,9 +292,10 @@ export class DeliveriesService {
   /** Capacité maximale de commandes actives simultanément par livreur. */
   private static readonly MAX_ACTIVE_DELIVERIES_PER_DRIVER = 5;
 
-  @Cron('*/3 * * * *')
+  @Cron(CronExpression.EVERY_MINUTE)
   async runAutomaticDispatch() {
-    if (!(await this.cronLease.acquire('deliveries.autoDispatch', 2 * 60 * 1000))) return;
+    // Lease < intervalle (60 s) pour libérer le tour suivant.
+    if (!(await this.cronLease.acquire('deliveries.autoDispatch', 50 * 1000))) return;
     const settings = await this.getOrCreateAutoDispatchSettings();
     if (!settings.enabled) return;
 
@@ -497,12 +536,20 @@ export class DeliveriesService {
   async my(driverId: string, page?: number, limit?: number, filters?: { q?: string; status?: string; orderId?: string }) {
     const pagination = normalizePagination(page, limit);
     const qRegex = buildContainsRegex(filters?.q);
-    const filter: any = { driverId };
+    const filter: any = {
+      driverId: Types.ObjectId.isValid(driverId)
+        ? new Types.ObjectId(driverId)
+        : driverId,
+    };
     if (filters?.status) {
       const statuses = filters.status.split(',').map((status) => status.trim()).filter(Boolean);
       filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
     }
-    if (filters?.orderId) filter.orderId = filters.orderId;
+    if (filters?.orderId) {
+      filter.orderId = Types.ObjectId.isValid(filters.orderId)
+        ? new Types.ObjectId(filters.orderId)
+        : filters.orderId;
+    }
 
     if (qRegex) {
       const [restaurants, users] = await Promise.all([

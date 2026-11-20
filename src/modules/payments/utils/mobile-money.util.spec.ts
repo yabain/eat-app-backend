@@ -47,16 +47,16 @@ describe('detectMobileMoneyOperator', () => {
 });
 
 describe('normalizeCmPhoneForDirectCharge', () => {
-  it('6XXXXXXXX → 2376XXXXXXXX', () => {
-    expect(normalizeCmPhoneForDirectCharge('650123456')).toBe('237650123456');
+  it('6XXXXXXXX → 6XXXXXXXX (format local attendu par /dev/direct-charge)', () => {
+    expect(normalizeCmPhoneForDirectCharge('650123456')).toBe('650123456');
   });
 
-  it('237 6XXXXXXXX avec espaces → 2376XXXXXXXX', () => {
-    expect(normalizeCmPhoneForDirectCharge('237 650 123 456')).toBe('237650123456');
+  it('237 6XXXXXXXX avec espaces → 6XXXXXXXX', () => {
+    expect(normalizeCmPhoneForDirectCharge('237 650 123 456')).toBe('650123456');
   });
 
-  it('+237 6XXXXXXXX avec espaces → 2376XXXXXXXX', () => {
-    expect(normalizeCmPhoneForDirectCharge('+237 6 50 12 34 56')).toBe('237650123456');
+  it('+237 6XXXXXXXX avec espaces → 6XXXXXXXX', () => {
+    expect(normalizeCmPhoneForDirectCharge('+237 6 50 12 34 56')).toBe('650123456');
   });
 
   it('5XXXXXXXX → null', () => {

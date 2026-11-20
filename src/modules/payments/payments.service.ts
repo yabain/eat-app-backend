@@ -12,6 +12,7 @@ import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { DigikuntzProvider, DirectChargeResult } from './providers/digikuntz.provider';
 import { DigikuntzDirectChargeError, directChargeCodeForProviderError, directChargeException } from './errors/direct-charge.errors';
 import { DirectChargeInitiateResponseDto } from './dto/payment-response.dto';
+import { InitiateDirectChargeDto } from './dto/initiate-direct-charge.dto';
 import { DirectChargeOperator, detectMobileMoneyOperator, normalizeCmPhoneForDirectCharge } from './utils/mobile-money.util';
 import { isAllowedPaymentLink } from './utils/payment-link.util';
 import { getConfirmationUssd } from './config/mobile-money-ussd';
@@ -41,6 +42,10 @@ const DIRECT_CHARGE_IN_PROGRESS_MS = 60 * 1000;
 export class PaymentsService implements OnModuleInit {
   private readonly logger = new Logger(PaymentsService.name);
   private isSyncingProviderPayments = false;
+  /** Throttle du rafraîchissement provider déclenché par le polling client. */
+  private readonly statusSyncCache = new Map<string, number>();
+  private readonly statusSyncIntervalMs =
+    Math.max(1, Number(process.env.PAYMENT_STATUS_SYNC_SECONDS || 10)) * 1000;
 
   constructor(
     @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
@@ -423,6 +428,7 @@ export class PaymentsService implements OnModuleInit {
     if (!this.isOrderFromCurrentCameroonDay(order)) {
       throw new BadRequestException('Le paiement est autorisé uniquement pour les commandes du jour.');
     }
+    this.assertPaymentWindow(order);
 
     const existingPayment = await this.paymentModel
       .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
@@ -530,13 +536,22 @@ export class PaymentsService implements OnModuleInit {
   }
 
   /** Téléphone lu côté serveur uniquement. Toute validation échoue AVANT la création du Payment. */
-  private resolveDirectChargePhone(user: any): { phone: string; operator: DirectChargeOperator } {
-    const raw = String(user?.phone || '').trim();
+  private resolveDirectChargePhone(
+    user: any,
+    overridePhone?: string,
+    requestedOperator?: DirectChargeOperator,
+  ): { phone: string; operator: DirectChargeOperator } {
+    // Le numéro du profil reste le défaut ; le client peut le corriger dans
+    // le récap. Le backend revalide le format et la cohérence du réseau.
+    const raw = String(overridePhone || user?.phone || '').trim();
     if (!raw) throw directChargeException('PAYMENT_PHONE_MISSING');
     const phone = normalizeCmPhoneForDirectCharge(raw);
     if (!phone) throw directChargeException('PAYMENT_PHONE_INVALID');
     const operator = detectMobileMoneyOperator(phone);
     if (!operator) throw directChargeException('PAYMENT_OPERATOR_UNSUPPORTED');
+    if (requestedOperator && requestedOperator !== operator) {
+      throw directChargeException('PAYMENT_OPERATOR_MISMATCH');
+    }
     return { phone, operator };
   }
 
@@ -601,6 +616,22 @@ export class PaymentsService implements OnModuleInit {
   }
 
   /** Commandes payables en direct : en attente de paiement, ou échec de paiement (relance avec stock revérifié). */
+  /**
+   * Une commande ne reste payable que pendant la fenêtre de paiement
+   * (ORDER_PAYMENT_TIMEOUT_MINUTES, 30 min par défaut). Au-delà, le cron l'a
+   * expirée et une nouvelle commande est nécessaire.
+   */
+  private assertPaymentWindow(order: any) {
+    const createdAt = new Date(order?.createdAt || 0).getTime();
+    if (
+      !Number.isFinite(createdAt) ||
+      createdAt <= 0 ||
+      Date.now() - createdAt > this.getOrderPaymentTimeoutMs()
+    ) {
+      throw directChargeException('PAYMENT_EXPIRED');
+    }
+  }
+
   private assertDirectChargeOrderStatus(order: any) {
     if (order.orderStatus === OrderStatus.PENDING_PAYMENT || order.orderStatus === OrderStatus.PAYMENT_FAILED) return;
     throw new BadRequestException('Cette commande ne peut plus être payée.');
@@ -628,12 +659,26 @@ export class PaymentsService implements OnModuleInit {
    * DigiKuntz confirme un échec (payin_error / payin_closed) : l'appelant crée alors une nouvelle tentative.
    * Toute autre issue (statut inconnu, vérification impossible) lève PAYMENT_OUTCOME_UNKNOWN : jamais de nouvelle demande.
    */
-  private async reuseDirectPayment(payment: any, order: any): Promise<DirectChargeInitiateResponseDto | null> {
+  private async reuseDirectPayment(
+    payment: any,
+    order: any,
+    retryContext?: {
+      user: any;
+      phone: string;
+      operator: DirectChargeOperator;
+      actor: any;
+    },
+  ): Promise<DirectChargeInitiateResponseDto | null> {
     if (payment.paymentMethod !== PAYMENT_METHOD_DIRECT_CHARGE) {
       throw directChargeException('PAYMENT_IN_PROGRESS', 'Un autre paiement est déjà en cours pour cette commande.');
     }
 
     const outcome: string | undefined = payment.directChargeOutcome;
+    // Timeout sans référence : le même Payment + la même clé d'idempotence
+    // peuvent être rejoués sans risque de double débit, après un cooldown.
+    if (outcome === 'unknown' && !payment.providerRef && !payment.paymentLink) {
+      return this.retryUnknownDirectCharge(payment, order, retryContext);
+    }
     if (outcome && !['calling', 'prompt_sent', 'refused'].includes(outcome)) {
       throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
     }
@@ -670,6 +715,56 @@ export class PaymentsService implements OnModuleInit {
     if (!operator) throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
 
     return this.buildDirectChargeResponse(payment, order, outcome === 'refused' ? 'refused' : 'prompt_sent', operator);
+  }
+
+  /**
+   * Rejoue la même demande directe (même Payment, même clé d'idempotence)
+   * après un timeout. Sûr par construction : le provider applique « at most
+   * once per user per route » sur cette clé ; un 2e débit est impossible.
+   */
+  private async retryUnknownDirectCharge(
+    payment: any,
+    order: any,
+    ctx?: { user: any; phone: string; operator: DirectChargeOperator; actor: any },
+  ): Promise<DirectChargeInitiateResponseDto> {
+    if (!ctx) throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+
+    const updatedAt = new Date(payment.updatedAt || payment.initiatedAt || 0).getTime();
+    const cooldownMs =
+      Math.max(1, Number(process.env.PAYMENT_UNKNOWN_RETRY_COOLDOWN_SECONDS || 60)) * 1000;
+    if (updatedAt && Date.now() - updatedAt < cooldownMs) {
+      throw directChargeException(
+        'PAYMENT_OUTCOME_UNKNOWN',
+        'La demande précédente est encore en cours de vérification. Patientez un instant avant de réessayer.',
+      );
+    }
+
+    const claimed = await this.paymentModel.findOneAndUpdate(
+      {
+        _id: payment._id,
+        status: PaymentStatus.PROCESSING,
+        directChargeOutcome: 'unknown',
+      },
+      {
+        $set: {
+          directChargeOutcome: 'calling',
+          callbackPayload: { reason: 'direct_charge_retry' },
+        },
+      },
+      { new: true },
+    );
+    if (!claimed) throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
+
+    // On rejoue strictement la même requête : même numéro, même réseau.
+    const phone = String(payment.directChargePhone || ctx.phone);
+    const operator =
+      this.directChargeOperatorOrNull(payment.directChargeOperator) || ctx.operator;
+
+    return this.executeDirectCharge(claimed, order, ctx.user, {
+      phone,
+      operator,
+      actor: ctx.actor,
+    });
   }
 
   /**
@@ -740,7 +835,11 @@ export class PaymentsService implements OnModuleInit {
    * Ordre : contrôle d'accès → réutilisation → téléphone/opérateur → Payment `calling` → appel provider
    * → issue (prompt_sent | refused | rejected | unknown). Aucune suppression de Payment.
    */
-  async initiateDirectPayment(orderId: string, actor: any): Promise<DirectChargeInitiateResponseDto> {
+  async initiateDirectPayment(
+    orderId: string,
+    actor: any,
+    dto: InitiateDirectChargeDto = {},
+  ): Promise<DirectChargeInitiateResponseDto> {
     this.assertValidObjectId(orderId);
     const order = await this.orderModel.findById(orderId);
     if (!order) throw new NotFoundException('Order not found');
@@ -749,21 +848,31 @@ export class PaymentsService implements OnModuleInit {
     if (!this.isOrderFromCurrentCameroonDay(order)) {
       throw new BadRequestException('Le paiement est autorisé uniquement pour les commandes du jour.');
     }
+    this.assertPaymentWindow(order);
     this.assertDirectChargeOrderStatus(order);
+
+    const user = await this.userModel.findById(order.userId);
+    const { phone, operator } = this.resolveDirectChargePhone(
+      user,
+      dto.phone,
+      dto.paymentMethodCode,
+    );
+
+    const paymentAmount = orderPaymentAmount(order);
+    if (paymentAmount <= 0) throw new BadRequestException('Invalid order payment amount');
 
     const existingPayment = await this.paymentModel
       .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
       .sort({ createdAt: -1 });
     if (existingPayment) {
-      const reused = await this.reuseDirectPayment(existingPayment, order);
+      const reused = await this.reuseDirectPayment(existingPayment, order, {
+        user,
+        phone,
+        operator,
+        actor,
+      });
       if (reused) return reused;
     }
-
-    const user = await this.userModel.findById(order.userId);
-    const { phone, operator } = this.resolveDirectChargePhone(user);
-
-    const paymentAmount = orderPaymentAmount(order);
-    if (paymentAmount <= 0) throw new BadRequestException('Invalid order payment amount');
 
     let payment: PaymentDocument;
     try {
@@ -775,6 +884,7 @@ export class PaymentsService implements OnModuleInit {
         status: PaymentStatus.PROCESSING,
         paymentMethod: PAYMENT_METHOD_DIRECT_CHARGE,
         directChargeOperator: operator,
+        directChargePhone: phone,
         directChargeOutcome: 'calling',
         initiatedAt: new Date(),
       });
@@ -783,12 +893,44 @@ export class PaymentsService implements OnModuleInit {
       const concurrentPayment = await this.paymentModel
         .findOne({ orderId: order._id, status: PaymentStatus.PROCESSING })
         .sort({ createdAt: -1 });
-      const reused = concurrentPayment ? await this.reuseDirectPayment(concurrentPayment, order) : null;
+      const reused = concurrentPayment
+        ? await this.reuseDirectPayment(concurrentPayment, order, {
+            user,
+            phone,
+            operator,
+            actor,
+          })
+        : null;
       if (reused) return reused;
       throw directChargeException('PAYMENT_IN_PROGRESS');
     }
 
-    const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+    return this.executeDirectCharge(payment, order, user, {
+      phone,
+      operator,
+      actor,
+      paymentAmount,
+    });
+  }
+
+  /**
+   * Exécute (ou rejoue avec la même clé d'idempotence) un direct charge sur un
+   * Payment existant. Utilisé à la création et pour un retry `unknown`
+   * explicitement demandé par le client après le cooldown.
+   */
+  private async executeDirectCharge(
+    payment: PaymentDocument,
+    order: OrderDocument,
+    user: any,
+    ctx: {
+      phone: string;
+      operator: DirectChargeOperator;
+      actor: any;
+      paymentAmount?: number;
+    },
+  ): Promise<DirectChargeInitiateResponseDto> {
+    const paymentAmount = ctx.paymentAmount ?? Number(payment.amount);
+    const { phone, operator, actor } = ctx;
     let response: DirectChargeResult;
     try {
       response = await this.provider.initiateDirectCharge({
@@ -797,8 +939,9 @@ export class PaymentsService implements OnModuleInit {
         userEmail: user?.email,
         userCountry: 'Cameroon',
         senderName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || order.orderNumber,
+        // Le provider route par le numéro ; on ne force pas paymentMethodCode
+        // et on n'envoie pas de callbackUrl (format de référence validé).
         paymentMethodCode: operator,
-        callbackUrl: frontendUrl ? `${frontendUrl}/orders` : undefined,
         raisonForTransfer: `Commande ${order.orderNumber}`,
         // Clé stable liée au Payment local : un retry réseau ne crée pas une
         // seconde demande chez DigiKuntz (TTL fournisseur 24 h).
@@ -813,7 +956,12 @@ export class PaymentsService implements OnModuleInit {
               status: PaymentStatus.FAILED,
               completedAt: new Date(),
               directChargeOutcome: 'rejected',
-              callbackPayload: { reason: 'direct_charge_rejected', providerCode: error.providerCode ?? null },
+              callbackPayload: {
+              reason: 'direct_charge_rejected',
+              providerCode: error.providerCode ?? null,
+              // Diagnostic serveur uniquement (jamais exposé par la projection client).
+              providerMessage: error.providerMessage ?? null,
+            },
             },
           },
         );
@@ -823,7 +971,8 @@ export class PaymentsService implements OnModuleInit {
         throw directChargeException(directChargeCodeForProviderError(error.providerCode));
       }
 
-      // Issue inconnue : la demande a peut-être été reçue. Jamais de suppression, jamais de relance automatique.
+      // Issue inconnue : la demande a peut-être été reçue. Le même Payment et
+      // la même clé d'idempotence pourront être rejoués après un cooldown.
       await this.markPaymentOutcomeUnknown(payment, 'direct_charge_outcome_unknown');
       this.logger.warn(`Direct charge outcome unknown for payment ${payment._id} (order ${order._id})`);
       this.auditLogs.record({
@@ -835,7 +984,7 @@ export class PaymentsService implements OnModuleInit {
         resourceId: String(payment._id),
         metadata: { orderId: String(order._id), orderNumber: order.orderNumber, operator, outcome: 'unknown', provider: 'digikuntz' },
         method: 'POST',
-        path: `/payments/initiate-direct/${orderId}`,
+        path: `/payments/initiate-direct/${order._id}`,
         statusCode: 409,
       });
       throw directChargeException('PAYMENT_OUTCOME_UNKNOWN');
@@ -901,7 +1050,7 @@ export class PaymentsService implements OnModuleInit {
         provider: 'digikuntz',
       },
       method: 'POST',
-      path: `/payments/initiate-direct/${orderId}`,
+      path: `/payments/initiate-direct/${order._id}`,
       statusCode: 201,
     });
 
@@ -996,8 +1145,36 @@ export class PaymentsService implements OnModuleInit {
     const order = await this.orderModel.findById(orderId);
     if (!order) throw new NotFoundException('Order not found');
     this.assertOrderAccess(order, actor);
-    const payment = await this.paymentModel.findOne({ orderId }).sort({ createdAt: -1 });
-    return payment ? toClientPaymentView(payment) : null;
+    let payment = await this.paymentModel.findOne({ orderId }).sort({ createdAt: -1 });
+    if (!payment) return null;
+
+    // Le webhook n'atteint pas toujours un backend local/mini : on rafraîchit
+    // le statut provider à la demande (throttlé) pour que le polling client
+    // voie le paiement confirmé sans attendre le cron d'une minute.
+    if (
+      [PaymentStatus.PENDING, PaymentStatus.PROCESSING].includes(payment.status as PaymentStatus) &&
+      payment.providerRef
+    ) {
+      const cacheKey = String(payment._id);
+      const lastSync = this.statusSyncCache.get(cacheKey) || 0;
+      if (Date.now() - lastSync >= this.statusSyncIntervalMs) {
+        this.statusSyncCache.set(cacheKey, Date.now());
+        if (this.statusSyncCache.size > 1000) this.statusSyncCache.clear();
+        try {
+          const remote = await this.provider.getTransactionStatus(payment.providerRef);
+          if (remote) {
+            await this.applyPayinStatus(payment, order, remote.status, remote);
+            payment = (await this.paymentModel.findById(payment._id)) || payment;
+          }
+        } catch (error: any) {
+          this.logger.warn(
+            `On-demand payment sync failed for ${payment._id}: ${error?.message || error}`,
+          );
+        }
+      }
+    }
+
+    return toClientPaymentView(payment);
   }
 
   async syncOrderPayment(orderRef: string, actor: any) {
@@ -1301,14 +1478,38 @@ export class PaymentsService implements OnModuleInit {
   }
 
   private isHeldByDirectCharge(payment: any): boolean {
-    if (!payment) return false;
+    if (!payment || payment.status !== PaymentStatus.PROCESSING) return false;
     const outcome = payment.directChargeOutcome;
-    if (outcome === 'calling' || outcome === 'unknown') return true;
-    return (
-      payment.paymentMethod === PAYMENT_METHOD_DIRECT_CHARGE
-      && outcome === 'prompt_sent'
-      && payment.status === PaymentStatus.PROCESSING
-    );
+
+    if (outcome === 'calling') {
+      return this.withinDirectChargeHold(payment, this.getCallingHoldMs());
+    }
+    if (outcome === 'unknown') {
+      return this.withinDirectChargeHold(payment, this.getUnknownHoldMs());
+    }
+    if (
+      payment.paymentMethod === PAYMENT_METHOD_DIRECT_CHARGE &&
+      outcome === 'prompt_sent'
+    ) {
+      return this.withinDirectChargeHold(payment, this.getOrderPaymentTimeoutMs());
+    }
+    return false;
+  }
+
+  private withinDirectChargeHold(payment: any, holdMs: number): boolean {
+    const startedAt = new Date(payment?.createdAt || payment?.initiatedAt || 0).getTime();
+    if (!Number.isFinite(startedAt) || startedAt <= 0) return false;
+    return Date.now() - startedAt < holdMs;
+  }
+
+  private getCallingHoldMs(): number {
+    const minutes = Number(process.env.PAYMENT_DIRECT_CALLING_HOLD_MINUTES || 2);
+    return (Number.isFinite(minutes) && minutes > 0 ? minutes : 2) * 60 * 1000;
+  }
+
+  private getUnknownHoldMs(): number {
+    const minutes = Number(process.env.PAYMENT_UNKNOWN_HOLD_MINUTES || 30);
+    return (Number.isFinite(minutes) && minutes > 0 ? minutes : 30) * 60 * 1000;
   }
 
   private getHostedFallbackTimeoutMs(): number {

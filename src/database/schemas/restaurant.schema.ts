@@ -2,6 +2,14 @@ import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 export type RestaurantDocument = HydratedDocument<Restaurant>;
 
+export interface AutoWithdrawalSettings {
+  enabled: boolean;
+  phone?: string;
+  accountBankCode?: 'MTN' | 'ORANGEMONEY';
+  updatedAt?: Date;
+  updatedBy?: Types.ObjectId;
+}
+
 @Schema({ timestamps: true })
 export class Restaurant {
   @Prop({ required: true }) name: string;
@@ -21,6 +29,13 @@ export class Restaurant {
   @Prop() phone?: string;
   @Prop({ enum: ['active', 'inactive'], default: 'active' }) status: 'active'|'inactive';
   @Prop({ type: Types.ObjectId, ref: 'User', default: null }) managerId?: Types.ObjectId;
+  /**
+   * Retrait automatique quotidien du solde restaurant (configuré par le
+   * manager). Le cron ne déclenche que si le solde dépasse le minimum système.
+   */
+  @Prop({ type: Object, default: () => ({ enabled: false }) })
+  autoWithdrawal?: AutoWithdrawalSettings;
 }
 export const RestaurantSchema = SchemaFactory.createForClass(Restaurant);
 RestaurantSchema.index({ status: 1, order: 1, createdAt: -1 });
+RestaurantSchema.index({ 'autoWithdrawal.enabled': 1, status: 1 });
