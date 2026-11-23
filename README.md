@@ -36,7 +36,6 @@ La référence exhaustive et copiable est [`.env.example`](./.env.example). Le t
 | Variable | Requis | Défaut | Rôle |
 | --- | --- | --- | --- |
 | `JWT_SECRET` | **oui** | — | Signature des JWT (access token, expiration 90 j). |
-| `JWT_REFRESH_SECRET` | non | — | **Non utilisé actuellement** (les tokens utilisent `JWT_SECRET`) ; conservé pour compatibilité. |
 | `GOOGLE_CLIENT_ID` | non | — | Doit être identique au `googleClientId` du frontend. |
 | `ENCRYPTION_KEY` | non | `JWT_SECRET`, sinon `eat-app-default-key` | Chiffrement des mots de passe stockés en base. |
 | `TERMS_VERSION` | non | `v1.0` | Version des CGU acceptée par défaut à l'inscription. |
@@ -131,8 +130,6 @@ La référence exhaustive et copiable est [`.env.example`](./.env.example). Le t
 | --- | --- | --- | --- |
 | `ANNOUNCEMENT_DELIVERY_MAX_ATTEMPTS` | non | `3` | Nombre max de tentatives par destinataire. |
 | `ANNOUNCEMENT_DELIVERY_LOCK_TIMEOUT_MINUTES` | non | `10` | Délai avant reprise d'une livraison bloquée en `processing`. |
-| `ANNOUNCEMENT_EMAIL_BATCH_SIZE` | non | — | **Non utilisé par le code actuel** (legacy). |
-| `ANNOUNCEMENT_WHATSAPP_BATCH_SIZE` | non | — | **Non utilisé par le code actuel** (legacy). |
 
 > Variables présentes dans certains `.env` locaux mais **non lues par le code** : `WABA_PHONE_ID`, `WABA_TOKEN` (ancienne API WhatsApp Cloud) et `PUPPETEER_CACHE_DIR` (configuration de l'outil Puppeteer, pas une variable applicative).
 
