@@ -78,6 +78,13 @@ Réconciliation : `driverShareSettledAt` marque une commande livrée dont la par
 - Tant qu'un retrait identique (même montant + numéro) reste non résolu, une demande sans clé renvoie ce retrait. Un client qui doit légitimement répéter le même montant/numéro dans cet intervalle doit fournir une `idempotencyKey` distincte.
 - Conformité DigiKuntz : `Idempotency-Key` est envoyé **en header** sur `/dev/transaction`, `/dev/direct-charge` et `/dev/payout` (255 caractères max). Un `409` non explicitement métier (ou dont le code structuré indique une idempotence en cours) est traité comme ambigu : aucun remboursement, aucun nouveau paiement. La TTL provider est de 24 h ; notre arrêt de sécurité est fixé à **23 h par défaut et plafonné à 23 h** (`DIGIKUNTZ_IDEMPOTENCY_TTL_MS`), puis réconciliation manuelle.
 
+### Notifications « produit de nouveau disponible »
+- Le reset de minuit (`0 0 * * *`, `Africa/Douala`) remet à `0` le stock des catégories configurées (`resetStockAtMidnight=true`) et passe `isAvailable` à `false`.
+- Quand un menu item passe de **non vendable** (`stock = 0`, `isAvailable = false` ou `isActive = false`) à **vendable** (`stock > 0`, `isAvailable = true`, `isActive = true`), les utilisateurs qui l'ont en favori reçoivent une notification email/WhatsApp.
+- Une simple augmentation de stock sur un produit déjà disponible (`5 → 10`) ne déclenche **aucune** notification.
+- Après une rupture (`stock = 0`), un réapprovisionnement recrée une disponibilité et déclenche de nouveau la notification : c'est le comportement attendu pour les produits consommés puis réapprovisionnés dans la journée.
+- Le déclenchement est journalisé : `Menu item "..." (...) became available (stock X -> Y); notifying favorites.` Les échecs d'envoi sont journalisés par `NotificationsService` (`Unable to send email...`, `Unable to send WhatsApp...`).
+
 ### Expiration des commandes impayées
 - Une commande `PENDING_PAYMENT` est expirée après `ORDER_PAYMENT_TIMEOUT_MINUTES` (30 min) et son stock est restitué si elle date du jour courant au Cameroun.
 - Un direct charge `calling` est retenu au maximum `PAYMENT_DIRECT_CALLING_HOLD_MINUTES` (2 min), un `unknown` au maximum `PAYMENT_UNKNOWN_HOLD_MINUTES` (30 min), un `prompt_sent` au maximum le TTL commande. Au-delà, la commande expire ; un succès provider tardif peut encore la récupérer et re-réserver le stock.

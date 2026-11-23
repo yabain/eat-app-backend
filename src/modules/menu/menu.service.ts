@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, SortOrder, Types } from 'mongoose';
 import { UserRole } from '../../common/enums/roles.enum';
@@ -15,6 +15,8 @@ import { FavoritesService } from '../favorites/favorites.service';
 
 @Injectable()
 export class MenuService {
+  private readonly logger = new Logger(MenuService.name);
+
   constructor(
     @InjectModel(MenuItem.name) private model: Model<MenuItemDocument>,
     @InjectModel(Restaurant.name) private restaurantModel: Model<RestaurantDocument>,
@@ -336,6 +338,10 @@ export class MenuService {
     if (payload.image !== undefined) await deleteReplacedLocalUpload(existing.image, payload.image);
 
     if (!wasSellable && this.isSellable(item)) {
+      this.logger.log(
+        `Menu item "${item.name}" (${item._id}) became available ` +
+          `(stock ${existing.stock ?? 0} -> ${item.stock ?? 0}); notifying favorites.`,
+      );
       void this.favorites.notifyBackInStock(String(item._id));
     }
 
