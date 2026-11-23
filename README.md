@@ -15,19 +15,136 @@ npm run start:dev
 - En **développement**, `http://localhost:4200` et `http://localhost:5173` sont autorisés par défaut en plus des variables d'environnement.
 - Les cookies refresh (`credentials: true`) exigent une liste blanche stricte — pas de `*`.
 
+## Variables d'environnement
+
+La référence exhaustive et copiable est [`.env.example`](./.env.example). Le tableau ci-dessous recense **toutes** les variables lues par le code, avec leur caractère obligatoire et leur valeur par défaut.
+
+### Serveur
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `NODE_ENV` | non | `development` | `production` active les règles CORS strictes et résout `UPLOAD_DIR`. |
+| `PORT` | non | `3000` | Port HTTP du backend. |
+| `APP_URL` | oui pour les uploads | — | URL publique du backend, utilisée pour construire les URLs absolues des fichiers uploadés. |
+| `INSTANCE_ID` | non | `HOSTNAME` | Identifiant d'instance pour les leases de cron multi-instances. |
+
+### Base de données
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `MONGODB_URI` | **oui** | — | Chaîne de connexion MongoDB/Mongoose. |
+
+### Authentification et chiffrement
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `JWT_SECRET` | **oui** | — | Signature des JWT (access token, expiration 90 j). |
+| `JWT_REFRESH_SECRET` | non | — | **Non utilisé actuellement** (les tokens utilisent `JWT_SECRET`) ; conservé pour compatibilité. |
+| `GOOGLE_CLIENT_ID` | non | — | Doit être identique au `googleClientId` du frontend. |
+| `ENCRYPTION_KEY` | non | `JWT_SECRET`, sinon `eat-app-default-key` | Chiffrement des mots de passe stockés en base. |
+| `TERMS_VERSION` | non | `v1.0` | Version des CGU acceptée par défaut à l'inscription. |
+
+### CORS
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `FRONTEND_URL` | **oui en production** | `http://localhost:4200` en dev | URL exacte du frontend (sans `/` final) ; sert aussi aux liens email/WhatsApp. |
+| `CORS_ORIGINS` | non | — | Origines supplémentaires séparées par des virgules. |
+
+### Emails
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `SMTP_HOST` | non | — | Serveur SMTP. Si incomplet, les emails sont ignorés avec un warning. |
+| `SMTP_PORT` | non | `587` (le `.env` local utilise `465` en SSL) | Port SMTP. |
+| `SMTP_USER` | non | — | Identifiant SMTP. |
+| `SMTP_PASS` | non | — | Mot de passe / mot de passe d'application SMTP. |
+| `RESET_PASSWORD_PATH` | non | `/reset-password` | Chemin frontend du lien de réinitialisation. |
+
+### Paiement mobile money (DigiKuntz)
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `DIGIKUNTZ_BASE_URL` | **oui** pour payer | — | URL de base de l'API DigiKuntz. |
+| `DIGIKUNTZ_USER_ID` | **oui** pour payer | — | Identifiant fournisseur. |
+| `DIGIKUNTZ_API_KEY` | **oui** pour payer | — | Clé API fournisseur (secret). |
+| `DIGIKUNTZ_WEBHOOK_SECRET` | **oui** pour payer | — | Secret de validation du webhook. |
+| `DIGIKUNTZ_REQUEST_TIMEOUT_MS` | non | `12000` | Timeout d'un appel HTTP DigiKuntz. |
+| `DIGIKUNTZ_GATEWAY_TIMEOUT_MS` | non | `3600000` | Timeout avant alerte/réconciliation d'un retrait gateway indisponible. |
+| `DIGIKUNTZ_DIRECT_CHARGE_TIMEOUT_MS` | non | `20000` | Timeout du direct charge (push opérateur). |
+| `DIGIKUNTZ_RETRY_INTERVAL_MS` | non | `60000` | Intervalle minimal entre deux tentatives de payout. |
+| `DIGIKUNTZ_IDEMPOTENCY_TTL_MS` | non | `82800000` (23 h) | TTL d'idempotence ; plafonnée à 23 h, strictement sous les 24 h du provider. |
+| `PAYMENT_UNKNOWN_RETRY_COOLDOWN_SECONDS` | non | `60` | Délai minimal avant de renvoyer la même demande après une issue inconnue. |
+| `PAYMENT_UNKNOWN_HOLD_MINUTES` | non | `30` | Rétention maximale d'une commande dont le direct charge est `unknown`. |
+| `PAYMENT_DIRECT_CALLING_HOLD_MINUTES` | non | `2` | Rétention maximale d'un appel direct `calling`. |
+| `MIN_WITHDRAWAL_AMOUNT_XAF` | non | `1000` | Solde strictement supérieur requis pour le retrait auto restaurant. |
+| `MOBILE_MONEY_USSD_ORANGE` | non | `#150*50#` | Code USSD Orange affiché ; vide = aucun code. |
+| `MOBILE_MONEY_USSD_MTN` | non | `*126#` | Code USSD MTN affiché ; vide = aucun code. |
+
+### Commandes et répartition
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `ORDER_PAYMENT_TIMEOUT_MINUTES` | non | `30` | TTL d'une commande en attente de paiement et fenêtre du lien hébergé. |
+| `PAYMENT_TIMEOUT_MINUTES` | non | — | Alias legacy de `ORDER_PAYMENT_TIMEOUT_MINUTES` (utilisé seulement si celui-ci est absent). |
+| `PAYMENT_HOSTED_FALLBACK_TIMEOUT_MINUTES` | non | `30` | Durée d'ouverture du lien hébergé après un direct charge refusé. |
+| `PLATFORM_FEE_TYPE` | non | `fixed` | `fixed` ou `percentage`. |
+| `PLATFORM_FEE_VALUE` | non | `0` | Montant ou pourcentage du frais de plateforme. |
+
+### Batchs et verrous (exploitation)
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `PAYMENT_STATUS_SYNC_SECONDS` | non | `10` (min 1) | Throttle du rafraîchissement du statut provider. |
+| `PAYMENT_INITIATION_LOCK_SECONDS` | non | `300` | Verrou anti-course sur l'initiation d'un paiement. |
+| `PAYMENT_EXPIRY_BATCH_LIMIT` | non | `200` | Commandes expirées traitées par passage de cron. |
+| `DIGIKUNTZ_SYNC_BATCH_LIMIT` | non | `100` | Paiements/retraits synchronisés par passage de cron. |
+| `BALANCE_RECONCILIATION_BATCH_LIMIT` | non | `100` | Transactions de balance réconciliées par passage de cron. |
+
+### Fichiers
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `STORAGE_DRIVER` | non | `local` | Seul `local` est supporté actuellement. |
+| `UPLOAD_DIR_LOCAL` | non | `uploads` | Dossier d'uploads en développement. |
+| `UPLOAD_DIR` | non (prod) | `/home/u505661520/public_html/uploads` | Dossier absolu d'uploads en production. |
+
+### WhatsApp
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `WHATSAPP_AUTO_INIT` | non | `true` | Initialise automatiquement le client whatsapp-web.js. |
+| `WHATSAPP_SESSION_DIR` | non | `whatsapp-session` | Dossier de session à conserver entre redéploiements. |
+| `WHATSAPP_GATEWAY_URL` | non | — | URL de la passerelle HTTP (prioritaire sur le mode local si `WHATSAPP_LOCAL_ENABLED != true`). |
+| `WHATSAPP_GATEWAY_PASSWORD` | non | `123Whatsapp?` | Mot de passe de la passerelle. |
+| `WHATSAPP_LOCAL_ENABLED` | non | `false` | `true` = client local whatsapp-web.js au lieu de la passerelle. |
+| `WHATSAPP_READY_TIMEOUT_MS` | non | `90000` | Délai d'attente avant que le client soit prêt. |
+
+### Merlin IA (OpenRouter)
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `MERLIN_ENABLED` | non | `true` | Active/désactive l'assistant. |
+| `MERLIN_API_KEY` | oui si Merlin activé | — | Clé OpenRouter. |
+| `MERLIN_BASE_URL` | non | `https://openrouter.ai/api/v1` | URL de base OpenRouter. |
+| `MERLIN_MODELS` | non | liste de 5 modèles | Modèles candidats, séparés par des virgules (5 max). |
+| `MERLIN_MODEL` | non | — | Alias legacy de `MERLIN_MODELS` (un seul modèle). |
+| `MERLIN_MODEL_STRATEGY` | non | `fallback` | `fallback` ou `round-robin`. |
+| `MERLIN_TEMPERATURE` | non | `0.7` | Température de génération. |
+| `MERLIN_REASONING_EFFORT` | non | `low` | Effort de raisonnement. |
+| `MERLIN_TIMEOUT_MS` | non | `90000` | Timeout d'un appel Merlin. |
+| `MERLIN_CONTEXT_MESSAGES` | non | `10` | Messages de contexte réinjectés. |
+| `MERLIN_MAX_HISTORY` | non | `50` | Historique max conservé par conversation. |
+| `MERLIN_CRON_TIMEZONE` | non | `Africa/Douala` | Fuseau des purges/crons Merlin. |
+
+### Annonces
+| Variable | Requis | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `ANNOUNCEMENT_DELIVERY_MAX_ATTEMPTS` | non | `3` | Nombre max de tentatives par destinataire. |
+| `ANNOUNCEMENT_DELIVERY_LOCK_TIMEOUT_MINUTES` | non | `10` | Délai avant reprise d'une livraison bloquée en `processing`. |
+| `ANNOUNCEMENT_EMAIL_BATCH_SIZE` | non | — | **Non utilisé par le code actuel** (legacy). |
+| `ANNOUNCEMENT_WHATSAPP_BATCH_SIZE` | non | — | **Non utilisé par le code actuel** (legacy). |
+
+> Variables présentes dans certains `.env` locaux mais **non lues par le code** : `WABA_PHONE_ID`, `WABA_TOKEN` (ancienne API WhatsApp Cloud) et `PUPPETEER_CACHE_DIR` (configuration de l'outil Puppeteer, pas une variable applicative).
+
 ## Default admin
 - email: `admin@example.com`
 - password: `Admin@12345`
 
 ## Paiement mobile money (DigiKuntz)
 
-### Variables d'environnement
-- `DIGIKUNTZ_BASE_URL`, `DIGIKUNTZ_USER_ID`, `DIGIKUNTZ_API_KEY`, `DIGIKUNTZ_WEBHOOK_SECRET` : identifiants fournisseur (secrets, jamais exposés au client).
-- `DIGIKUNTZ_REQUEST_TIMEOUT_MS` : délai maximal d'un appel DigiKuntz (défaut `12000`). Au-delà, l'issue est considérée comme inconnue.
-- `MOBILE_MONEY_USSD_ORANGE` : code USSD de confirmation Orange affiché au client (défaut `#150*50#`). Variable vide : aucun code affiché.
-- `MOBILE_MONEY_USSD_MTN` : code USSD de confirmation MTN affiché au client (défaut `*126#`). Variable vide : aucun code affiché.
-- `PAYMENT_HOSTED_FALLBACK_TIMEOUT_MINUTES` : durée pendant laquelle une commande dont le direct charge a été refusé avec lien hébergé reste ouverte (défaut `30`). DigiKuntz garde la transaction en `payin_pending` : le stock n'est pas libéré tant que ce lien peut encore être payé. La fenêtre est mesurée depuis la tentative de paiement, pas depuis la création de la commande.
-- `ORDER_PAYMENT_TIMEOUT_MINUTES` : délai au-delà duquel une commande `PENDING_PAYMENT` sans paiement confirmé est annulée et son stock restitué (défaut `30`).
+### Configuration
+- Les identifiants `DIGIKUNTZ_*` sont obligatoires pour encaisser des paiements ; les autres variables de paiement ont des valeurs par défaut.
+- Voir la section [Variables d'environnement](#variables-denvironnement) pour la liste complète et les valeurs par défaut.
 - Les valeurs contenant `#` doivent être entre guillemets dans `.env`.
 
 ### Endpoints
