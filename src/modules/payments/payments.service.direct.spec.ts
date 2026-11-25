@@ -32,6 +32,7 @@ function makeOrder(overrides: Record<string, any> = {}) {
     orderNumber: 'ORD-TEST-1',
     userId: CLIENT_ID,
     restaurantId: RESTAURANT_ID,
+    orderType: 'delivery',
     paymentStatus: 'pending',
     orderStatus: 'pending_payment',
     createdAt: new Date(),
@@ -476,35 +477,94 @@ describe('PaymentsService — paiement mobile money direct', () => {
     });
   });
 
-  describe('contrôle d’accès : réservé au client propriétaire', () => {
-    it('manager du restaurant → 403, aucune lecture de Payment ni appel provider', async () => {
+  describe('contrôle d’accès : client propriétaire, ou staff sur commande on-site', () => {
+    it('manager du restaurant sur une commande on-site → sans dto.phone : 400 PAYMENT_PHONE_MISSING (jamais le téléphone du staff)', async () => {
+      // M2 : une commande on_site créée par le staff porte order.userId = staff.
+      // Le fallback user?.phone enverrait le prompt sur le téléphone du staff.
+      order.orderType = 'on_site';
+      order.userId = new Types.ObjectId(); // staff = créateur de la commande
+      const manager = { sub: 'm1', role: 'manager', restaurantId: RESTAURANT_ID };
+
+      const error = await captureError(service.initiateDirectPayment(String(ORDER_ID), manager));
+
+      expect(errorCode(error)).toBe('PAYMENT_PHONE_MISSING');
+      expect(error.getStatus()).toBe(400);
+      expect(error.getResponse().message).toBe('Numéro du client requis');
+      expect(paymentModel.create).not.toHaveBeenCalled();
+      expect(provider.initiateDirectCharge).not.toHaveBeenCalled();
+    });
+
+    it('manager du restaurant sur une commande on-site → avec dto.phone : le téléphone client est utilisé', async () => {
+      order.orderType = 'on_site';
+      order.userId = new Types.ObjectId(); // staff = créateur de la commande
+      const manager = { sub: 'm1', role: 'manager', restaurantId: RESTAURANT_ID };
+      provider.initiateDirectCharge.mockResolvedValue({ ...acceptedResult, paymentMethodCode: 'MTN' });
+
+      const result = await service.initiateDirectPayment(String(ORDER_ID), manager, { phone: MTN_PHONE });
+
+      expect(result.outcome).toBe('prompt_sent');
+      // Le téléphone utilisé est celui SAISI pour le client de table, pas celui du staff.
+      expect(provider.initiateDirectCharge.mock.calls[0][0]).toEqual(
+        expect.objectContaining({ userPhone: MTN_PHONE, paymentMethodCode: 'MTN' }),
+      );
+      expect(provider.initiateDirectCharge.mock.calls[0][0].userPhone).not.toBe(ORANGE_PHONE);
+    });
+
+    it('employee du restaurant sur une commande on-site → sans dto.phone : 400, avec dto.phone : prompt_sent', async () => {
+      order.orderType = 'on_site';
+      order.userId = new Types.ObjectId(); // staff = créateur de la commande
+      const employee = { sub: 'e1', role: 'employee', restaurantId: RESTAURANT_ID };
+      provider.initiateDirectCharge.mockResolvedValue({ ...acceptedResult, paymentMethodCode: 'MTN' });
+
+      const error = await captureError(service.initiateDirectPayment(String(ORDER_ID), employee));
+      expect(errorCode(error)).toBe('PAYMENT_PHONE_MISSING');
+      expect(provider.initiateDirectCharge).not.toHaveBeenCalled();
+
+      const result = await service.initiateDirectPayment(String(ORDER_ID), employee, { phone: MTN_PHONE });
+      expect(result.outcome).toBe('prompt_sent');
+      expect(provider.initiateDirectCharge.mock.calls[0][0].userPhone).toBe(MTN_PHONE);
+    });
+
+    it('admin sur une commande on-site → sans dto.phone : 400 (M2 s’applique à tout le staff)', async () => {
+      order.orderType = 'on_site';
+      order.userId = new Types.ObjectId(); // staff = créateur de la commande
+      const admin = { sub: 'a1', role: 'admin' };
+
+      const error = await captureError(service.initiateDirectPayment(String(ORDER_ID), admin));
+      expect(errorCode(error)).toBe('PAYMENT_PHONE_MISSING');
+      expect(provider.initiateDirectCharge).not.toHaveBeenCalled();
+    });
+
+    it('manager d’un autre restaurant sur une commande on-site → 403, aucun appel provider', async () => {
+      order.orderType = 'on_site';
+      const manager = { sub: 'm1', role: 'manager', restaurantId: new Types.ObjectId() };
+
+      await expect(service.initiateDirectPayment(String(ORDER_ID), manager)).rejects.toBeInstanceOf(ForbiddenException);
+      expect(provider.initiateDirectCharge).not.toHaveBeenCalled();
+    });
+
+    it('staff sur une commande delivery → 403 (réservé au client propriétaire)', async () => {
+      // order sans orderType = commande delivery historique.
       const manager = { sub: 'm1', role: 'manager', restaurantId: RESTAURANT_ID };
 
       await expect(service.initiateDirectPayment(String(ORDER_ID), manager)).rejects.toBeInstanceOf(ForbiddenException);
-      expect(paymentModel.findOne).not.toHaveBeenCalled();
       expect(provider.initiateDirectCharge).not.toHaveBeenCalled();
     });
 
-    it('admin → 403', async () => {
-      const admin = { sub: String(new Types.ObjectId()), role: 'admin' };
+    it('admin → autorisé (même sur une commande delivery)', async () => {
+      const admin = { sub: 'a1', role: 'admin' };
+      provider.initiateDirectCharge.mockResolvedValue(acceptedResult);
 
-      await expect(service.initiateDirectPayment(String(ORDER_ID), admin)).rejects.toBeInstanceOf(ForbiddenException);
-      expect(provider.initiateDirectCharge).not.toHaveBeenCalled();
+      const result = await service.initiateDirectPayment(String(ORDER_ID), admin);
+
+      expect(result.outcome).toBe('prompt_sent');
     });
 
-    it('le rôle compte, pas seulement l’identifiant : manager dont le sub égale le propriétaire → 403', async () => {
-      const managerWithOwnerId = { sub: String(CLIENT_ID), role: 'manager', restaurantId: RESTAURANT_ID };
+    it('le rôle compte : manager dont le sub égale le propriétaire mais restaurant différent → 403', async () => {
+      order.orderType = 'on_site';
+      const managerWithOwnerId = { sub: String(CLIENT_ID), role: 'manager', restaurantId: new Types.ObjectId() };
 
       await expect(service.initiateDirectPayment(String(ORDER_ID), managerWithOwnerId)).rejects.toBeInstanceOf(
-        ForbiddenException,
-      );
-      expect(provider.initiateDirectCharge).not.toHaveBeenCalled();
-    });
-
-    it('le rôle compte : admin dont le sub égale le propriétaire → 403', async () => {
-      const adminWithOwnerId = { sub: String(CLIENT_ID), role: 'admin' };
-
-      await expect(service.initiateDirectPayment(String(ORDER_ID), adminWithOwnerId)).rejects.toBeInstanceOf(
         ForbiddenException,
       );
       expect(provider.initiateDirectCharge).not.toHaveBeenCalled();

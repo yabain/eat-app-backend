@@ -26,6 +26,8 @@ import { ProspectsModule } from './modules/prospects/prospects.module';
 import { TrackingModule } from './modules/tracking/tracking.module';
 import { FavoritesModule } from './modules/favorites/favorites.module';
 import { MerlinModule } from './modules/merlin/merlin.module';
+import { ChatModule } from './modules/chat/chat.module';
+import { TablesModule } from './modules/tables/tables.module';
 import { CronLeaseModule } from './common/cron-lease/cron-lease.module';
 import { CryptoModule } from './common/crypto/crypto.module';
 
@@ -63,6 +65,8 @@ import { CryptoModule } from './common/crypto/crypto.module';
     TrackingModule,
     FavoritesModule,
     MerlinModule,
+    ChatModule,
+    TablesModule,
     CronLeaseModule,
     CryptoModule,
   ],

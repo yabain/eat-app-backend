@@ -146,7 +146,7 @@ export class MenuService {
     restaurantId: string,
     page?: number,
     limit?: number,
-    filters?: { q?: string; categoryId?: string },
+    filters?: { q?: string; categoryId?: string; onSite?: string },
   ) {
     const restaurant = await this.restaurantModel.exists({ _id: restaurantId, status: 'active' });
     if (!restaurant) throw new NotFoundException('Restaurant not found');
@@ -157,6 +157,13 @@ export class MenuService {
       isActive: true,
       isAvailable: true,
     };
+    // Canal on-site : `$ne: false` (et non `onSite: true`) pour rester
+    // défensif contre les documents non backfillés (champ absent = on-site).
+    // Branche false alignée : `$ne: true` exclut aussi les items explicites
+    // `onSite: true` et garde la même défensivité sur les champs absents.
+    const onSite = parseBooleanQuery(filters?.onSite);
+    if (onSite === true) filter.onSite = { $ne: false };
+    else if (onSite === false) filter.onSite = { $ne: true };
     if (filters?.categoryId) filter.categoryId = filters.categoryId;
     if (qRegex) {
       filter.$or = [{ name: qRegex }, { description: qRegex }];

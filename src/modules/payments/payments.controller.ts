@@ -111,19 +111,20 @@ export class PaymentsController {
   initiate(@Param('orderId') orderId: string, @Req() req: any) { return this.service.initiate(orderId, req.user); }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.CLIENT)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE, UserRole.CLIENT)
   @Post('initiate-direct/:orderId')
   @ApiBearerAuth('bearer')
   @ApiOperation({
     summary: 'Initier un paiement mobile money direct (sans lien de redirection)',
     description:
-      'Réservé au client propriétaire de la commande. Envoie une demande de confirmation sur le téléphone mobile money indiqué (numéro prérempli avec celui du profil, éditable). Le réseau sélectionné doit correspondre au numéro ; le backend revalide tout. Si DigiKuntz refuse le direct, `outcome` vaut `refused` et `paymentLink` contient le lien hébergé. En cas d’issue inconnue (`PAYMENT_OUTCOME_UNKNOWN`), ne pas relancer le paiement avant vérification du statut de la commande.',
+      'Client : réservé au client propriétaire de la commande. Personnel (admin/manager/employé) : uniquement sur une commande on-site de son restaurant (paiement initié au nom du client de table, téléphone saisi dans l\'UI). '
+      + 'Le réseau sélectionné doit correspondre au numéro ; le backend revalide tout. Si DigiKuntz refuse le direct, `outcome` vaut `refused` et `paymentLink` contient le lien hébergé. En cas d\'issue inconnue (`PAYMENT_OUTCOME_UNKNOWN`), ne pas relancer le paiement avant vérification du statut de la commande.',
   })
   @ApiParam({ name: 'orderId', example: '665d58e63d7bfeb8f7f6172e' })
   @ApiBody({ type: InitiateDirectChargeDto, required: false })
   @ApiCreatedResponse({ description: 'Demande directe traitée (demande envoyée ou refus avec lien)', type: DirectChargeInitiateResponseDto })
   @ApiBadRequestResponse({ description: 'Téléphone, opérateur, montant ou moyen de paiement non acceptés (code : PAYMENT_*)', type: DirectChargeErrorDto })
-  @ApiForbiddenResponse({ description: 'Réservé au client propriétaire de la commande' })
+  @ApiForbiddenResponse({ description: 'Réservé au client propriétaire, ou au personnel pour une commande on-site de son restaurant' })
   @ApiConflictResponse({ description: 'Paiement déjà en cours (PAYMENT_IN_PROGRESS) ou issue inconnue (PAYMENT_OUTCOME_UNKNOWN)', type: DirectChargeErrorDto })
   @ApiServiceUnavailableResponse({ description: 'Paiement mobile money direct désactivé côté fournisseur (PAYMENT_DIRECT_DISABLED)', type: DirectChargeErrorDto })
   initiateDirect(

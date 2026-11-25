@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { ApiBadRequestResponse, ApiBearerAuth, ApiBody, ApiCreatedResponse, ApiForbiddenResponse, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { OrdersService } from './orders.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -10,6 +10,7 @@ import { PaymentStatus } from '../../common/enums/payment-status.enum';
 import { PreviewOrderDto } from './dto/preview-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { CheckoutFromCartDto } from './dto/checkout-from-cart.dto';
+import { CreateOnSiteOrderDto } from './dto/create-on-site-order.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { OrderPreviewResponseDto, OrderResponseDto, PaginatedOrdersResponseDto } from './dto/order-response.dto';
 
@@ -55,6 +56,21 @@ export class OrdersController {
   @ApiBody({ type: CheckoutFromCartDto })
   @ApiOkResponse({ description: 'Commande créée depuis le panier', type: OrderResponseDto })
   createFromCart(@Req() req: any, @Body() dto: CheckoutFromCartDto) { return this.service.createFromCart(req.user.sub, dto); }
+
+  @Roles(UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE)
+  @UseGuards(RolesGuard)
+  @Post('on-site')
+  @ApiOperation({
+    summary: 'Créer une commande on-site (au comptoir) pour un client de table',
+    description:
+      'Réservé au personnel (admin/manager/employé). Manager/employé sont forcés à leur restaurant. ' +
+      'Aucun frais : 100 % du montant est reversé au restaurant. Le paiement DigiKuntz est ensuite initié par le staff via /payments/initiate-direct/:orderId.',
+  })
+  @ApiBody({ type: CreateOnSiteOrderDto })
+  @ApiCreatedResponse({ description: 'Commande on-site créée', type: OrderResponseDto })
+  @ApiBadRequestResponse({ description: 'DTO invalide ou stock/indisponibilité (code : INSUFFICIENT_STOCK)' })
+  @ApiForbiddenResponse({ description: 'Rôle non autorisé ou restaurant étranger (manager/employé)' })
+  createOnSite(@Req() req: any, @Body() dto: CreateOnSiteOrderDto) { return this.service.createOnSite(req.user, dto); }
   
   @Roles(UserRole.CLIENT)
   @UseGuards(RolesGuard)

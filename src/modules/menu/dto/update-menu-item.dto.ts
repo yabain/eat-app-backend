@@ -27,6 +27,12 @@ export class UpdateMenuItemDto {
   @ApiPropertyOptional({ example: true })
   @IsOptional() @Transform(({ value }) => value === 'true' || value === true)
   @IsBoolean() isActive?: boolean;
+  @ApiPropertyOptional({ example: true, description: 'Commandable sur place (commandes on-site du personnel).' })
+  @IsOptional() @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean() onSite?: boolean;
+  @ApiPropertyOptional({ example: true, description: 'Commandable en livraison.' })
+  @IsOptional() @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean() onDelivery?: boolean;
   @ApiPropertyOptional({
     type: [String],
     example: ['665d58e63d7bfeb8f7f61888'],

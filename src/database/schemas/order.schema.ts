@@ -24,6 +24,7 @@ class DeliveryAddress {
   @Prop({ required: true }) details: string;
   @Prop() mapLink?: string;
 }
+
 class PricingSnapshot {
   @Prop({ required: true }) itemsSubtotal: number;
   @Prop({ required: true }) packagingTotal: number;
@@ -42,7 +43,14 @@ export class Order {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true }) userId: Types.ObjectId;
   @Prop({ type: Types.ObjectId, ref: 'Restaurant', required: true }) restaurantId: Types.ObjectId;
   @Prop({ type: [Object], default: [] }) items: OrderItem[];
-  @Prop({ type: Object, required: true }) deliveryAddress: DeliveryAddress;
+  /**
+   * Optionnel au niveau schema : la contrainte « adresse obligatoire » est
+   * appliquée côté service (`placeOrderWithinSession` refuse une commande
+   * delivery sans adresse complète). Les commandes `on_site` n'en ont pas.
+   */
+  @Prop({ type: Object, default: null }) deliveryAddress?: DeliveryAddress | null;
+  /** 'delivery' (défaut) ou 'on_site' (commande au comptoir créée par le personnel). */
+  @Prop({ enum: ['delivery', 'on_site'], default: 'delivery' }) orderType: string;
   @Prop({ type: Object, required: true }) pricingSnapshot: PricingSnapshot;
   @Prop({ type: Number, default: 0 }) deliveryEstimateMinutes?: number;
   @Prop() promoCode?: string;
@@ -51,6 +59,8 @@ export class Order {
   @Prop({ enum: Object.values(OrderStatus), default: OrderStatus.PENDING_PAYMENT })
   orderStatus: string;
   @Prop() notes?: string;
+  /** Étiquette de table saisie par le personnel (ex. "Table 3"). Phase 2 : positionId. */
+  @Prop() tableLabel?: string;
   @Prop({ type: Types.ObjectId, ref: 'User', default: null }) assignedDriverId?: Types.ObjectId;
   @Prop() outForDeliveryAt?: Date;
   @Prop() paymentConfirmedAt?: Date;
@@ -81,3 +91,5 @@ OrderSchema.index({
   driverShareSettledAt: 1,
   updatedAt: 1,
 });
+// Page de commande on-site du staff : commandes d'un restaurant par type et statut.
+OrderSchema.index({ restaurantId: 1, orderType: 1, orderStatus: 1, createdAt: -1 });

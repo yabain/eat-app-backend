@@ -92,6 +92,7 @@ export class MenuController {
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiQuery({ name: 'q', required: false, type: String, example: 'coca' })
   @ApiQuery({ name: 'categoryId', required: false, type: String, example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiQuery({ name: 'onSite', required: false, type: Boolean, description: 'Filtrer le canal : true = commandable sur place uniquement (les items sans le champ sont inclus, défensif).' })
   @ApiOkResponse({
     description: 'Liste paginée des items disponibles',
     type: PaginatedMenuItemsResponseDto,
@@ -101,8 +102,9 @@ export class MenuController {
     @Query() query: PaginationQueryDto,
     @Query('q') q?: string,
     @Query('categoryId') categoryId?: string,
+    @Query('onSite') onSite?: string,
   ) {
-    return this.service.findPublicByRestaurant(restaurantId, query.page, query.limit, { q, categoryId });
+    return this.service.findPublicByRestaurant(restaurantId, query.page, query.limit, { q, categoryId, onSite });
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

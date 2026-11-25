@@ -35,6 +35,12 @@ export class MenuItemResponseDto {
   @ApiProperty({ example: true })
   isActive: boolean;
 
+  @ApiProperty({ example: true, description: 'Commandable sur place (commandes on-site du personnel).' })
+  onSite: boolean;
+
+  @ApiProperty({ example: true, description: 'Commandable en livraison.' })
+  onDelivery: boolean;
+
   @ApiPropertyOptional({ example: '2026-04-25T12:00:00.000Z' })
   createdAt?: string;
 

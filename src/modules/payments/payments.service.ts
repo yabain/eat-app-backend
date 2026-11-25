@@ -529,9 +529,22 @@ export class PaymentsService implements OnModuleInit {
     }
   }
 
-  /** Réservé au client propriétaire de la commande (le staff garde le paiement hébergé). */
+  /**
+   * Client propriétaire de la commande, ou personnel payant une commande
+   * on-site de son restaurant (le staff initie le paiement direct au nom du
+   * client de table). ADMIN : toujours autorisé. MANAGER/EMPLOYEE : uniquement
+   * sur une commande `on_site` de leur propre restaurant. CLIENT : inchangé.
+   */
   private assertDirectChargeOwner(order: OrderDocument | any, actor: any) {
     if (actor?.role === UserRole.CLIENT && this.refId(order.userId) === String(actor.sub)) return;
+    if (actor?.role === UserRole.ADMIN) return;
+    if (
+      [UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor?.role)
+      && this.refId(order.restaurantId) === this.refId(actor.restaurantId)
+      && order.orderType === 'on_site'
+    ) {
+      return;
+    }
     throw new ForbiddenException('Seul le client propriétaire de la commande peut lancer ce paiement.');
   }
 
@@ -540,7 +553,15 @@ export class PaymentsService implements OnModuleInit {
     user: any,
     overridePhone?: string,
     requestedOperator?: DirectChargeOperator,
+    isStaffInitiated = false,
   ): { phone: string; operator: DirectChargeOperator } {
+    // Commande on_site initiée par le staff : order.userId = staff (créateur
+    // de la commande), jamais le client de table. Le fallback `user?.phone`
+    // enverrait le prompt sur le téléphone du STAFF → le numéro du client
+    // doit être saisi explicitement (M2).
+    if (isStaffInitiated && !String(overridePhone || '').trim()) {
+      throw directChargeException('PAYMENT_PHONE_MISSING', 'Numéro du client requis');
+    }
     // Le numéro du profil reste le défaut ; le client peut le corriger dans
     // le récap. Le backend revalide le format et la cohérence du réseau.
     const raw = String(overridePhone || user?.phone || '').trim();
@@ -852,10 +873,17 @@ export class PaymentsService implements OnModuleInit {
     this.assertDirectChargeOrderStatus(order);
 
     const user = await this.userModel.findById(order.userId);
+    // M2 : staff (admin/manager/employee) sur une commande on_site → le
+    // téléphone du client de table doit être fourni (pas de fallback sur le
+    // téléphone du staff, order.userId = staff). CLIENT inchangé.
+    const isStaffInitiated =
+      [UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor?.role)
+      && order.orderType === 'on_site';
     const { phone, operator } = this.resolveDirectChargePhone(
       user,
       dto.phone,
       dto.paymentMethodCode,
+      isStaffInitiated,
     );
 
     const paymentAmount = orderPaymentAmount(order);

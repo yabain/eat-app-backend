@@ -14,6 +14,7 @@ import { Delivery, DeliveryDocument } from '../../database/schemas/delivery.sche
 import { PreviewOrderDto } from './dto/preview-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { CheckoutFromCartDto } from './dto/checkout-from-cart.dto';
+import { CreateOnSiteOrderDto } from './dto/create-on-site-order.dto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MenuInventoryService } from '../menu/menu-inventory.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
@@ -74,33 +75,19 @@ export class OrdersService {
   }
 
   private async placeOrderWithinSession(userId: string, dto: PreviewOrderDto, session: ClientSession) {
+    // Garde : une commande delivery exige une adresse complète. La zone est
+    // validée dans calculate(), mais on refuse ici une adresse absente AVANT
+    // tout décrément de stock (les commandes on_site passent par createOnSite).
+    if (!(dto.city && dto.district && dto.details)) {
+      throw new BadRequestException('Adresse de livraison requise');
+    }
     const result = await this.calculate(dto, session, userId);
 
     // Réservation atomique du stock : on décrémente chaque item dans la même
     // transaction que la création de la commande. Si un item n'a plus assez de
     // stock (race avec une autre commande), on transforme l'exception brute en
     // erreur structurée INSUFFICIENT_STOCK pour que le frontend puisse réagir.
-    for (const item of result.items) {
-      try {
-        await this.inventory.adjustStock(item.menuItemId, -item.quantity, session);
-      } catch (error: any) {
-        const isInsufficient = /Insufficient stock/i.test(String(error?.message || ''));
-        if (isInsufficient) {
-          throw new BadRequestException({
-            code: 'INSUFFICIENT_STOCK',
-            message: `« ${item.name} » n'est plus disponible dans la quantité demandée.`,
-            items: [{
-              menuItemId: String(item.menuItemId),
-              name: item.name,
-              requested: item.quantity,
-              available: 0,
-              reason: 'insufficient',
-            }],
-          });
-        }
-        throw error;
-      }
-    }
+    await this.reserveStockWithinSession(result.items, session);
 
     const [order] = await this.orderModel.create(
       [
@@ -124,6 +111,40 @@ export class OrdersService {
       await this.consumePromoCode(result.promo, userId, order._id, session);
     }
     return order;
+  }
+
+  /**
+   * Décrément atomique du stock dans la transaction courante. Commun aux
+   * commandes delivery (placeOrderWithinSession) et on-site (createOnSite) :
+   * si un item n'a plus assez de stock (race avec une autre commande),
+   * l'exception brute est transformée en erreur structurée INSUFFICIENT_STOCK
+   * pour que le frontend puisse réagir.
+   */
+  private async reserveStockWithinSession(
+    items: Array<{ menuItemId: any; name: string; quantity: number }>,
+    session: ClientSession,
+  ) {
+    for (const item of items) {
+      try {
+        await this.inventory.adjustStock(item.menuItemId, -item.quantity, session);
+      } catch (error: any) {
+        const isInsufficient = /Insufficient stock/i.test(String(error?.message || ''));
+        if (isInsufficient) {
+          throw new BadRequestException({
+            code: 'INSUFFICIENT_STOCK',
+            message: `« ${item.name} » n'est plus disponible dans la quantité demandée.`,
+            items: [{
+              menuItemId: String(item.menuItemId),
+              name: item.name,
+              requested: item.quantity,
+              available: 0,
+              reason: 'insufficient',
+            }],
+          });
+        }
+        throw error;
+      }
+    }
   }
 
   private async consumePromoCode(
@@ -234,11 +255,23 @@ export class OrdersService {
     ]);
   }
 
-  private async calculate(dto: PreviewOrderDto, session?: ClientSession, userId?: string) {
-    const restaurantId = String((dto.restaurantId as any)?._id ?? dto.restaurantId);
-    const menuIds = dto.items.map((i) => new Types.ObjectId(i.menuItemId));
+  /**
+   * Validation et snapshot des items, partagés entre les commandes delivery
+   * (calculate) et on-site (calculateOnSite) : items → menuItems (avec filtre
+   * canal optionnel), disponibilité/stock, accompagnements, limite par
+   * catégorie. Lève une seule erreur structurée INSUFFICIENT_STOCK.
+   */
+  private async validateAndBuildItems(
+    items: Array<{ menuItemId: string; quantity: number; accompanimentId?: string; accompanimentName?: string }>,
+    restaurantId: string,
+    session?: ClientSession,
+    opts: { onSiteOnly?: boolean } = {},
+  ) {
+    const menuIds = items.map((i) => new Types.ObjectId(i.menuItemId));
+    const itemFilter: any = { _id: { $in: menuIds }, restaurantId, isActive: true };
+    if (opts.onSiteOnly) itemFilter.onSite = { $ne: false };
     const menuItems = await this.menuModel
-      .find({ _id: { $in: menuIds }, restaurantId, isActive: true })
+      .find(itemFilter)
       .populate({ path: 'categoryId', select: 'name systemFeePerItem maxItemsPerOrder accompaniments' })
       .session(session || null);
     // Collecte tous les items manquants/désactivés/épuisés et lève une seule
@@ -252,7 +285,7 @@ export class OrdersService {
       reason: 'unavailable' | 'insufficient';
     }> = [];
 
-    for (const input of dto.items) {
+    for (const input of items) {
       const menu = menuItems.find((m) => m._id.toString() === input.menuItemId);
       if (!menu) {
         stockIssues.push({
@@ -295,16 +328,13 @@ export class OrdersService {
       });
     }
 
-    const zone = await this.zoneModel
-      .findOne({ city: dto.city, district: dto.district, isActive: true })
-      .session(session || null);
-    if (!zone) throw new NotFoundException('Delivery zone not found');
-
-    const items = dto.items.map((input) => {
+    const builtItems = items.map((input) => {
       const menu = menuItems.find((m) => m._id.toString() === input.menuItemId);
       if (!menu) throw new BadRequestException('Invalid menu item');
       const category = menu.categoryId as any;
-      const systemFeePerItem = Math.max(0, Math.floor(Number(category?.systemFeePerItem || 0)));
+      // Commandes on-site : 100 % reversé au restaurant, aucun frais de
+      // catégorie n'est prélevé (catégorieSystemFeeTotal forcé à 0).
+      const systemFeePerItem = opts.onSiteOnly ? 0 : Math.max(0, Math.floor(Number(category?.systemFeePerItem || 0)));
 
       // Snapshot de l'accompagnement choisi par le client. On valide qu'il
       // appartient bien aux availableAccompanimentIds du menu item, sinon on
@@ -344,7 +374,7 @@ export class OrdersService {
     });
 
     const categoryQuantities = new Map<string, { name: string; limit: number; quantity: number }>();
-    dto.items.forEach((input) => {
+    items.forEach((input) => {
       const menu = menuItems.find((candidate) => candidate._id.toString() === input.menuItemId);
       const category = menu?.categoryId as any;
       if (!category?._id) return;
@@ -364,6 +394,18 @@ export class OrdersService {
         );
       }
     }
+
+    return builtItems;
+  }
+
+  private async calculate(dto: PreviewOrderDto, session?: ClientSession, userId?: string) {
+    const restaurantId = String((dto.restaurantId as any)?._id ?? dto.restaurantId);
+    const items = await this.validateAndBuildItems(dto.items, restaurantId, session);
+
+    const zone = await this.zoneModel
+      .findOne({ city: dto.city, district: dto.district, isActive: true })
+      .session(session || null);
+    if (!zone) throw new NotFoundException('Delivery zone not found');
 
     const itemsSubtotal = items.reduce((sum, i) => sum + i.subtotal, 0);
     const packagingTotal = items.reduce((sum, i) => sum + i.packagingCost * i.quantity, 0);
@@ -430,6 +472,111 @@ export class OrdersService {
 
   async preview(userId: string, dto: PreviewOrderDto) {
     return this.calculate(dto, undefined, userId);
+  }
+
+  /**
+   * Calcul d'une commande on-site (au comptoir) : mêmes validations d'items
+   * que la livraison (disponibilité, stock, accompagnements, limite par
+   * catégorie) mais sans zone de livraison ni frais — 100 % reversé au
+   * restaurant. Filtrage canal : un item avec `onSite: false` est traité
+   * comme indisponible (erreur structurée INSUFFICIENT_STOCK).
+   */
+  async calculateOnSite(dto: CreateOnSiteOrderDto, session?: ClientSession) {
+    if (!Array.isArray(dto.items) || dto.items.length === 0) {
+      throw new BadRequestException('Au moins un article est requis');
+    }
+    const restaurantId = String((dto.restaurantId as any)?._id ?? dto.restaurantId);
+    const items = await this.validateAndBuildItems(dto.items, restaurantId, session, { onSiteOnly: true });
+    const itemsSubtotal = items.reduce((sum, i) => sum + i.subtotal, 0);
+    return {
+      items,
+      pricingSnapshot: {
+        itemsSubtotal,
+        packagingTotal: 0,
+        deliveryFee: 0,
+        platformFee: 0,
+        promoDiscount: 0,
+        paymentAmount: itemsSubtotal,
+        grandTotal: itemsSubtotal,
+        categorySystemFeeTotal: 0,
+        balanceDistributionVersion: 3,
+      },
+    };
+  }
+
+  /**
+   * Création d'une commande on-site par le personnel (admin/manager/employé)
+   * au nom du client de table. Le paiement DigiKuntz est ensuite initié par
+   * le staff (initiate-direct). Manager/employé sont forcés à leur propre
+   * restaurant ; `order.userId` est l'acteur staff (le client de table n'a
+   * pas de compte rattaché ici).
+   */
+  async createOnSite(actor: any, dto: CreateOnSiteOrderDto) {
+    // Défense en profondeur : l'endpoint est déjà protégé par @Roles.
+    if (![UserRole.ADMIN, UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor?.role)) {
+      throw new ForbiddenException('Seul le personnel peut créer une commande on-site');
+    }
+    let restaurantId = String((dto.restaurantId as any)?._id ?? dto.restaurantId);
+    if ([UserRole.MANAGER, UserRole.EMPLOYEE].includes(actor.role)) {
+      if (!actor.restaurantId) throw new ForbiddenException('No restaurant assigned');
+      if (restaurantId && restaurantId !== String(actor.restaurantId)) {
+        throw new ForbiddenException('Vous ne pouvez créer des commandes que pour votre restaurant');
+      }
+      restaurantId = String(actor.restaurantId);
+    }
+    if (!restaurantId) throw new BadRequestException('restaurantId is required');
+
+    // Mêmes heures de service que la livraison (assertOrderingOpen).
+    await this.platformSettings.assertOrderingOpen();
+
+    const session = await this.orderModel.db.startSession();
+    try {
+      session.startTransaction();
+      const result = await this.calculateOnSite({ ...dto, restaurantId }, session);
+      await this.reserveStockWithinSession(result.items, session);
+      const [order] = await this.orderModel.create(
+        [
+          {
+            orderNumber: `ORD-${Date.now()}-${randomUUID().slice(0, 5).toUpperCase()}`,
+            userId: actor.sub,
+            restaurantId,
+            items: result.items,
+            pricingSnapshot: result.pricingSnapshot,
+            orderType: 'on_site',
+            tableLabel: dto.tableLabel,
+            paymentStatus: PaymentStatus.PENDING,
+            orderStatus: OrderStatus.PENDING_PAYMENT,
+            notes: dto.notes,
+          },
+        ],
+        { session },
+      );
+      await session.commitTransaction();
+      this.auditLogs.record({
+        actorId: actor.sub,
+        actorEmail: actor.email,
+        actorRole: actor.role,
+        action: 'order.create_on_site',
+        resourceType: 'order',
+        resourceId: String(order._id),
+        resourceLabel: order.orderNumber,
+        metadata: {
+          paymentAmount: (order as any).pricingSnapshot?.paymentAmount,
+          restaurantId: String((order as any).restaurantId),
+          itemCount: (order as any).items?.length,
+          tableLabel: dto.tableLabel,
+        },
+        method: 'POST',
+        path: '/orders/on-site',
+        statusCode: 201,
+      });
+      return order;
+    } catch (error) {
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      await session.endSession();
+    }
   }
 
   async previewFromCart(userId: string, dto: CheckoutFromCartDto) {

@@ -213,6 +213,22 @@ Réconciliation : `driverShareSettledAt` marque une commande livrée dont la par
 - Un succès reçu après expiration re-réserve le stock ; s'il est insuffisant, la commande est marquée `paid_without_stock` (remboursement manuel, aucun crédit restaurant).
 - Une commande `payment_failed` peut être repayée en direct uniquement si le stock est encore disponible : le stock est réservé à nouveau dans la même transaction que la reprise de la commande (`409 INSUFFICIENT_STOCK` sinon).
 
+## Fonctionnalités récentes
+
+### Commandes on-site (commande prise à table par le staff)
+
+- `POST /api/orders/on-site` : commande `orderType: 'on_site'` créée par le personnel (admin/manager/employee) au nom du client de table. Tous les frais sont à zéro (livraison, packaging, plateforme, promo) : `paymentAmount = grandTotal = itemsSubtotal`, réparti à 100 % au restaurant via la répartition v3 existante. Un item avec `onSite: false` est traité comme indisponible (`INSUFFICIENT_STOCK`).
+- Paiement : le staff initie le direct charge DigiKuntz via `POST /api/payments/initiate-direct/:orderId`. Le numéro Mobile Money du **client** est requis (`PAYMENT_PHONE_MISSING` sinon) — pas de fallback sur le téléphone du staff.
+- Avant déploiement : `npm run backfill:menu-channels` (dry-run par défaut, `-- --apply` pour appliquer) — backfill idempotent des champs `onSite`/`onDelivery` sur les MenuItems existants.
+- Détails et alternatives : [`docs/adr/adr-001-commandes-on-site.md`](./docs/adr/adr-001-commandes-on-site.md).
+
+### Chat de table (yChat)
+
+- Endpoints REST (`src/modules/chat/`) : `POST/GET/PATCH /api/chat/positions`, `GET /api/chat/positions/:id/qr`, `GET /api/chat/positions/by-qr/:idQr` (session requise), `POST/GET/DELETE /api/chat/avatars`, `POST/GET /api/chat/messages`.
+- Temps réel socket.io (`chat.gateway.ts`) : client → `'join' { positionId, avatarId? }` ; serveur → `'message:new'`, `'avatar:joined'`, `'avatar:left'`, `'avatar:updated'`, `'join:error'`. Rooms `position:<id>` (groupe) et `position:<id>:avatar:<avatarId>` (messages privés).
+- Durée de vie : messages 10 h, avatars non persistants 12 h (index TTL Mongo + cron cascade `*/10 * * * *` avec lease) ; avatar persistant = champ `expiresAt` absent.
+- Détails et alternatives : [`docs/adr/adr-002-ychat.md`](./docs/adr/adr-002-ychat.md).
+
 ## Notes
 - Payments are wired through a DigiKuntz adapter with a mock initiation response.
 - Webhook endpoint: `POST /api/payments/webhook/digikuntz`
