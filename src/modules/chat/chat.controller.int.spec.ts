@@ -30,9 +30,11 @@ describe('ChatController — intégration (supertest)', () => {
   beforeAll(async () => {
     service = {
       findPositionByQr: jest.fn(),
+      findPositionByQrPublic: jest.fn(),
       findTableById: jest.fn(),
       createAvatar: jest.fn(),
       listAvatars: jest.fn(),
+      listAvatarsByRestaurant: jest.fn(),
       deleteAvatar: jest.fn(),
       createMessage: jest.fn(),
       listMessages: jest.fn(),
@@ -87,6 +89,58 @@ describe('ChatController — intégration (supertest)', () => {
     currentUser = clientUser;
     service.findPositionByQr.mockRejectedValue(new NotFoundException('Position introuvable'));
     await request(app.getHttpServer()).get('/chat/positions/by-qr/AbCdEfGh1234').expect(404);
+  });
+
+  // ------------------------------------------------------------------
+  // Écran d'accueil yChat — résolution PUBLIQUE (aucune session)
+  // ------------------------------------------------------------------
+
+  it('GET /chat/positions/by-qr/:idQr/public : 200 SANS session (route publique)', async () => {
+    service.findPositionByQrPublic.mockResolvedValue({
+      position: { _id: 'p1', label: 'Siège 1' },
+      restaurantId: String(RESTAURANT_ID),
+      restaurant: {
+        _id: String(RESTAURANT_ID),
+        name: 'Chez Mimi',
+        slug: 'chez-mimi',
+        status: 'active',
+        logo: 'logo.png',
+      },
+    });
+
+    // Module SANS override de guard : prouve que la route n'exige aucune session.
+    const moduleRef = await Test.createTestingModule({
+      controllers: [ChatController],
+      providers: [{ provide: ChatService, useValue: service }],
+    }).compile();
+    const publicApp = moduleRef.createNestApplication();
+    await publicApp.init();
+
+    const res = await request(publicApp.getHttpServer())
+      .get('/chat/positions/by-qr/AbCdEfGh1234/public')
+      .expect(200);
+    expect(res.body.restaurant.name).toBe('Chez Mimi');
+    expect(res.body.position.label).toBe('Siège 1');
+    expect(service.findPositionByQrPublic).toHaveBeenCalledWith('AbCdEfGh1234');
+
+    await publicApp.close();
+  });
+
+  it('GET /chat/positions/by-qr/:idQr/public : 404 quand le QR est inconnu/révoqué', async () => {
+    service.findPositionByQrPublic.mockRejectedValue(new NotFoundException('Position introuvable'));
+
+    const moduleRef = await Test.createTestingModule({
+      controllers: [ChatController],
+      providers: [{ provide: ChatService, useValue: service }],
+    }).compile();
+    const publicApp = moduleRef.createNestApplication();
+    await publicApp.init();
+
+    await request(publicApp.getHttpServer())
+      .get('/chat/positions/by-qr/unknown/public')
+      .expect(404);
+
+    await publicApp.close();
   });
 
   it('GET /chat/positions/by-qr/:idQr : 401 sans session', async () => {
@@ -147,12 +201,29 @@ describe('ChatController — intégration (supertest)', () => {
     expect(service.createAvatar).not.toHaveBeenCalled();
   });
 
-  it('GET /chat/avatars : 200 sans tableId (400 géré par le service), param transmis', async () => {
+  it('GET /chat/avatars?tableId= : 200, service appelé avec actor + tableId', async () => {
     currentUser = clientUser;
     service.listAvatars.mockResolvedValue([{ _id: 'a1', pseudo: 'Jean237' }]);
     const res = await request(app.getHttpServer()).get('/chat/avatars?tableId=abc').expect(200);
     expect(service.listAvatars).toHaveBeenCalledWith(clientUser, 'abc');
+    expect(service.listAvatarsByRestaurant).not.toHaveBeenCalled();
     expect(res.body).toHaveLength(1);
+  });
+
+  it('GET /chat/avatars?restaurantId= : 200, service restaurant appelé (bouton « Parcourir »)', async () => {
+    currentUser = clientUser;
+    service.listAvatarsByRestaurant.mockResolvedValue([{ _id: 'a2', pseudo: 'Alice' }]);
+    const res = await request(app.getHttpServer()).get('/chat/avatars?restaurantId=abc').expect(200);
+    expect(service.listAvatarsByRestaurant).toHaveBeenCalledWith(clientUser, 'abc');
+    expect(service.listAvatars).not.toHaveBeenCalled();
+    expect(res.body).toHaveLength(1);
+  });
+
+  it('GET /chat/avatars sans tableId ni restaurantId : 400', async () => {
+    currentUser = clientUser;
+    await request(app.getHttpServer()).get('/chat/avatars').expect(400);
+    expect(service.listAvatars).not.toHaveBeenCalled();
+    expect(service.listAvatarsByRestaurant).not.toHaveBeenCalled();
   });
 
   it('DELETE /chat/avatars/:id : 200, service appelé avec actor + id', async () => {

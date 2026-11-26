@@ -58,6 +58,23 @@ export class ChatRealtimeService {
     this.server?.to(this.room(tableId)).emit('message:new', { message });
   }
 
+  /**
+   * Message privé cross-table : l'expéditeur et le destinataire peuvent être
+   * à des tables différentes (même restaurant). On émet dans la room
+   * d'avatar de l'expéditeur (sa table) ET dans la room d'avatar du
+   * destinataire (sa table).
+   */
+  emitPrivateMessage(fromTableId: string, message: any, toTableId: string): void {
+    const fromAvatarId = message?.fromAvatarId ? String(message.fromAvatarId) : '';
+    const toAvatarId = message?.toAvatarId ? String(message.toAvatarId) : '';
+    if (fromAvatarId) {
+      this.server?.to(this.avatarRoom(fromTableId, fromAvatarId)).emit('message:new', { message });
+    }
+    if (toAvatarId) {
+      this.server?.to(this.avatarRoom(toTableId, toAvatarId)).emit('message:new', { message });
+    }
+  }
+
   emitAvatarJoined(tableId: string, avatar: unknown): void {
     this.server?.to(this.room(tableId)).emit('avatar:joined', { avatar });
   }

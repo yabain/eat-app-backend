@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ChatMessage, ChatMessageSchema } from '../../database/schemas/chat-message.schema';
 import { ChatUser, ChatUserSchema } from '../../database/schemas/chat-user.schema';
+import { Restaurant, RestaurantSchema } from '../../database/schemas/restaurant.schema';
 import { Table, TableSchema } from '../../database/schemas/table.schema';
 import { TablePosition, TablePositionSchema } from '../../database/schemas/table-position.schema';
 import { ChatController } from './chat.controller';
@@ -26,6 +27,8 @@ import { ChatService } from './chat.service';
       { name: TablePosition.name, schema: TablePositionSchema },
       { name: ChatUser.name, schema: ChatUserSchema },
       { name: ChatMessage.name, schema: ChatMessageSchema },
+      // Écran d'accueil yChat : nom + logo du restaurant avant connexion.
+      { name: Restaurant.name, schema: RestaurantSchema },
     ]),
     JwtModule.registerAsync({
       imports: [ConfigModule],

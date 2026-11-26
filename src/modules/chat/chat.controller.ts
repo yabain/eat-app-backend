@@ -1,9 +1,11 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -21,6 +23,7 @@ import {
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { CreateChatAvatarDto } from './dto/create-chat-avatar.dto';
+import { UpdateChatAvatarDto } from './dto/update-chat-avatar.dto';
 import { CreateChatMessageDto } from './dto/create-chat-message.dto';
 import { ChatService } from './chat.service';
 
@@ -38,10 +41,24 @@ export class ChatController {
   // Résolution QR (siège scanné)
   // ------------------------------------------------------------------
 
-  // NOTE : c'est la seule route `positions` restante du chat (pas de
-  // conflit de pattern). Session obligatoire (yChat exige une session),
-  // aucun rôle requis — c'est la route appelée après le scan du QR par un
-  // client.
+  // Écran d'accueil yChat (avant connexion) : résolution PUBLIQUE du QR —
+  // uniquement le restaurant (nom + logo) et le siège scanné. Aucune session
+  // requise : c'est ce qui permet d'afficher « Se connecter pour continuer ».
+  @Get('positions/by-qr/:idQr/public')
+  @ApiOperation({
+    summary:
+      'Résoudre un QR sans session (écran d\'accueil yChat) : restaurant + siège, projection minimale',
+  })
+  @ApiParam({ name: 'idQr', example: 'AbCdEfGh1234' })
+  @ApiOkResponse({ description: 'Restaurant (nom + logo) et siège scanné — 404 si QR inconnu/révoqué' })
+  findByQrPublic(@Param('idQr') idQr: string) {
+    return this.service.findPositionByQrPublic(idQr);
+  }
+
+  // NOTE : c'est la seule route `positions` authentifiée restante du chat
+  // (pas de conflit de pattern). Session obligatoire (yChat exige une
+  // session), aucun rôle requis — c'est la route appelée après le scan du QR
+  // par un client connecté.
   @UseGuards(JwtAuthGuard)
   @Get('positions/by-qr/:idQr')
   @ApiBearerAuth('bearer')
@@ -68,14 +85,29 @@ export class ChatController {
     return this.service.createAvatar(req.user, dto);
   }
 
+  // UN SEUL handler GET /chat/avatars : NestJS route par ordre de déclaration,
+  // deux handlers identiques feraient que seul le premier serait atteint
+  // (le second `?restaurantId=` renverrait alors « tableId invalide »).
+  // Dispatch par paramètre de requête : tableId → table, restaurantId → restaurant.
   @UseGuards(JwtAuthGuard)
   @Get('avatars')
   @ApiBearerAuth('bearer')
-  @ApiOperation({ summary: 'Lister les avatars non expirés d\'une table (toutes positions)' })
-  @ApiQuery({ name: 'tableId', required: true, example: '665d58e63d7bfeb8f7f6172e' })
-  @ApiOkResponse({ description: 'Avatars online/offline de la table' })
-  listAvatars(@Req() req: any, @Query('tableId') tableId: string) {
-    return this.service.listAvatars(req.user, tableId);
+  @ApiOperation({
+    summary:
+      'Lister les avatars non expirés : ?tableId= (avatars de la table, toutes positions) ' +
+      'ou ?restaurantId= (avatars du restaurant, toutes tables — bouton « Parcourir »)',
+  })
+  @ApiQuery({ name: 'tableId', required: false, example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiQuery({ name: 'restaurantId', required: false, example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiOkResponse({ description: 'Avatars online/offline (table ou restaurant)' })
+  listAvatars(
+    @Req() req: any,
+    @Query('tableId') tableId?: string,
+    @Query('restaurantId') restaurantId?: string,
+  ) {
+    if (tableId) return this.service.listAvatars(req.user, tableId);
+    if (restaurantId) return this.service.listAvatarsByRestaurant(req.user, restaurantId);
+    throw new BadRequestException('tableId ou restaurantId requis');
   }
 
   @UseGuards(JwtAuthGuard)
@@ -86,6 +118,16 @@ export class ChatController {
   @ApiOkResponse({ description: 'Avatar supprimé, messages en cascade' })
   deleteAvatar(@Req() req: any, @Param('id') id: string) {
     return this.service.deleteAvatar(req.user, id);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('avatars/:id')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Mettre à jour son avatar (pseudo, sex, photo, socialUrls, isPersistant)' })
+  @ApiParam({ name: 'id', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiOkResponse({ description: 'Avatar mis à jour' })
+  updateAvatar(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateChatAvatarDto) {
+    return this.service.updateAvatar(req.user, id, dto);
   }
 
   // ------------------------------------------------------------------

@@ -60,6 +60,9 @@ function makeService(overrides: Record<string, any> = {}) {
     deleteMany: jest.fn().mockResolvedValue({ deletedCount: 5 }),
     distinct: jest.fn().mockResolvedValue([]),
   };
+  const restaurantModel: any = {
+    findOne: jest.fn().mockResolvedValue(null),
+  };
   const cronLease = { acquire: jest.fn().mockResolvedValue(true) };
   const realtime = new ChatRealtimeService();
   const emitSpies = {
@@ -74,6 +77,7 @@ function makeService(overrides: Record<string, any> = {}) {
     overrides.positionModel || positionModel,
     overrides.avatarModel || avatarModel,
     overrides.messageModel || messageModel,
+    overrides.restaurantModel || restaurantModel,
     realtime,
     overrides.cronLease || cronLease,
   );
@@ -83,6 +87,7 @@ function makeService(overrides: Record<string, any> = {}) {
     positionModel: overrides.positionModel || positionModel,
     avatarModel: overrides.avatarModel || avatarModel,
     messageModel: overrides.messageModel || messageModel,
+    restaurantModel: overrides.restaurantModel || restaurantModel,
     cronLease: overrides.cronLease || cronLease,
     realtime,
     emitSpies,
@@ -98,6 +103,16 @@ describe('ChatService — résolution QR (by-qr)', () => {
     expect(result.position).toEqual(position);
     expect(result.tableId).toBe(String(TABLE_ID));
     expect(result.restaurantId).toBe(String(RESTAURANT_ID));
+    // Nom de la table (titre du chat de groupe côté client).
+    expect(result.tableLabel).toBe('Table 3');
+  });
+
+  it('by-qr : table introuvable → tableLabel null (le titre retombe sur le repli client)', async () => {
+    const { service, positionModel, tableModel } = makeService();
+    positionModel.findOne = jest.fn().mockResolvedValue(position);
+    tableModel.findById = jest.fn().mockResolvedValue(null);
+    const result = await service.findPositionByQr('AbCdEfGh1234');
+    expect(result.tableLabel).toBeNull();
   });
 
   it('by-qr : position inactive → 404 (QR révoqué)', async () => {
@@ -105,6 +120,73 @@ describe('ChatService — résolution QR (by-qr)', () => {
     positionModel.findOne = jest.fn().mockResolvedValue(null);
     await expect(service.findPositionByQr('AbCdEfGh1234')).rejects.toThrow(NotFoundException);
     expect(positionModel.findOne).toHaveBeenCalledWith({ idQr: 'AbCdEfGh1234', isActive: true });
+  });
+
+  // ------------------------------------------------------------------
+  // Résolution PUBLIQUE du QR (écran d'accueil avant connexion)
+  // ------------------------------------------------------------------
+  describe('findPositionByQrPublic', () => {
+    const restaurantDoc = {
+      _id: RESTAURANT_ID,
+      name: 'Chez Mimi',
+      slug: 'chez-mimi',
+      status: 'active',
+      logo: 'logo.png',
+    };
+
+    it('retourne { position: { _id, label }, restaurantId, restaurant } — projection minimale', async () => {
+      const { service, positionModel, restaurantModel } = makeService();
+      positionModel.findOne.mockResolvedValue(position);
+      restaurantModel.findOne.mockResolvedValue(restaurantDoc);
+
+      const result = await service.findPositionByQrPublic('AbCdEfGh1234');
+
+      expect(positionModel.findOne).toHaveBeenCalledWith({ idQr: 'AbCdEfGh1234', isActive: true });
+      expect(restaurantModel.findOne).toHaveBeenCalledWith(
+        { _id: RESTAURANT_ID, status: 'active' },
+        { name: 1, slug: 1, status: 1, logo: 1 },
+      );
+      expect(result.position).toEqual({ _id: String(POSITION_ID), label: 'Siège 1' });
+      expect(result.restaurantId).toBe(String(RESTAURANT_ID));
+      expect(result.restaurant).toEqual({
+        _id: String(RESTAURANT_ID),
+        name: 'Chez Mimi',
+        slug: 'chez-mimi',
+        status: 'active',
+        logo: 'logo.png',
+      });
+      // Aucune donnée interne : ni idQr, ni tableId, ni restaurantId du siège.
+      expect((result.position as any).idQr).toBeUndefined();
+      expect((result.position as any).tableId).toBeUndefined();
+    });
+
+    it('QR inconnu ou révoqué → 404', async () => {
+      const { service, positionModel } = makeService();
+      positionModel.findOne.mockResolvedValue(null);
+
+      await expect(service.findPositionByQrPublic('bad-qr')).rejects.toThrow(NotFoundException);
+    });
+
+    it('restaurant introuvable ou inactif → restaurant null (pas d\'erreur)', async () => {
+      const { service, positionModel, restaurantModel } = makeService();
+      positionModel.findOne.mockResolvedValue(position);
+      restaurantModel.findOne.mockResolvedValue(null);
+
+      const result = await service.findPositionByQrPublic('AbCdEfGh1234');
+
+      expect(result.restaurant).toBeNull();
+      expect(result.restaurantId).toBe(String(RESTAURANT_ID));
+    });
+
+    it('label absent → null (pas de crash)', async () => {
+      const { service, positionModel, restaurantModel } = makeService();
+      positionModel.findOne.mockResolvedValue({ ...position, label: undefined });
+      restaurantModel.findOne.mockResolvedValue(restaurantDoc);
+
+      const result = await service.findPositionByQrPublic('AbCdEfGh1234');
+
+      expect(result.position.label).toBeNull();
+    });
   });
 
   it('findTableById : id invalide → null ; id valide → table', async () => {
@@ -376,9 +458,9 @@ describe('ChatService — messages (par table)', () => {
     expect(emitSpies.messageNew).toHaveBeenCalledWith(String(TABLE_ID), expect.anything());
   });
 
-  it('message privé : toAvatarId résolu (même table)', async () => {
+  it('message privé : toAvatarId résolu (même restaurant)', async () => {
     const { service, avatarModel, messageModel } = makeService();
-    const toAvatar = { _id: new Types.ObjectId(), tableId: TABLE_ID, userId: new Types.ObjectId() };
+    const toAvatar = { _id: new Types.ObjectId(), tableId: TABLE_ID, restaurantId: RESTAURANT_ID, userId: new Types.ObjectId() };
     (avatarModel as any).findById = jest.fn().mockImplementation((id: string) => {
       if (String(id) === String(AVATAR_ID)) return Promise.resolve(fromAvatar);
       return Promise.resolve(toAvatar);
@@ -412,12 +494,13 @@ describe('ChatService — messages (par table)', () => {
     });
     await service.listMessages(manager, String(TABLE_ID), 1, 20);
     const filter = messageModel.find.mock.calls[0][0];
-    expect(filter.tableId).toEqual(TABLE_ID);
+    // Nouveau filtre : $or avec group (tableId + toAvatarId:null) + privés actor (any table)
     expect(filter.$or).toEqual([
-      { toAvatarId: null },
+      { tableId: TABLE_ID, toAvatarId: null },
       { fromAvatarId: AVATAR_ID },
       { toAvatarId: AVATAR_ID },
     ]);
+    expect(filter.tableId).toBeUndefined();
   });
 
   it('listMessages : actor sans avatar sur la table → messages de groupe uniquement', async () => {
@@ -428,9 +511,10 @@ describe('ChatService — messages (par table)', () => {
     });
     await service.listMessages(manager, String(TABLE_ID));
     const filter = messageModel.find.mock.calls[0][0];
-    expect(filter.tableId).toEqual(TABLE_ID);
-    expect(filter.toAvatarId).toBeNull();
-    expect(filter.$or).toBeUndefined();
+    // Sans avatar → group seulement.
+    expect(filter.$or).toEqual([
+      { tableId: TABLE_ID, toAvatarId: null },
+    ]);
   });
 
   it('listMessages : perspective par défaut = avatar le plus récent de l\'actor sur la table', async () => {
@@ -457,8 +541,9 @@ describe('ChatService — messages (par table)', () => {
     });
     await service.listMessages(manager, String(TABLE_ID), 1, 20, String(otherAvatarId));
     const filter = messageModel.find.mock.calls[0][0];
+    // Avec avatarId précis → $or : group (tableId+toAvatarId:null) + leurs privés
     expect(filter.$or).toEqual([
-      { toAvatarId: null },
+      { tableId: TABLE_ID, toAvatarId: null },
       { fromAvatarId: otherAvatarId },
       { toAvatarId: otherAvatarId },
     ]);

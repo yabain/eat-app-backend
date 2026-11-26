@@ -15,9 +15,11 @@ import { UserRole } from '../../common/enums/roles.enum';
 import { ChatMessage, ChatMessageDocument } from '../../database/schemas/chat-message.schema';
 import { CHAT_MESSAGE_TTL_HOURS } from '../../database/schemas/chat-message.schema';
 import { CHAT_AVATAR_TTL_HOURS, ChatUser, ChatUserDocument } from '../../database/schemas/chat-user.schema';
+import { Restaurant, RestaurantDocument } from '../../database/schemas/restaurant.schema';
 import { Table, TableDocument } from '../../database/schemas/table.schema';
 import { TablePosition, TablePositionDocument } from '../../database/schemas/table-position.schema';
 import { CreateChatAvatarDto } from './dto/create-chat-avatar.dto';
+import { UpdateChatAvatarDto } from './dto/update-chat-avatar.dto';
 import { CreateChatMessageDto } from './dto/create-chat-message.dto';
 import { ChatRealtimeService } from './chat-realtime.service';
 
@@ -30,6 +32,7 @@ export class ChatService {
     @InjectModel(TablePosition.name) private readonly positionModel: Model<TablePositionDocument>,
     @InjectModel(ChatUser.name) private readonly avatarModel: Model<ChatUserDocument>,
     @InjectModel(ChatMessage.name) private readonly messageModel: Model<ChatMessageDocument>,
+    @InjectModel(Restaurant.name) private readonly restaurantModel: Model<RestaurantDocument>,
     private readonly realtime: ChatRealtimeService,
     private readonly cronLease: CronLeaseService,
   ) {}
@@ -47,10 +50,53 @@ export class ChatService {
   async findPositionByQr(idQr: string) {
     const position = await this.positionModel.findOne({ idQr, isActive: true });
     if (!position) throw new NotFoundException('Position introuvable');
+    // Nom de la table (affichage : titre du chat de groupe dans la liste et
+    // dans le chat ouvert). Champ d'affichage : projection minimale respectée.
+    const table = await this.tableModel.findById(position.tableId);
     return {
       position,
       tableId: String(position.tableId),
       restaurantId: String(position.restaurantId),
+      tableLabel: table?.label ?? null,
+    };
+  }
+
+  /**
+   * Résolution PUBLIQUE d'un QR (avant authentification) : alimente l'écran
+   * d'accueil yChat (logo + nom du restaurant, siège scanné) pour un visiteur
+   * non connecté. Projection minimale : ni idQr, ni tableId, ni position
+   * complète — uniquement de quoi afficher l'accueil. 404 si le QR est
+   * inconnu ou révoqué (position inactive), même comportement que la
+   * résolution authentifiée.
+   */
+  async findPositionByQrPublic(idQr: string) {
+    const position = await this.positionModel.findOne({ idQr, isActive: true });
+    if (!position) throw new NotFoundException('Position introuvable');
+
+    // Fiche publique du restaurant : uniquement les champs d'affichage.
+    // Un restaurant inactif n'est pas exposé (restaurant: null côté client).
+    const restaurant = await this.restaurantModel.findOne(
+      { _id: position.restaurantId, status: 'active' },
+      { name: 1, slug: 1, status: 1, logo: 1 },
+    );
+
+    return {
+      position: {
+        _id: String(position._id),
+        label: position.label ?? null,
+      },
+      restaurantId: String(position.restaurantId),
+      restaurant: restaurant
+        ? {
+            _id: String(restaurant._id),
+            name: restaurant.name,
+            slug: restaurant.slug,
+            status: restaurant.status,
+            // Champ omis (plutôt que null) quand absent — la sérialisation
+            // JSON le supprime et le type frontend reste `logo?: string`.
+            logo: restaurant.logo || undefined,
+          }
+        : null,
     };
   }
 
@@ -131,6 +177,24 @@ export class ChatService {
   }
 
   /**
+   * Avatars non expirés d'un RESTAURANT (toutes tables confondues) —
+   * utilisé pour le bouton « Parcourir » (liste complète des avatars
+   * connectés du restaurant). Pas de validation de table (scope restaurant).
+   * Filtre TTL/persistant inchangé.
+   */
+  async listAvatarsByRestaurant(actor: JwtPayload, restaurantId: string) {
+    if (!Types.ObjectId.isValid(restaurantId)) throw new BadRequestException('restaurantId invalide');
+    const now = new Date();
+    const avatars = await this.avatarModel
+      .find({
+        restaurantId: new Types.ObjectId(restaurantId),
+        $or: [{ isPersistant: true }, { expiresAt: { $gt: now } }],
+      })
+      .sort({ createdAt: -1 });
+    return avatars.map((avatar) => this.projectAvatar(avatar));
+  }
+
+  /**
    * Avatar par id — utilisé par le gateway pour valider l'association
    * socket ⇄ avatar au join (existence, appartenance à la table,
    * propriété par l'utilisateur du token). Jamais exposé tel quel : la
@@ -160,6 +224,55 @@ export class ChatService {
     return { deleted: true, messagesDeleted: messages.deletedCount || 0 };
   }
 
+  /**
+   * Mettre à jour un avatar existant (session requise, owner ou admin).
+   * Met à jour EN PLACE les champs fournis uniquement (partial update).
+   * - `isPersistant` : si fourni, bascule ; sinon conserve la valeur actuelle.
+   * - `expiresAt` : N'EST PAS recalculé sauf si `isPersistant` change explicitement.
+   * - `socialUrls` : merge si fourni, conserve l'existant sinon.
+   * Diffuse `avatar:updated` via Socket.io.
+   */
+  async updateAvatar(actor: JwtPayload, id: string, dto: UpdateChatAvatarDto) {
+    const avatar = await this.avatarModel.findById(id);
+    if (!avatar) throw new NotFoundException('Avatar introuvable');
+
+    // Propriété : l'avatar appartient à l'actor (ou l'actor est admin).
+    const isOwner = avatar.userId && String(avatar.userId) === actor.sub;
+    if (!isOwner && actor.role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Seul le propriétaire de l\'avatar peut le modifier');
+    }
+
+    // Détermine si isPersistant est explicitement fourni.
+    const isPersistantProvided = dto.isPersistant !== undefined;
+    const newIsPersistant = isPersistantProvided ? dto.isPersistant : avatar.isPersistant;
+
+    // Construction de l'objet de mise à jour partiel.
+    const update: any = {};
+
+    if (dto.pseudo !== undefined) update.pseudo = dto.pseudo;
+    if (dto.sex !== undefined) update.sex = dto.sex;
+    if (dto.photoUrl !== undefined) update.photoUrl = dto.photoUrl;
+    if (dto.socialUrls !== undefined) update.socialUrls = dto.socialUrls;
+    if (isPersistantProvided) update.isPersistant = newIsPersistant;
+
+    // TTL : on NE recalcule expiresAt QUE si isPersistant change explicitement.
+    // Sinon on garde l'ancien expiresAt (inchangé).
+    if (isPersistantProvided) {
+      if (newIsPersistant) {
+        update.$unset = { expiresAt: 1 }; // persistant → pas d'expiration
+      } else {
+        update.expiresAt = new Date(Date.now() + CHAT_AVATAR_TTL_HOURS * 3600 * 1000); // non persistant → TTL 12h
+      }
+    }
+    // Si isPersistant N'EST PAS fourni → expiresAt inchangé (ni $set, ni $unset).
+
+    const updated = await this.avatarModel.findByIdAndUpdate(id, update, { new: true });
+    if (!updated) throw new NotFoundException('Avatar introuvable après mise à jour');
+
+    this.realtime.emitAvatarUpdated(String(updated.tableId), this.projectAvatar(updated));
+    return this.projectAvatar(updated);
+  }
+
   // ------------------------------------------------------------------
   // Messages
   // ------------------------------------------------------------------
@@ -182,8 +295,9 @@ export class ChatService {
     if (dto.toAvatarId) {
       const toAvatar = await this.avatarModel.findById(dto.toAvatarId);
       if (!toAvatar) throw new NotFoundException('Avatar destinataire introuvable');
-      if (String(toAvatar.tableId) !== String(fromAvatar.tableId)) {
-        throw new BadRequestException('L\'avatar destinataire n\'appartient pas à la même table');
+      // DMs autorisés au niveau RESTAURANT (pas seulement même table).
+      if (String(toAvatar.restaurantId) !== String(fromAvatar.restaurantId)) {
+        throw new BadRequestException('L\'avatar destinataire n\'appartient pas au même restaurant');
       }
       toAvatarId = toAvatar._id;
     }
@@ -197,7 +311,18 @@ export class ChatService {
       content: dto.content,
       expiresAt: new Date(Date.now() + CHAT_MESSAGE_TTL_HOURS * 3600 * 1000),
     });
-    this.realtime.emitMessageNew(tableId, message);
+    // Émission temps réel : room de la table de l'expéditeur pour le groupe,
+    // rooms des deux avatars (chacun dans sa table) pour un privé.
+    if (message.toAvatarId) {
+      const fromTableId = String(fromAvatar.tableId);
+      const toAvatar = await this.avatarModel.findById(message.toAvatarId);
+      if (toAvatar) {
+        const toTableId = String(toAvatar.tableId);
+        this.realtime.emitPrivateMessage(fromTableId, message, toTableId);
+      }
+    } else {
+      this.realtime.emitMessageNew(tableId, message);
+    }
     return message;
   }
 
@@ -236,16 +361,20 @@ export class ChatService {
       actorAvatarId = avatar?._id ?? null;
     }
 
+    // Group messages of this table (toAvatarId null) PLUS all private messages
+    // of the actor (sender or recipient, any table). On combine avec un OR ;
+    // l'acteur sans avatar sur la table ne voit que le groupe (pas les privés
+    // d'autrui).
+    const orConditions: any[] = [{ tableId: new Types.ObjectId(tableId), toAvatarId: null }];
+    if (actorAvatarId) {
+      orConditions.push({ fromAvatarId: actorAvatarId });
+      orConditions.push({ toAvatarId: actorAvatarId });
+    }
     const filter: any = {
-      tableId: new Types.ObjectId(tableId),
+      $or: orConditions,
       // Double protection avec l'index TTL : les messages expirés ne sont
       // jamais servis même si le TTL Mongo traîne.
       expiresAt: { $gt: new Date() },
-      // Visibilité : groupe = public ; privé = uniquement les avatars
-      // concernés (jamais les privés d'autrui).
-      ...(actorAvatarId
-        ? { $or: [{ toAvatarId: null }, { fromAvatarId: actorAvatarId }, { toAvatarId: actorAvatarId }] }
-        : { toAvatarId: null }),
     };
     const [data, total] = await Promise.all([
       this.messageModel.find(filter).sort({ createdAt: -1 }).skip(pagination.skip).limit(pagination.limit),
