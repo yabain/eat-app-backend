@@ -225,6 +225,62 @@ export class ChatService {
   }
 
   /**
+   * Supprime TOUTE une conversation privée (les deux sens) entre l'avatar de
+   * l'actor et un avatar destinataire — bouton « Mettre le feu aux poudres ».
+   *
+   * Sécurité : l'avatar émetteur doit appartenir à l'actor (même règle que
+   * `createMessage`), et le destinataire doit être du même restaurant
+   * (mêmes règles que l'envoi d'un DM). Les messages de groupe ne sont
+   * JAMAIS touchés : le filtre ne cible que les paires (from, to).
+   *
+   * Temps réel : `conversation:deleted` est émis aux deux rooms d'avatar
+   * pour que l'autre participant efface aussi le fil immédiatement.
+   */
+  async deleteConversation(actor: JwtPayload, avatarId: string, targetAvatarId: string) {
+    if (!Types.ObjectId.isValid(avatarId) || !Types.ObjectId.isValid(targetAvatarId)) {
+      throw new BadRequestException('Identifiants invalides');
+    }
+    if (String(avatarId) === String(targetAvatarId)) {
+      throw new BadRequestException('Conversation invalide');
+    }
+
+    const [avatar, target] = await Promise.all([
+      this.avatarModel.findById(avatarId),
+      this.avatarModel.findById(targetAvatarId),
+    ]);
+    if (!avatar) throw new NotFoundException('Avatar introuvable');
+    if (!target) throw new NotFoundException('Avatar destinataire introuvable');
+
+    // Propriété : l'avatar doit appartenir à l'actor (un avatar non lié à un
+    // compte — userId null — ne peut pas être piloté via cette route).
+    if (!avatar.userId || String(avatar.userId) !== actor.sub) {
+      throw new ForbiddenException('Cet avatar ne vous appartient pas');
+    }
+    if (String(target.restaurantId) !== String(avatar.restaurantId)) {
+      throw new BadRequestException('L\'avatar destinataire n\'appartient pas au même restaurant');
+    }
+
+    // Filtre strictement privé : (moi → lui) OU (lui → moi). Aucun message de
+    // groupe (toAvatarId null) ne correspond.
+    const deleted = await this.messageModel.deleteMany({
+      restaurantId: avatar.restaurantId,
+      $or: [
+        { fromAvatarId: avatar._id, toAvatarId: target._id },
+        { fromAvatarId: target._id, toAvatarId: avatar._id },
+      ],
+    });
+
+    this.realtime.emitConversationDeleted(
+      String(avatar.tableId),
+      String(avatar._id),
+      String(target.tableId),
+      String(target._id),
+    );
+
+    return { deleted: true, messagesDeleted: deleted.deletedCount || 0 };
+  }
+
+  /**
    * Mettre à jour un avatar existant (session requise, owner ou admin).
    * Met à jour EN PLACE les champs fournis uniquement (partial update).
    * - `isPersistant` : si fourni, bascule ; sinon conserve la valeur actuelle.

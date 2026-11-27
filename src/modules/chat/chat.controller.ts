@@ -120,6 +120,29 @@ export class ChatController {
     return this.service.deleteAvatar(req.user, id);
   }
 
+  /**
+   * Supprimer toute une conversation PRIVÉE (les deux sens) entre son avatar
+   * et un destinataire — « Mettre le feu aux poudres ». Ne touche jamais aux
+   * messages de groupe ni aux autres conversations.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Delete('conversations/:avatarId/:targetAvatarId')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({
+    summary:
+      'Supprimer une conversation privée (son avatar ⇄ destinataire) : messages des deux sens, socket conversation:deleted',
+  })
+  @ApiParam({ name: 'avatarId', example: '665d58e63d7bfeb8f7f6172e' })
+  @ApiParam({ name: 'targetAvatarId', example: '665d58e63d7bfeb8f7f6172f' })
+  @ApiOkResponse({ description: 'Conversation supprimée ({ deleted, messagesDeleted })' })
+  deleteConversation(
+    @Req() req: any,
+    @Param('avatarId') avatarId: string,
+    @Param('targetAvatarId') targetAvatarId: string,
+  ) {
+    return this.service.deleteConversation(req.user, avatarId, targetAvatarId);
+  }
+
   @UseGuards(JwtAuthGuard)
   @Patch('avatars/:id')
   @ApiBearerAuth('bearer')

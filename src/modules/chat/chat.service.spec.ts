@@ -388,6 +388,88 @@ describe('ChatService — avatars', () => {
     await expect(service.deleteAvatar(manager, String(AVATAR_ID))).rejects.toThrow(ForbiddenException);
     await expect(service.deleteAvatar({ ...manager, role: UserRole.ADMIN }, String(AVATAR_ID))).resolves.toBeTruthy();
   });
+
+  it('deleteConversation : propriétaire → messages des DEUX sens + conversation:deleted', async () => {
+    const { service, avatarModel, messageModel, realtime } = makeService();
+    const TARGET_ID = new Types.ObjectId();
+    const TARGET_TABLE_ID = new Types.ObjectId();
+    (avatarModel as any).findById = jest
+      .fn()
+      .mockResolvedValueOnce({
+        _id: AVATAR_ID,
+        restaurantId: RESTAURANT_ID,
+        tableId: TABLE_ID,
+        userId: USER_ID,
+      })
+      .mockResolvedValueOnce({
+        _id: TARGET_ID,
+        restaurantId: RESTAURANT_ID,
+        tableId: TARGET_TABLE_ID,
+      });
+    const emit = jest.spyOn(realtime, 'emitConversationDeleted');
+
+    const result = await service.deleteConversation(manager, String(AVATAR_ID), String(TARGET_ID));
+
+    expect(result).toEqual({ deleted: true, messagesDeleted: 5 });
+    // Filtre strictement privé : aucune fuite vers les messages de groupe.
+    expect(messageModel.deleteMany).toHaveBeenCalledWith({
+      restaurantId: RESTAURANT_ID,
+      $or: [
+        { fromAvatarId: AVATAR_ID, toAvatarId: TARGET_ID },
+        { fromAvatarId: TARGET_ID, toAvatarId: AVATAR_ID },
+      ],
+    });
+    expect(emit).toHaveBeenCalledWith(
+      String(TABLE_ID),
+      String(AVATAR_ID),
+      String(TARGET_TABLE_ID),
+      String(TARGET_ID),
+    );
+  });
+
+  it('deleteConversation : avatar d\'un autre utilisateur → 403', async () => {
+    const { service, avatarModel } = makeService();
+    const TARGET_ID = new Types.ObjectId();
+    (avatarModel as any).findById = jest
+      .fn()
+      .mockResolvedValueOnce({
+        _id: AVATAR_ID,
+        restaurantId: RESTAURANT_ID,
+        tableId: TABLE_ID,
+        userId: new Types.ObjectId(),
+      })
+      .mockResolvedValueOnce({
+        _id: TARGET_ID,
+        restaurantId: RESTAURANT_ID,
+        tableId: TABLE_ID,
+      });
+
+    await expect(
+      service.deleteConversation(manager, String(AVATAR_ID), String(TARGET_ID)),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('deleteConversation : destinataire d\'un autre restaurant → 400', async () => {
+    const { service, avatarModel } = makeService();
+    const TARGET_ID = new Types.ObjectId();
+    (avatarModel as any).findById = jest
+      .fn()
+      .mockResolvedValueOnce({
+        _id: AVATAR_ID,
+        restaurantId: RESTAURANT_ID,
+        tableId: TABLE_ID,
+        userId: USER_ID,
+      })
+      .mockResolvedValueOnce({
+        _id: TARGET_ID,
+        restaurantId: new Types.ObjectId(),
+        tableId: TABLE_ID,
+      });
+
+    await expect(
+      service.deleteConversation(manager, String(AVATAR_ID), String(TARGET_ID)),
+    ).rejects.toThrow(BadRequestException);
+  });
 });
 
 describe('ChatService — messages (par table)', () => {

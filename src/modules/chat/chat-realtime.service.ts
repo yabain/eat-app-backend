@@ -22,6 +22,10 @@ import { Server } from 'socket.io';
  * - 'table:deactivated' { tableId } — émis à la room 'table:<tableId>' lors du
  *   PATCH /tables/:id { isActive: false } ; les clients yChat se déconnectent
  *   + redirigent (même comportement que table:removed).
+ * - 'conversation:deleted' { avatarIds } — émis aux DEUX rooms d'avatar
+ *   concernées par une conversation privée supprimée (DELETE
+ *   /chat/conversations/:avatarId/:targetAvatarId). Les clients effacent le
+ *   fil local sans attendre un rechargement.
  */
 @Injectable()
 export class ChatRealtimeService {
@@ -85,6 +89,22 @@ export class ChatRealtimeService {
 
   emitAvatarUpdated(tableId: string, avatar: unknown): void {
     this.server?.to(this.room(tableId)).emit('avatar:updated', { avatar });
+  }
+
+  /**
+   * Conversation privée supprimée : on prévient les DEUX participants via
+   * leur room d'avatar (chacun peut être à une table différente).
+   * Payload minimal : les ids des deux avatars concernés.
+   */
+  emitConversationDeleted(
+    fromTableId: string,
+    fromAvatarId: string,
+    toTableId: string,
+    toAvatarId: string,
+  ): void {
+    const payload = { avatarIds: [fromAvatarId, toAvatarId] };
+    this.server?.to(this.avatarRoom(fromTableId, fromAvatarId)).emit('conversation:deleted', payload);
+    this.server?.to(this.avatarRoom(toTableId, toAvatarId)).emit('conversation:deleted', payload);
   }
 
   emitTableRemoved(tableId: string): void {
